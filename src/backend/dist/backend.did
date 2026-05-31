@@ -1,0 +1,879 @@
+type http_request_result = 
+ record {
+   body: blob;
+   headers: vec http_header;
+   status: nat;
+ };
+type http_header = 
+ record {
+   name: text;
+   value: text;
+ };
+type _ImmutableObjectStorageRefillResult = 
+ record {
+   success: opt bool;
+   topped_up_amount: opt nat;
+ };
+type _ImmutableObjectStorageRefillInformation = record {
+                                                  proposed_top_up_amount:
+                                                   opt nat;};
+type _ImmutableObjectStorageCreateCertificateResult = 
+ record {
+   blob_hash: text;
+   method: text;
+ };
+type UserRole__1 = 
+ variant {
+   admin;
+   guest;
+   user;
+ };
+type UserRole = 
+ variant {
+   admin;
+   businessApplicant;
+   financier;
+ };
+type UserId = principal;
+type UploadStatus = 
+ variant {
+   notUploaded;
+   uploaded;
+ };
+type TransformationOutput = 
+ record {
+   body: blob;
+   headers: vec http_header;
+   status: nat;
+ };
+type TransformationInput = 
+ record {
+   context: blob;
+   response: http_request_result;
+ };
+type TransactionSummary = 
+ record {
+   income: nat;
+   months: nat;
+   totalCredits: nat;
+   totalDebits: nat;
+ };
+type Timestamp = int;
+type TawthiqRecord = 
+ record {
+   completedAt: opt Timestamp;
+   creditReadinessVerdict: CreditReadinessVerdict;
+   inconsistencyFlags: vec InconsistencyFlag;
+   inconsistencyStatus: variant {
+                          Clean;
+                          Flagged;
+                          Pending;
+                        };
+   narrativeSummary: text;
+   shariaFlags: vec ShariaFlag;
+   shariaScreeningNotes: text;
+   shariaScreeningStatus: variant {
+                            Failed;
+                            Passed;
+                            Pending;
+                          };
+ };
+type TawthiqOverviewStats = 
+ record {
+   conditionalCount: nat;
+   notReadyCount: nat;
+   passedCount: nat;
+   pendingCount: nat;
+   totalProcessed: nat;
+ };
+type TawthiqAppeal = 
+ record {
+   adminNote: opt text;
+   adminPrincipal: opt principal;
+   appealText: text;
+   businessId: UserId;
+   documentName: opt text;
+   documentUrl: opt text;
+   flagId: text;
+   id: text;
+   reviewedAt: opt Timestamp;
+   status: AppealStatus;
+   submittedAt: Timestamp;
+ };
+type ShortlistEntry = 
+ record {
+   addedAt: int;
+   businessId: principal;
+ };
+type ShariaFlag = 
+ record {
+   category: text;
+   indicator: text;
+   severity: variant {
+               major;
+               minor;
+             };
+ };
+type ScoringRecord = 
+ record {
+   financingReadinessScore: nat;
+   halalComplianceScore: nat;
+   riskLevel: RiskLevel;
+   scoredAt: Timestamp;
+   scoringNotes: text;
+ };
+type RiskLevel__1 = 
+ variant {
+   high;
+   low;
+   medium;
+   pending;
+ };
+type RiskLevel = 
+ variant {
+   High;
+   Low;
+   Medium;
+ };
+type Result_8 = 
+ variant {
+   err: text;
+   ok: record {
+         items: vec IndividualSummary;
+         total: nat;
+       };
+ };
+type Result_7 = 
+ variant {
+   err: text;
+   ok: record {
+         items: vec AccountClosureRequest;
+         total: nat;
+       };
+ };
+type Result_6 = 
+ variant {
+   err: text;
+   ok: AdminAnalytics;
+ };
+type Result_5 = 
+ variant {
+   err: text;
+   ok: IndividualProfile;
+ };
+type Result_4 = 
+ variant {
+   err: text;
+   ok: record {
+         items: vec NotificationRecord;
+         total: nat;
+       };
+ };
+type Result_3 = 
+ variant {
+   err: text;
+   ok: nat;
+ };
+type Result_2 = 
+ variant {
+   err: text;
+   ok: record {
+         mizanDone: bool;
+         status: RegistrationStatus;
+         tawthiqDone: bool;
+       };
+ };
+type Result_1 = 
+ variant {
+   err: text;
+   ok: text;
+ };
+type Result = 
+ variant {
+   err: text;
+   ok;
+ };
+type RegistrationStatus = 
+ variant {
+   approved;
+   financingReady;
+   kycInProgress;
+   pending;
+   rejected;
+   underReview;
+ };
+type ProprietorRecord = 
+ record {
+   bvn: text;
+   nin: text;
+   proprietorName: text;
+ };
+type PreferredInstrument = 
+ variant {
+   ijarah;
+   istisna;
+   mudarabah;
+   murabaha;
+   musharakah;
+   other;
+   salam;
+ };
+type Page = 
+ record {
+   items: vec ApplicantSummary;
+   page: nat;
+   pageSize: nat;
+   total: nat;
+ };
+type NotificationRecord = 
+ record {
+   message: text;
+   recipientPhone: text;
+   sentAt: Timestamp;
+   statusChange: text;
+   success: bool;
+ };
+type MizanStage = 
+ variant {
+   full;
+   preliminary;
+ };
+type MizanRecord = 
+ record {
+   borderlineReasons: vec text;
+   computedAt: Timestamp;
+   debtBehaviorScore: nat;
+   halalComplianceScore: nat;
+   incomeStabilityScore: nat;
+   isBorderline: bool;
+   narrativeSummary: text;
+   overallReadinessScore: nat;
+   repaymentPatternScore: nat;
+   revenueTrendScore: nat;
+   riskClassification: RiskLevel;
+   stage: MizanStage;
+ };
+type MaskedCredentials = 
+ record {
+   monoSecretKey: text;
+   openAiApiKey: text;
+   twilioAccountSid: text;
+   twilioAuthToken: text;
+   twilioWhatsappFrom: text;
+ };
+type KycStatus = 
+ variant {
+   Failed;
+   InProgress;
+   Pending;
+   Verified;
+ };
+type KycCheckRecord = 
+ record {
+   bvnVerified: bool;
+   cacVerified: bool;
+   creditScore: nat;
+   kycStatus: KycStatus;
+   ninVerified: bool;
+   tinVerified: bool;
+   verifiedAt: opt Timestamp;
+   watchlistClean: bool;
+   watchlistParseError: bool;
+ };
+type KashifScoringConfig = 
+ record {
+   defaultScore: nat;
+   instrumentWeights: vec record {
+                            text;
+                            nat;
+                          };
+   riskKeywords: vec record {
+                       text;
+                       nat;
+                     };
+ };
+type KashifReportLog = 
+ record {
+   businessId: principal;
+   generatedAt: int;
+   lastViewedAt: opt int;
+   viewCount: nat;
+ };
+type InviteLinkRecord = 
+ record {
+   code: text;
+   createdAt: int;
+   expiresAt: int;
+   status: text;
+ };
+type InstitutionDetails = 
+ record {
+   licenseNumber: text;
+   preferredInstruments: vec PreferredInstrument;
+   riskAppetite: text;
+   ticketSizeMax: nat;
+   ticketSizeMin: nat;
+ };
+type IndividualTawthiqRecord = 
+ record {
+   bvnVerified: bool;
+   completedAt: opt Timestamp;
+   creditReadiness: variant {
+                      conditionalReady;
+                      notReady;
+                      ready;
+                    };
+   incomeAnalysis: text;
+   narrativeSummary: text;
+   ninVerified: bool;
+   shariaComplianceScore: nat;
+   shariaFlags: vec text;
+   watchlistClean: bool;
+ };
+type IndividualSummary = 
+ record {
+   amountSought: nat;
+   createdAt: Timestamp;
+   financingPurpose: FinancingPurpose;
+   fullName: text;
+   id: UserId;
+   registrationStatus: RegistrationStatus;
+   riskLevel: RiskLevel__1;
+ };
+type IndividualProfile = 
+ record {
+   accountClosureRequested: bool;
+   accountClosureRequestedAt: opt Timestamp;
+   address: text;
+   amountSought: nat;
+   bankLinkStatus: BankLinkStatus;
+   bvn: text;
+   createdAt: Timestamp;
+   dateOfBirth: text;
+   employerName: opt text;
+   employmentStatus: EmploymentStatus;
+   financingPurpose: FinancingPurpose;
+   financingPurposeOther: opt text;
+   fullName: text;
+   id: UserId;
+   incomeSource: IncomeSource;
+   kycRecord: opt KycCheckRecord;
+   mizanRecord: opt IndividualMizanRecord;
+   monthlyIncome: nat;
+   nin: text;
+   occupation: text;
+   preferredInstrument: PreferredInstrument;
+   registrationStatus: RegistrationStatus;
+   tawthiqRecord: opt IndividualTawthiqRecord;
+   termsAcceptedAt: opt Timestamp;
+   updatedAt: Timestamp;
+ };
+type IndividualMizanRecord = 
+ record {
+   borderlineFlag: bool;
+   completedAt: opt Timestamp;
+   debtBehaviorScore: nat;
+   incomeStabilityScore: nat;
+   narrativeSummary: text;
+   overallScore: nat;
+   repaymentCapacityScore: nat;
+   riskLevel: RiskLevel__1;
+   stage: variant {
+            full;
+            preliminary;
+          };
+ };
+type IndividualDetails = 
+ record {
+   bvn: text;
+   fullName: text;
+   investmentCapacity: nat;
+   nin: text;
+   occupation: text;
+   preferredInstruments: vec PreferredInstrument;
+   riskAppetite: text;
+ };
+type InconsistencyFlag = 
+ record {
+   declaredValue: text;
+   field: text;
+   verifiedValue: text;
+ };
+type IncomeSource = 
+ variant {
+   business;
+   employment;
+   other;
+   selfEmployment;
+ };
+type HalalComplianceStatus = 
+ variant {
+   compliant;
+   flagged;
+   pending;
+ };
+type GroupDetails = 
+ record {
+   combinedInvestmentCapacity: nat;
+   groupName: text;
+   leadContactBvn: text;
+   leadContactName: text;
+   leadContactNin: text;
+   legalBasis: text;
+   numberOfMembers: nat;
+   preferredInstruments: vec PreferredInstrument;
+   riskAppetite: text;
+ };
+type FinancingPurpose = 
+ variant {
+   education;
+   homePurchase;
+   medical;
+   other;
+   startupCapital;
+   vehicle;
+ };
+type FinancierType = 
+ variant {
+   group;
+   individual;
+   institution;
+ };
+type FinancierStatus = 
+ variant {
+   Active;
+   Inactive;
+   PendingReview;
+ };
+type FinancierProfile = 
+ record {
+   areasOfFinancing: vec text;
+   contactPerson: text;
+   createdAt: Timestamp;
+   email: text;
+   financierStatus: FinancierStatus;
+   financierType: opt FinancierType;
+   groupDetails: opt GroupDetails;
+   individualDetails: opt IndividualDetails;
+   institutionDetails: opt InstitutionDetails;
+   institutionName: text;
+   licenseNumber: text;
+   phone: text;
+   registrationStatus: RegistrationStatus;
+   userId: UserId;
+ };
+type FinancierPage = 
+ record {
+   items: vec FinancierProfile;
+   page: nat;
+   pageSize: nat;
+   total: nat;
+ };
+type ExternalBlob = blob;
+type EmploymentStatus = 
+ variant {
+   employed;
+   selfEmployed;
+   student;
+   unemployed;
+ };
+type DocumentType = 
+ variant {
+   bankStatement;
+   cacCertificate;
+   governmentId;
+ };
+type DocumentRecord = 
+ record {
+   docType: DocumentType;
+   storageRef: opt ExternalBlob;
+   uploadStatus: UploadStatus;
+   uploadedAt: opt Timestamp;
+   userId: UserId;
+ };
+type DirectorRecord = 
+ record {
+   bvn: text;
+   directorName: text;
+   nationality: text;
+   nin: text;
+   ownershipPercentage: float64;
+ };
+type DealReport = 
+ record {
+   applicantType: ApplicantType;
+   compatibilityScore: nat;
+   creditReadiness: text;
+   executiveSummary: text;
+   financialHighlights: text;
+   financingRecommendation: text;
+   generatedAt: int;
+   mizanVersion: int;
+   riskBreakdown: text;
+   shariahComplianceStatus: text;
+   suggestedFinancingStructure: text;
+   tawthiqVersion: int;
+ };
+type CreditReadinessVerdict = 
+ variant {
+   conditionalReady;
+   notReady;
+   ready;
+ };
+type CredentialsSettings = 
+ record {
+   monoSecretKey: text;
+   openAiApiKey: text;
+   twilioAccountSid: text;
+   twilioAuthToken: text;
+   twilioWhatsappFrom: text;
+ };
+type CompatibilityResult = 
+ record {
+   applicantType: ApplicantType;
+   businessCategory: text;
+   businessId: principal;
+   compatibilityScore: nat;
+   displayName: text;
+   financingTypes: vec text;
+   halalComplianceScore: nat;
+   riskLevel: RiskLevel;
+ };
+type BusinessTypeEnum = 
+ variant {
+   businessName;
+   llc;
+ };
+type BusinessProfileUpdate = 
+ record {
+   address: opt text;
+   businessName: opt text;
+   contactPerson: opt text;
+   phone: opt text;
+ };
+type BusinessProfile = 
+ record {
+   address: text;
+   annualRevenue: nat;
+   bankLinkRecord: BankLinkRecord;
+   businessDescription: opt text;
+   businessName: text;
+   businessType: text;
+   businessTypeEnum: opt BusinessTypeEnum;
+   cacNumber: text;
+   contactPerson: text;
+   createdAt: Timestamp;
+   directorsList: opt vec DirectorRecord;
+   financingAmountSought: opt nat;
+   financingReady: bool;
+   financingReadyScore: nat;
+   halalComplianceStatus: HalalComplianceStatus;
+   kycRecord: KycCheckRecord;
+   mizanDivergenceAlert: bool;
+   mizanRecord: opt MizanRecord;
+   phoneNumber: text;
+   preferredInstrument: opt text;
+   preliminaryMizanRecord: opt MizanRecord;
+   proprietorDetails: opt ProprietorRecord;
+   purposeOfFinancing: opt text;
+   registrationStatus: RegistrationStatus;
+   riskLevel: RiskLevel__1;
+   scoringRecord: ScoringRecord;
+   tawthiqRecord: opt TawthiqRecord;
+   userId: UserId;
+   yearOfIncorporation: opt text;
+ };
+type BusinessPage = 
+ record {
+   items: vec BusinessProfile;
+   page: nat;
+   pageSize: nat;
+   total: nat;
+ };
+type BankLinkStatus = 
+ variant {
+   LinkFailed: text;
+   Linked;
+   NotLinked;
+ };
+type BankLinkRecord = 
+ record {
+   accountId: opt text;
+   balance: opt nat;
+   currency: opt text;
+   institutionName: opt text;
+   linkedAt: opt Timestamp;
+   status: BankLinkStatus;
+   transactionSummary: opt TransactionSummary;
+ };
+type AuditPage = 
+ record {
+   entries: vec AuditEntry;
+   page: nat;
+   total: nat;
+ };
+type AuditEntry = 
+ record {
+   action: text;
+   changedBy: text;
+   entityId: text;
+   entityType: text;
+   id: text;
+   newValue: opt text;
+   oldValue: opt text;
+   reason: opt text;
+   timestamp: Timestamp;
+ };
+type ApplicantType = 
+ variant {
+   business;
+   individual;
+ };
+type ApplicantSummary = 
+ record {
+   displayName: text;
+   financingReady: bool;
+   financingReadyScore: nat;
+   halalComplianceStatus: HalalComplianceStatus;
+   riskLevel: RiskLevel__1;
+   role: UserRole;
+   userId: UserId;
+ };
+type AppealStatus = 
+ variant {
+   accepted;
+   pending;
+   rejected;
+ };
+type AdminAnalytics = 
+ record {
+   activeFinancierCount: nat;
+   averageMizanScore: nat;
+   closedDealsCount: nat;
+   financingReadyCount: nat;
+   pendingReviewCount: nat;
+   tawthiqConditionalCount: nat;
+   tawthiqFailCount: nat;
+   tawthiqPassCount: nat;
+   totalBusinesses: nat;
+   totalFinanciers: nat;
+   totalIndividuals: nat;
+ };
+type AccountClosureRequest = 
+ record {
+   adminNote: opt text;
+   applicantType: variant {
+                    business;
+                    financier;
+                    individual;
+                  };
+   principalId: UserId;
+   processedAt: opt Timestamp;
+   requestId: text;
+   requestedAt: Timestamp;
+   status: variant {
+             approved;
+             pending;
+             rejected;
+           };
+ };
+service : {
+  _immutableObjectStorageBlobsAreLive: (hashes: vec blob) -> (vec bool) query;
+  _immutableObjectStorageBlobsToDelete: () -> (vec blob) query;
+  _immutableObjectStorageConfirmBlobDeletion: (blobs: vec blob) -> ();
+  _immutableObjectStorageCreateCertificate: (blobHash: text) ->
+   (_ImmutableObjectStorageCreateCertificateResult);
+  _immutableObjectStorageRefillCashier: (refillInformation:
+   opt _ImmutableObjectStorageRefillInformation) ->
+   (_ImmutableObjectStorageRefillResult);
+  _immutableObjectStorageUpdateGatewayPrincipals: () -> ();
+  _initializeAccessControl: () -> ();
+  adminChangeIndividualStatus: (id: UserId, status: RegistrationStatus) ->
+   (Result);
+  adminGetBusiness: (userId: principal) -> (opt BusinessProfile);
+  adminGetDocumentsForUser: (userId: principal) -> (vec DocumentRecord);
+  adminGetIndividual: (id: UserId) -> (Result_5);
+  adminGetKashifLogs: (page: nat, pageSize: nat) ->
+   (record {
+      items: vec KashifReportLog;
+      total: nat;
+    });
+  adminListBusinesses: (page: nat, pageSize: nat) -> (BusinessPage);
+  adminListFinanciers: (page: nat, pageSize: nat) -> (FinancierPage);
+  adminListIndividuals: (page: nat, pageSize: nat) -> (Result_8) query;
+  adminProcessAccountClosure: (requestId: text, approve: bool, note: 
+   text) -> (Result);
+  adminSetFinancingReady: (userId: principal, value: bool) -> (bool);
+  adminSetIndividualFinancingReady: (id: UserId) -> (Result);
+  adminTriggerReportRegeneration: (businessId: principal) ->
+   (variant {
+      err: text;
+      ok;
+    });
+  assignCallerUserRole: (user: principal, role: UserRole__1) -> ();
+  bootstrapAdmin: (p: principal) -> (variant {
+                                       err: text;
+                                       ok;
+                                     });
+  generateAdminInviteLink: () -> (Result_1);
+  getAccountClosureRequests: (page: nat, pageSize: nat) -> (Result_7) query;
+  getAdminAnalytics: () -> (Result_6) query;
+  getAdminCount: () -> (nat) query;
+  getAuditLog: (page: nat, pageSize: nat) -> (AuditPage) query;
+  getAuditLogForEntity: (entityId: text, page: nat, pageSize: nat) ->
+   (AuditPage) query;
+  getBootstrapAdmin: () -> (opt principal) query;
+  getCallerUserRole: () -> (UserRole__1) query;
+  getComparisonData: (businessIds: vec principal) ->
+   (variant {
+      err: text;
+      ok: vec CompatibilityResult;
+    });
+  getCredentials: () -> (MaskedCredentials) query;
+  getCycleBalance: () -> (nat) query;
+  getDealReport: (businessId: principal) ->
+   (variant {
+      err: text;
+      ok: DealReport;
+    });
+  getDocumentsForUser: (userId: principal) -> (vec DocumentRecord) query;
+  getFinancingReadyBusiness: (userId: principal) ->
+   (opt BusinessProfile) query;
+  getKashifScoringConfig: () -> (KashifScoringConfig) query;
+  getMatchedBorrowers: (page: nat, pageSize: nat) ->
+   (record {
+      items: vec CompatibilityResult;
+      total: nat;
+    });
+  getMizanResult: (businessId: principal) ->
+   (variant {
+      err: text;
+      ok: MizanRecord;
+    }) query;
+  getMyBusinessProfile: () -> (opt BusinessProfile) query;
+  getMyDocument: (docType: DocumentType) -> (opt DocumentRecord) query;
+  getMyFinancierProfile: () -> (opt FinancierProfile) query;
+  getMyIndividualProfile: () -> (Result_5) query;
+  getMyNotifications: (page: nat, pageSize: nat) -> (Result_4) query;
+  getMyTawthiqAppeals: () -> (vec TawthiqAppeal) query;
+  getPreliminaryMizanByBusiness: (businessId: UserId) ->
+   (opt MizanRecord) query;
+  getPreliminaryMizanResult: () -> (opt MizanRecord) query;
+  getShortlist: () -> (vec ShortlistEntry);
+  getStableStateVersion: () -> (nat) query;
+  getTawthiqAdminNote: (businessUserId: UserId) -> (opt text) query;
+  getTawthiqAppeals: (businessId: UserId) -> (vec TawthiqAppeal) query;
+  getTawthiqCompletedAssessments: (page: nat, pageSize: nat, verdictFilter:
+   opt text, searchQuery: opt text) ->
+   (record {
+      items: vec BusinessProfile;
+      page: nat;
+      pageSize: nat;
+      totalCount: nat;
+    }) query;
+  getTawthiqOverviewStats: () -> (TawthiqOverviewStats) query;
+  getTawthiqPendingReviews: (page: nat, pageSize: nat) ->
+   (record {
+      items: vec BusinessProfile;
+      page: nat;
+      pageSize: nat;
+      totalCount: nat;
+    }) query;
+  getTawthiqRecord: (userId: UserId) -> (opt TawthiqRecord) query;
+  getUnreadNotificationCount: () -> (Result_3) query;
+  isAdminBootstrapped: () -> (bool) query;
+  isCallerAdmin: () -> (bool) query;
+  linkBankAccount: (accountId: text) -> (BusinessProfile);
+  listAdminInviteLinks: () -> (vec InviteLinkRecord) query;
+  listBorderlineBusinesses: (page: nat) ->
+   (record {
+      items: vec ApplicantSummary;
+      total: nat;
+    }) query;
+  listFinancingReadyApplicants: (page: nat, pageSize: nat) -> (Page) query;
+  listMyDocuments: () -> (vec DocumentRecord) query;
+  markNotificationsRead: () -> (Result);
+  pollIndividualStatus: () -> (Result_2) query;
+  redeemAdminInviteLink: (code: text) -> (Result);
+  registerAsFinancier: (institutionName: text, licenseNumber: text,
+   contactPerson: text, email: text, phone: text, areasOfFinancing: vec text,
+   financierType: FinancierType, institutionDetails: opt InstitutionDetails,
+   individualDetails: opt IndividualDetails, groupDetails:
+   opt GroupDetails) -> (FinancierProfile);
+  removeFromShortlist: (businessId: principal) -> (variant {
+                                                     err: text;
+                                                     ok;
+                                                   });
+  requestAccountClosure: () -> (Result);
+  requestIndividualBankLink: () -> (Result_1);
+  reviewTawthiqAppeal: (businessId: UserId, appealId: text, decision:
+   AppealStatus, adminNote: text) -> (variant {
+                                        err: text;
+                                        ok: TawthiqAppeal;
+                                      });
+  revokeAdminInviteLink: (code: text) -> (Result);
+  runAndStorePreliminaryMizan: (businessId: principal) -> ();
+  saveTawthiqAdminNote: (businessUserId: UserId, note: text) ->
+   (variant {
+      err: text;
+      ok;
+    });
+  setCredentials: (newCreds: CredentialsSettings) -> ();
+  setFinancierStatus: (financierId: principal, status: FinancierStatus,
+   reason: opt text) -> (variant {
+                           err: text;
+                           ok;
+                         });
+  shortlistBorrower: (businessId: principal) -> (variant {
+                                                   err: text;
+                                                   ok;
+                                                 });
+  submitBusinessRegistrationWithKyc: (businessName: text, cacNumber: 
+   text, businessType: text, annualRevenue: nat, contactPerson: text,
+   address: text, phoneNumber: text, bvn: text, nin: text, tinNumber: 
+   text, businessDescription: text, yearOfIncorporation: text,
+   financingAmountSought: nat, purposeOfFinancing: text, preferredInstrument:
+   text, directorsList: vec DirectorRecord, proprietorDetails:
+   opt ProprietorRecord) -> (BusinessProfile);
+  submitIndividualRegistration: (fullName: text, bvn: text, nin: text,
+   dateOfBirth: text, address: text, occupation: text, employmentStatus:
+   EmploymentStatus, employerName: opt text, monthlyIncome: nat,
+   incomeSource: IncomeSource, financingPurpose: FinancingPurpose,
+   financingPurposeOther: opt text, amountSought: nat, preferredInstrument:
+   PreferredInstrument, termsAcceptedAt: opt Timestamp) -> (Result_1);
+  submitTawthiqAppeal: (flagId: text, appealText: text, documentUrl:
+   opt text, documentName: opt text) ->
+   (variant {
+      err: text;
+      ok: TawthiqAppeal;
+    });
+  transform: (input: TransformationInput) -> (TransformationOutput) query;
+  triggerMizanAnalysis: (businessId: principal) ->
+   (variant {
+      err: text;
+      ok: MizanRecord;
+    });
+  updateBusinessProfile: (userId: principal, updates:
+   BusinessProfileUpdate) -> (variant {
+                                err: text;
+                                ok;
+                              });
+  updateBusinessStatus: (userId: principal, status: RegistrationStatus,
+   reason: opt text) -> (bool);
+  updateIndividualProfile: (address: opt text, occupation: opt text,
+   employerName: opt text, monthlyIncome: opt nat, incomeSource:
+   opt IncomeSource) -> (Result);
+  updateKashifScoringConfig: (newConfig: KashifScoringConfig) ->
+   (variant {
+      err: text;
+      ok;
+    });
+  updateMyProfile: (updates: BusinessProfileUpdate) ->
+   (variant {
+      err: text;
+      ok;
+    });
+  uploadDocument: (docType: DocumentType, storageRef: ExternalBlob) ->
+   (DocumentRecord);
+  validateAdminInviteLink: (code: text) -> (bool) query;
+}

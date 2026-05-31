@@ -1,0 +1,213 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: "Lora";
+  src: url("/assets/fonts/Lora.woff2") format("woff2");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "General Sans";
+  src: url("/assets/fonts/GeneralSans.woff2") format("woff2");
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/assets/fonts/GeistMono.woff2") format("woff2");
+  font-display: swap;
+}
+
+@layer base {
+  :root {
+    --font-display: "Lora";
+    --font-body: "General Sans";
+    --font-mono: "Geist Mono";
+    --radius: 0.5rem;
+
+    --background: 0.99 0.002 260;
+    --foreground: 0.18 0.02 260;
+    --card: 1.0 0.0 0;
+    --card-foreground: 0.18 0.02 260;
+    --popover: 1.0 0.0 0;
+    --popover-foreground: 0.18 0.02 260;
+
+    --primary: 0.5 0.22 135;
+    --primary-foreground: 0.98 0.005 260;
+
+    --secondary: 0.92 0.01 260;
+    --secondary-foreground: 0.28 0.02 260;
+    --muted: 0.92 0.01 260;
+    --muted-foreground: 0.52 0.01 260;
+
+    --accent: 0.5 0.22 135;
+    --accent-foreground: 0.98 0.005 260;
+
+    --destructive: 0.55 0.22 25;
+    --destructive-foreground: 0.98 0.005 260;
+
+    --border: 0.88 0.01 260;
+    --input: 0.88 0.01 260;
+    --ring: 0.5 0.22 135;
+
+    --chart-1: 0.55 0.2 135;
+    --chart-2: 0.6 0.18 25;
+    --chart-3: 0.7 0.15 85;
+    --chart-4: 0.65 0.16 200;
+    --chart-5: 0.5 0.2 350;
+
+    --sidebar: 0.99 0.002 260;
+    --sidebar-foreground: 0.18 0.02 260;
+    --sidebar-primary: 0.5 0.22 135;
+    --sidebar-primary-foreground: 0.98 0.005 260;
+    --sidebar-accent: 0.92 0.01 260;
+    --sidebar-accent-foreground: 0.28 0.02 260;
+    --sidebar-border: 0.88 0.01 260;
+    --sidebar-ring: 0.5 0.22 135;
+
+    --sidebar-transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --sidebar-width: 16rem;
+    --sidebar-width-collapsed: 5rem;
+
+    --success: 0.55 0.18 150;
+    --success-foreground: 0.98 0.005 150;
+    --warning: 0.7 0.15 85;
+    --warning-foreground: 0.15 0.01 85;
+    --info: 0.6 0.16 260;
+    --info-foreground: 0.98 0.005 260;
+    --gauge-low: 0.55 0.18 145;
+    --gauge-medium: 0.7 0.15 85;
+    --gauge-high: 0.65 0.2 25;
+    --score-ring-bg: 0.95 0.01 260;
+    --borderline-bg: 0.96 0.015 85;
+    --narrative-bg: 0.92 0.01 260;
+
+    --compatibility-high: 0.55 0.18 150;
+    --compatibility-medium: 0.7 0.15 85;
+    --compatibility-low: 0.65 0.2 25;
+    --deal-card-bg: 1.0 0.0 0;
+    --deal-highlight: 0.92 0.01 260;
+    --comparison-diff: 0.96 0.015 150;
+
+    --individual-accent: 0.6 0.18 55;
+    --individual-accent-foreground: 0.98 0.005 55;
+    --individual-light: 0.95 0.08 55;
+    --notification-badge: 0.55 0.2 25;
+    --notification-badge-fg: 0.98 0.005 25;
+    --analytics-kpi-bg: 1.0 0.0 0;
+    --analytics-accent-bar: 0.5 0.22 135;
+    --compliance-modal-bg: 1.0 0.0 0;
+    --compliance-modal-overlay: 0.0 0.0 0;
+  }
+
+  .dark {
+    --background: 0.15 0.01 260;
+    --foreground: 0.92 0.005 260;
+    --card: 0.2 0.01 260;
+    --card-foreground: 0.92 0.005 260;
+    --popover: 0.25 0.01 260;
+    --popover-foreground: 0.92 0.005 260;
+
+    --primary: 0.65 0.2 135;
+    --primary-foreground: 0.15 0.01 260;
+
+    --secondary: 0.25 0.01 260;
+    --secondary-foreground: 0.85 0.005 260;
+    --muted: 0.25 0.01 260;
+    --muted-foreground: 0.55 0.005 260;
+
+    --accent: 0.65 0.2 135;
+    --accent-foreground: 0.15 0.01 260;
+
+    --destructive: 0.65 0.2 25;
+    --destructive-foreground: 0.92 0.005 260;
+
+    --border: 0.3 0.01 260;
+    --input: 0.3 0.01 260;
+    --ring: 0.65 0.2 135;
+
+    --chart-1: 0.65 0.22 135;
+    --chart-2: 0.68 0.2 25;
+    --chart-3: 0.75 0.18 85;
+    --chart-4: 0.72 0.18 200;
+    --chart-5: 0.62 0.2 350;
+
+    --sidebar: 0.2 0.01 260;
+    --sidebar-foreground: 0.92 0.005 260;
+    --sidebar-primary: 0.65 0.2 135;
+    --sidebar-primary-foreground: 0.15 0.01 260;
+    --sidebar-accent: 0.25 0.01 260;
+    --sidebar-accent-foreground: 0.85 0.005 260;
+    --sidebar-border: 0.3 0.01 260;
+    --sidebar-ring: 0.65 0.2 135;
+
+    --success: 0.65 0.2 150;
+    --success-foreground: 0.15 0.01 150;
+    --warning: 0.75 0.15 85;
+    --warning-foreground: 0.15 0.01 85;
+    --info: 0.7 0.18 260;
+    --info-foreground: 0.15 0.01 260;
+    --gauge-low: 0.65 0.2 145;
+    --gauge-medium: 0.75 0.15 85;
+    --gauge-high: 0.65 0.2 25;
+    --score-ring-bg: 0.2 0.01 260;
+    --borderline-bg: 0.25 0.015 85;
+    --narrative-bg: 0.22 0.01 260;
+
+    --compatibility-high: 0.65 0.2 150;
+    --compatibility-medium: 0.75 0.15 85;
+    --compatibility-low: 0.65 0.2 25;
+    --deal-card-bg: 0.2 0.01 260;
+    --deal-highlight: 0.22 0.01 260;
+    --comparison-diff: 0.25 0.015 150;
+
+    --individual-accent: 0.7 0.18 55;
+    --individual-accent-foreground: 0.15 0.01 55;
+    --individual-light: 0.25 0.06 55;
+    --notification-badge: 0.65 0.2 25;
+    --notification-badge-fg: 0.92 0.005 25;
+    --analytics-kpi-bg: 0.2 0.01 260;
+    --analytics-accent-bar: 0.65 0.2 135;
+    --compliance-modal-bg: 0.2 0.01 260;
+    --compliance-modal-overlay: 0.0 0.0 0;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body antialiased;
+  }
+}
+
+@layer utilities {
+  .transition-smooth {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+.analytics-kpi-card {
+  background-color: oklch(var(--analytics-kpi-bg));
+  border: 1px solid oklch(var(--border));
+  border-radius: var(--radius);
+  padding: 1.25rem 1.5rem;
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.analytics-kpi-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 3px;
+  height: 100%;
+  background-color: oklch(var(--analytics-accent-bar));
+  border-radius: var(--radius) 0 0 var(--radius);
+}
+.analytics-kpi-card:hover {
+  border-color: oklch(var(--analytics-accent-bar) / 0.4);
+  box-shadow: 0 2px 12px 0 oklch(var(--analytics-accent-bar) / 0.1);
+}

@@ -1,0 +1,26 @@
+{
+  "overview": "HalalVet is an AI-powered halal finance vetting platform that assesses and profiles individuals and businesses seeking ethical Islamic financing, connecting them with verified financiers.",
+  "features": [
+    "Three-role platform: admin/super-admin, business applicants, individual applicants, and financiers",
+    "AI agents: Tawthiq (onboarding/KYC), Mizan (risk scoring), Kashif (investment discovery)",
+    "Multi-step registration for LLC, Business Name, and Individual applicants",
+    "Automated Shariah compliance screening and inconsistency detection",
+    "Mono bank integration for live financial data",
+    "WhatsApp notifications via Twilio",
+    "Role-specific dashboards with persistent sidebars",
+    "Admin analytics dashboard with KPI widgets",
+    "Financier shortlist and deal report export",
+    "Session timeout protection and NDPR compliance features"
+  ],
+  "category": "fintech",
+  "tags": [
+    "halal-finance",
+    "islamic-finance",
+    "fintech",
+    "nigeria",
+    "kyc",
+    "ai-agents",
+    "icp"
+  ],
+  "last_updated": "2026-05-31T13:24:17.003Z"
+}
