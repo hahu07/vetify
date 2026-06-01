@@ -2,6 +2,7 @@ import { AdminLayout } from "@/components/AdminLayout";
 import { DocumentUpload } from "@/components/DocumentUpload";
 import { FullPageLoader } from "@/components/LoadingSpinner";
 import { PageHeader } from "@/components/PageHeader";
+import { ProfilePhotoUpload } from "@/components/ProfilePhotoUpload";
 import { StatusCard } from "@/components/StatusCard";
 import {
   AlertDialog,
@@ -25,6 +26,7 @@ import {
   UploadStatus,
 } from "@/types";
 import type { BusinessProfile, StatusVariant } from "@/types";
+import { Principal } from "@icp-sdk/core/principal";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useRouter } from "@tanstack/react-router";
 import {
@@ -35,7 +37,7 @@ import {
   ShieldCheck,
   TrendingUp,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 function scoreToVariant(score: bigint): StatusVariant {
@@ -64,6 +66,9 @@ export default function ProfilePage() {
   const router = useRouter();
   const [showClosureDialog, setShowClosureDialog] = useState(false);
   const [closureRequested, setClosureRequested] = useState(false);
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | undefined>(
+    undefined,
+  );
 
   const businessQuery = useQuery({
     queryKey: ["admin_business", userId],
@@ -86,6 +91,21 @@ export default function ProfilePage() {
   });
 
   const isLoading = businessQuery.isLoading || docsQuery.isLoading;
+
+  // Fetch profile photo
+  useEffect(() => {
+    if (!actor || !userId) return;
+    actor
+      .getProfilePhoto(Principal.fromText(userId))
+      .then((result) => {
+        if (Array.isArray(result) && result.length > 0 && result[0]) {
+          setProfilePhotoUrl(result[0]);
+        }
+      })
+      .catch(() => {
+        // Silently ignore missing photo
+      });
+  }, [actor, userId]);
 
   if (isLoading) return <FullPageLoader />;
 
@@ -113,40 +133,51 @@ export default function ProfilePage() {
   return (
     <AdminLayout>
       <div className="container mx-auto max-w-3xl px-4 py-10">
-        <PageHeader
-          title={displayName}
-          subtitle="Business Applicant"
-          breadcrumbs={[
-            { label: "Admin", href: "/admin/dashboard" },
-            { label: "Profile" },
-          ]}
-          actions={
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => router.navigate({ to: "/business/profile" })}
-                className="gap-1.5"
-                data-ocid="profile.edit_profile_button"
-              >
-                <Pencil className="h-4 w-4" />
-                Edit Profile
-              </Button>
-              <Badge
-                variant="secondary"
-                className={
-                  profile.financingReady
-                    ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700"
-                    : ""
-                }
-                data-ocid="profile.financing_ready_badge"
-              >
-                {profile.financingReady ? "Financing Ready" : "Not Ready"}
-              </Badge>
-            </div>
-          }
-        />
+        <div className="flex items-center gap-4 mb-6">
+          <ProfilePhotoUpload
+            userId={userId}
+            displayName={displayName}
+            currentPhotoUrl={profilePhotoUrl}
+            size="lg"
+            onPhotoUpdated={(url) => setProfilePhotoUrl(url)}
+          />
+          <div className="flex-1">
+            <PageHeader
+              title={displayName}
+              subtitle="Business Applicant"
+              breadcrumbs={[
+                { label: "Admin", href: "/admin/dashboard" },
+                { label: "Profile" },
+              ]}
+              actions={
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => router.navigate({ to: "/business/profile" })}
+                    className="gap-1.5"
+                    data-ocid="profile.edit_profile_button"
+                  >
+                    <Pencil className="h-4 w-4" />
+                    Edit Profile
+                  </Button>
+                  <Badge
+                    variant="secondary"
+                    className={
+                      profile.financingReady
+                        ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-300 border-emerald-200 dark:border-emerald-700"
+                        : ""
+                    }
+                    data-ocid="profile.financing_ready_badge"
+                  >
+                    {profile.financingReady ? "Financing Ready" : "Not Ready"}
+                  </Badge>
+                </div>
+              }
+            />
+          </div>
+        </div>
 
         {/* Status Cards */}
         <section className="mb-8" data-ocid="profile.status_section">

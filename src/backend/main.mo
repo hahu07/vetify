@@ -34,10 +34,21 @@ import IndividualTypes "types/IndividualProfile";
 import IndividualMixin "mixins/individual-api";
 import AnalyticsMixin "mixins/analytics-api";
 import NotificationMixin "mixins/notification-api";
+import MessagingTypes "types/Messaging";
+import PublicProfileTypes "types/PublicProfile";
+import MessagingLib "lib/messaging";
+import PublicProfileLib "lib/public-profile";
+import MessagingMixin "mixins/messaging-api";
+import PublicProfileMixin "mixins/public-profile-api";
+import PhotoMixin "mixins/photo-api";
+import DealPipelineTypes "types/DealPipeline";
+import DealPipelineMixin "mixins/deal-pipeline-api";
+import Migration "migration";
 
 
 
 
+(with migration = Migration.run)
 actor {
   // ── Authorization state ─────────────────────────────────────────────
   let accessControlState = AccessControl.initState();
@@ -65,6 +76,10 @@ actor {
   let kashifScoringConfig = { var config = KashifTypes.defaultScoringConfig };
   let individualsProfiles    = Map.empty<Principal, IndividualTypes.IndividualProfile>();
   let accountClosureRequests = Map.empty<Text, AuditTypes.AccountClosureRequest>();
+  let messagingState     : MessagingLib.MessagingState = { threads = Map.empty<Text, MessagingTypes.DirectMessageThread>(); var nextMessageId = 0 };
+  let publicProfileState : PublicProfileLib.PublicProfileState = { privacySettings = Map.empty<Text, PublicProfileTypes.ProfilePrivacySettings>() };
+  let dealPipeline = Map.empty<Principal, Map.Map<Principal, DealPipelineTypes.PipelineStage>>();
+  let mockCycleState = { var mockCycleBalance : Nat = 0 };
 
   // ── Mixin inclusions ───────────────────────────────────────────────
   include ProfileMixin(accessControlState, businessProfiles, financierProfiles);
@@ -84,7 +99,16 @@ actor {
   include IndividualMixin(accessControlState, individualsProfiles, notifications, auditEntries, accountClosureRequests, credentialsState, rateLimitState, transform);
   include AnalyticsMixin(accessControlState, businessProfiles, individualsProfiles, financierProfiles, accountClosureRequests, notifications, auditEntries, credentialsState, transform);
   include NotificationMixin(notifications);
+  include MessagingMixin(messagingState);
+  include PublicProfileMixin(publicProfileState, individualsProfiles);
+  include PhotoMixin(accessControlState, businessProfiles, financierProfiles, individualsProfiles);
+  include DealPipelineMixin(accessControlState, dealPipeline);
   public query func getStableStateVersion() : async Nat { stableStateVersion };
   public query func getCycleBalance() : async Nat { Prim.cyclesBalance() };
+  public shared func mockTopUp(amount : Nat) : async Nat {
+    mockCycleState.mockCycleBalance += amount;
+    mockCycleState.mockCycleBalance;
+  };
+  public query func getMockCycleBalance() : async Nat { mockCycleState.mockCycleBalance };
 };
 

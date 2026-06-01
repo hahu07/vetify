@@ -91,6 +91,8 @@ module {
     termsAcceptedAt : ?Common.Timestamp;
     accountClosureRequested : Bool;
     accountClosureRequestedAt : ?Common.Timestamp;
+    // ── Profile photo ─────────────────────────────────────────────────
+    photoUrl : ?Text;
   };
 
   // Lightweight summary for admin list views

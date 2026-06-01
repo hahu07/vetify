@@ -22,6 +22,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageSquare,
   Moon,
   Scale,
   Search,
@@ -255,6 +256,11 @@ export function AdminLayout({ children }: AdminLayoutProps) {
         {/* Bottom items */}
         {(
           [
+            {
+              label: "Messages",
+              href: "/admin/messages",
+              icon: MessageSquare,
+            },
             { label: "Audit Trail", href: "/admin/audit", icon: ClipboardList },
             { label: "Settings", href: "/admin/settings", icon: Settings },
           ] as const

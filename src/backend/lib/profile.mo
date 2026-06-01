@@ -53,6 +53,7 @@ module {
       preferredInstrument = null;
       directorsList = null;
       proprietorDetails = null;
+      photoUrl = null;
     };
     profiles.add(caller, profile);
     profile;
@@ -88,6 +89,7 @@ module {
       institutionDetails;
       individualDetails;
       groupDetails;
+      photoUrl = null;
     };
     profiles.add(caller, profile);
     profile;

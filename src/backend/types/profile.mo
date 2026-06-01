@@ -51,6 +51,8 @@ module {
     // ── Data integrity flags ──────────────────────────────────────────
     // Set to true when full Mizan score diverges >20 points from preliminary score
     mizanDivergenceAlert : Bool;
+    // ── Profile photo ─────────────────────────────────────────────────
+    photoUrl : ?Text;
   };
 
   // Financier status (separate from registration flow)
@@ -77,6 +79,8 @@ module {
     institutionDetails : ?FinExt.InstitutionDetails;
     individualDetails : ?FinExt.IndividualDetails;
     groupDetails : ?FinExt.GroupDetails;
+    // ── Profile photo ─────────────────────────────────────────────────
+    photoUrl : ?Text;
   };
 
   // Fields that can be updated on a BusinessProfile by admin or the applicant

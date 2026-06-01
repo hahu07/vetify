@@ -117,6 +117,7 @@ mixin (
       termsAcceptedAt;
       accountClosureRequested = false;
       accountClosureRequestedAt = null;
+      photoUrl = null;
     };
     individualsProfiles.add(caller, profile);
 

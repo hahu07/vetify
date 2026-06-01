@@ -1,26 +1,21 @@
 {
-  "overview": "HalalVet is an AI-powered halal finance vetting platform that assesses and profiles individuals and businesses seeking ethical Islamic financing, connecting them with verified financiers.",
+  "overview": "Vetify is an AI-powered halal/ethical finance vetting and profiling platform connecting financing seekers with ethical financial institutions.",
   "features": [
-    "Three-role platform: admin/super-admin, business applicants, individual applicants, and financiers",
-    "AI agents: Tawthiq (onboarding/KYC), Mizan (risk scoring), Kashif (investment discovery)",
-    "Multi-step registration for LLC, Business Name, and Individual applicants",
-    "Automated Shariah compliance screening and inconsistency detection",
-    "Mono bank integration for live financial data",
-    "WhatsApp notifications via Twilio",
-    "Role-specific dashboards with persistent sidebars",
-    "Admin analytics dashboard with KPI widgets",
-    "Financier shortlist and deal report export",
-    "Session timeout protection and NDPR compliance features"
+    "Multi-step registration forms for Individual, Business, and Financier applicants",
+    "AI agents Tawthiq, Mizan, and Kashif for compliance, risk scoring, and matching",
+    "Direct messaging between financiers and applicants",
+    "Public applicant profiles with privacy controls",
+    "Standalone Terms and Privacy Policy pages",
+    "Role-based dashboards with notification centre and messaging inbox"
   ],
-  "category": "fintech",
+  "category": "finance",
   "tags": [
     "halal-finance",
-    "islamic-finance",
-    "fintech",
-    "nigeria",
-    "kyc",
-    "ai-agents",
-    "icp"
+    "vetting",
+    "icp",
+    "messaging",
+    "compliance",
+    "nigeria"
   ],
-  "last_updated": "2026-05-31T13:24:17.003Z"
+  "last_updated": "2026-06-01T06:25:51.617Z"
 }

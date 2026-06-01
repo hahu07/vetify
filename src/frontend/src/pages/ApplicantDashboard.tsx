@@ -42,16 +42,18 @@ import { KycStatusCard } from "@/components/KycStatusCard";
 import { FullPageLoader } from "@/components/LoadingSpinner";
 import { MizanScoresCard } from "@/components/MizanScoresCard";
 import { PageHeader } from "@/components/PageHeader";
+import { ProfilePhotoUpload } from "@/components/ProfilePhotoUpload";
 import { TawthiqStatusCard } from "@/components/TawthiqStatusCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useBackend } from "@/hooks/use-backend";
 import { cn } from "@/lib/utils";
+import { Principal } from "@icp-sdk/core/principal";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { BrainCircuit, Pencil, Scale, ShieldCheck } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 export default function ApplicantDashboard() {
@@ -59,6 +61,10 @@ export default function ApplicantDashboard() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | undefined>(
+    undefined,
+  );
 
   const profileQuery = useQuery({
     queryKey: ["applicant_profile"],
@@ -68,6 +74,21 @@ export default function ApplicantDashboard() {
     },
     enabled: !!actor,
   });
+
+  // Fetch profile photo on mount
+  useEffect(() => {
+    if (!actor || !profileQuery.data?.userId) return;
+    actor
+      .getProfilePhoto(Principal.fromText(profileQuery.data.userId.toString()))
+      .then((result) => {
+        if (Array.isArray(result) && result.length > 0 && result[0]) {
+          setProfilePhotoUrl(result[0]);
+        }
+      })
+      .catch(() => {
+        // Silently ignore missing photo
+      });
+  }, [actor, profileQuery.data?.userId]);
 
   const profileUserId = profileQuery.data?.userId ?? null;
 
@@ -286,23 +307,32 @@ export default function ApplicantDashboard() {
           }
           breadcrumbs={[{ label: "Dashboard" }]}
           actions={
-            <div className="flex items-center gap-2">
-              <Button
-                variant="outline"
-                size="sm"
-                className="gap-1.5"
-                onClick={() => navigate({ to: "/business/profile" })}
-                data-ocid="applicant_dashboard.edit_profile_button"
-              >
-                <Pencil className="h-3.5 w-3.5" />
-                Edit Profile
-              </Button>
-              <Badge
-                className={cn("text-xs", statusClass)}
-                data-ocid="applicant_dashboard.registration_status_badge"
-              >
-                {statusLabel}
-              </Badge>
+            <div className="flex items-center gap-3">
+              <ProfilePhotoUpload
+                userId={profileQuery.data?.userId?.toString() ?? ""}
+                displayName={displayName}
+                currentPhotoUrl={profilePhotoUrl}
+                size="lg"
+                onPhotoUpdated={(url) => setProfilePhotoUrl(url)}
+              />
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={() => navigate({ to: "/business/profile" })}
+                  data-ocid="applicant_dashboard.edit_profile_button"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  Edit Profile
+                </Button>
+                <Badge
+                  className={cn("text-xs", statusClass)}
+                  data-ocid="applicant_dashboard.registration_status_badge"
+                >
+                  {statusLabel}
+                </Badge>
+              </div>
             </div>
           }
         />

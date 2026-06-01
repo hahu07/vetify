@@ -27,7 +27,7 @@ const AdminFinanciersPage = lazy(() => import("@/pages/AdminFinanciersPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const EditProfilePage = lazy(() => import("@/pages/EditProfilePage"));
 const AdminMizanReviewPage = lazy(() => import("@/pages/AdminMizanReviewPage"));
-const AdminKashifPage = lazy(() => import("@/pages/AdminKashifPage"));
+const AdminMessagesPage = lazy(() => import("@/pages/AdminMessagesPage"));
 const AuditTrailPage = lazy(() => import("@/pages/AuditTrailPage"));
 const AdminBootstrap = lazy(() => import("@/pages/AdminBootstrap"));
 const AdminTawthiqOverviewPage = lazy(
@@ -49,6 +49,12 @@ const IndividualProfilePage = lazy(
   () => import("@/pages/IndividualProfilePage"),
 );
 const IndividualBankPage = lazy(() => import("@/pages/IndividualBankPage"));
+const TermsPage = lazy(() => import("@/pages/TermsPage"));
+const PrivacyPage = lazy(() => import("@/pages/PrivacyPage"));
+const MessagesPage = lazy(() => import("@/pages/MessagesPage"));
+const PublicProfilePage = lazy(() => import("@/pages/PublicProfilePage"));
+const PrivacySettingsPage = lazy(() => import("@/pages/PrivacySettingsPage"));
+const DealPipelinePage = lazy(() => import("@/pages/DealPipelinePage"));
 
 // Root route
 const rootRoute = createRootRoute();
@@ -111,6 +117,37 @@ const registerIndividualRoute = createRoute({
   ),
 });
 
+// Public standalone pages
+const termsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/terms",
+  component: () => (
+    <Suspense fallback={<FullPageLoader />}>
+      <TermsPage />
+    </Suspense>
+  ),
+});
+
+const privacyRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/privacy",
+  component: () => (
+    <Suspense fallback={<FullPageLoader />}>
+      <PrivacyPage />
+    </Suspense>
+  ),
+});
+
+const publicProfileRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/profile/$id",
+  component: () => (
+    <Suspense fallback={<FullPageLoader />}>
+      <PublicProfilePage />
+    </Suspense>
+  ),
+});
+
 // Bootstrap (public — no auth required)
 const adminBootstrapRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -119,6 +156,30 @@ const adminBootstrapRoute = createRoute({
     <Suspense fallback={<FullPageLoader />}>
       <AdminBootstrap />
     </Suspense>
+  ),
+});
+
+const messagesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/messages",
+  component: () => (
+    <AuthGuard>
+      <Suspense fallback={<FullPageLoader />}>
+        <MessagesPage />
+      </Suspense>
+    </AuthGuard>
+  ),
+});
+
+const privacySettingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/privacy",
+  component: () => (
+    <AuthGuard>
+      <Suspense fallback={<FullPageLoader />}>
+        <PrivacySettingsPage />
+      </Suspense>
+    </AuthGuard>
   ),
 });
 
@@ -199,7 +260,19 @@ const adminKashifRoute = createRoute({
   component: () => (
     <AuthGuard>
       <Suspense fallback={<FullPageLoader />}>
-        <AdminKashifPage />
+        <div>Admin Kashif</div>
+      </Suspense>
+    </AuthGuard>
+  ),
+});
+
+const adminMessagesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/admin/messages",
+  component: () => (
+    <AuthGuard>
+      <Suspense fallback={<FullPageLoader />}>
+        <AdminMessagesPage />
       </Suspense>
     </AuthGuard>
   ),
@@ -438,6 +511,18 @@ const financierShortlistRoute = createRoute({
   ),
 });
 
+const financierPipelineRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/financier/pipeline",
+  component: () => (
+    <AuthGuard>
+      <Suspense fallback={<FullPageLoader />}>
+        <DealPipelinePage />
+      </Suspense>
+    </AuthGuard>
+  ),
+});
+
 const financierProfileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/financier/profile",
@@ -467,12 +552,18 @@ const adminProfileRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   // Public
   indexRoute,
+  termsRoute,
+  privacyRoute,
+  publicProfileRoute,
   registerBusinessRoute,
   registerFinancierRoute,
   registerIndividualRoute,
   adminBootstrapRoute,
   adminBootstrapSlashRoute,
   adminInviteRegisterRoute,
+  // Authenticated
+  messagesRoute,
+  privacySettingsRoute,
   // Admin
   adminDashboardRoute,
   adminApplicantsRoute,
@@ -480,6 +571,7 @@ const routeTree = rootRoute.addChildren([
   adminAuditRoute,
   adminMizanRoute,
   adminKashifRoute,
+  adminMessagesRoute,
   adminSettingsRoute,
   adminProfileRoute,
   adminTawthiqOverviewRoute,
@@ -502,6 +594,7 @@ const routeTree = rootRoute.addChildren([
   financierApplicantsRoute,
   financierDiscoverRoute,
   financierShortlistRoute,
+  financierPipelineRoute,
   financierProfileRoute,
 ]);
 

@@ -4,6 +4,7 @@ import { FinancierLayout } from "@/components/FinancierLayout";
 import { FullPageLoader } from "@/components/LoadingSpinner";
 import { PageHeader } from "@/components/PageHeader";
 import { Pagination } from "@/components/Pagination";
+import { ProfilePhotoUpload } from "@/components/ProfilePhotoUpload";
 import { StatusCard } from "@/components/StatusCard";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +12,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useBackend } from "@/hooks/use-backend";
 import type { ApplicantSummary } from "@/types";
+import { Principal } from "@icp-sdk/core/principal";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -27,7 +29,7 @@ import {
   Users,
   XCircle,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const PAGE_SIZE = 20;
 
@@ -235,12 +237,30 @@ export default function FinancierDashboard() {
 
   const [currentPage, setCurrentPage] = useState(1);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | undefined>(
+    undefined,
+  );
 
   const profileQuery = useQuery({
     queryKey: ["financier_profile"],
     queryFn: () => actor?.getMyFinancierProfile() ?? null,
     enabled: !!actor,
   });
+
+  // Fetch profile photo on mount
+  useEffect(() => {
+    if (!actor || !profileQuery.data?.userId) return;
+    actor
+      .getProfilePhoto(Principal.fromText(profileQuery.data.userId.toString()))
+      .then((result) => {
+        if (Array.isArray(result) && result.length > 0 && result[0]) {
+          setProfilePhotoUrl(result[0]);
+        }
+      })
+      .catch(() => {
+        // Silently ignore missing photo
+      });
+  }, [actor, profileQuery.data?.userId]);
 
   const applicantsQuery = useQuery({
     queryKey: ["financing_ready_applicants", currentPage],
@@ -296,13 +316,22 @@ export default function FinancierDashboard() {
           subtitle="Browse financing-ready vetted applicants on the Vetify platform."
           breadcrumbs={[{ label: "Dashboard" }]}
           actions={
-            <Badge
-              variant="secondary"
-              className="bg-primary/10 text-primary border-primary/30 dark:bg-primary/20"
-              data-ocid="financier_dashboard.status_badge"
-            >
-              {profile?.registrationStatus ?? "Pending"}
-            </Badge>
+            <div className="flex items-center gap-3">
+              <ProfilePhotoUpload
+                userId={profileQuery.data?.userId?.toString() ?? ""}
+                displayName={profile?.institutionName ?? "Financier"}
+                currentPhotoUrl={profilePhotoUrl}
+                size="lg"
+                onPhotoUpdated={(url) => setProfilePhotoUrl(url)}
+              />
+              <Badge
+                variant="secondary"
+                className="bg-primary/10 text-primary border-primary/30 dark:bg-primary/20"
+                data-ocid="financier_dashboard.status_badge"
+              >
+                {profile?.registrationStatus ?? "Pending"}
+              </Badge>
+            </div>
           }
         />
 

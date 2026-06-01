@@ -98,6 +98,8 @@ export default {
         },
         "gauge-pulse": { from: { opacity: '0.8' }, to: { opacity: '1' } },
         "score-enter": { from: { opacity: '0', transform: 'translateY(4px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
+        "cycle-pulse": { from: { opacity: '0.7' }, to: { opacity: '1' } },
+        "kanban-enter": { from: { opacity: '0', transform: 'translateY(8px)' }, to: { opacity: '1', transform: 'translateY(0)' } },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",

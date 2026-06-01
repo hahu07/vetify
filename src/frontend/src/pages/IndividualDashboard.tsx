@@ -5,6 +5,7 @@ import {
   Variant_full_preliminary,
 } from "@/backend";
 import { IndividualLayout } from "@/components/IndividualLayout";
+import { ProfilePhotoUpload } from "@/components/ProfilePhotoUpload";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -124,8 +125,20 @@ export default function IndividualDashboard() {
   });
 
   const profile = profileQuery.data ?? null;
-  const kycStatus = profile?.kycRecord?.kycStatus;
+
+  const photoQuery = useQuery({
+    queryKey: ["individual_photo", profile?.id?.toString()],
+    queryFn: async () => {
+      if (!actor || !profile?.id) return null;
+      return actor.getProfilePhoto(profile.id);
+    },
+    enabled: !!actor && !!profile?.id,
+  });
+
+  const isLoading = profileQuery.isLoading || photoQuery.isLoading;
+  const isError = profileQuery.isError;
   const tawthiqDone = !!profile?.tawthiqRecord?.completedAt;
+  const kycStatus = profile?.kycRecord?.kycStatus ?? KycStatus.Pending;
   const needsPolling =
     kycStatus === KycStatus.InProgress ||
     kycStatus === KycStatus.Pending ||
@@ -149,9 +162,6 @@ export default function IndividualDashboard() {
       }
     };
   }, [needsPolling, queryClient]);
-
-  const isLoading = profileQuery.isLoading;
-  const isError = profileQuery.isError;
   const regStatusBadge = profile
     ? registrationLabel(profile.registrationStatus)
     : null;
@@ -217,20 +227,28 @@ export default function IndividualDashboard() {
               </div>
             ) : profile ? (
               <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="font-display text-lg font-semibold text-foreground">
-                    {profile.fullName}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    Registered{" "}
-                    {new Date(
-                      Number(profile.createdAt) / 1_000_000,
-                    ).toLocaleDateString("en-GB", {
-                      day: "numeric",
-                      month: "long",
-                      year: "numeric",
-                    })}
-                  </p>
+                <div className="flex items-center gap-3">
+                  <ProfilePhotoUpload
+                    userId={profile.id.toString()}
+                    displayName={profile.fullName}
+                    currentPhotoUrl={photoQuery.data ?? undefined}
+                    size="md"
+                  />
+                  <div>
+                    <p className="font-display text-lg font-semibold text-foreground">
+                      {profile.fullName}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Registered{" "}
+                      {new Date(
+                        Number(profile.createdAt) / 1_000_000,
+                      ).toLocaleDateString("en-GB", {
+                        day: "numeric",
+                        month: "long",
+                        year: "numeric",
+                      })}
+                    </p>
+                  </div>
                 </div>
                 {regStatusBadge && (
                   <Badge

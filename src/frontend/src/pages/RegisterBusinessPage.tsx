@@ -27,6 +27,7 @@ import { CheckCircle2, Info, Lightbulb } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { TermsModal } from "../components/TermsModal";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -406,7 +407,9 @@ export default function RegisterBusinessPage() {
 
   // Step 4
   const [annualRevenue, setAnnualRevenue] = useState("");
+  const [displayAnnualRevenue, setDisplayAnnualRevenue] = useState("");
   const [financingAmount, setFinancingAmount] = useState("");
+  const [displayFinancingAmount, setDisplayFinancingAmount] = useState("");
   const [purposeOfFinancing, setPurposeOfFinancing] = useState("");
   const [preferredInstrument, setPreferredInstrument] = useState("");
   const [step5Errors, setStep5Errors] = useState<Record<string, string>>({});
@@ -415,6 +418,7 @@ export default function RegisterBusinessPage() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [ndprAccepted, setNdprAccepted] = useState(false);
+  const [complianceError, setComplianceError] = useState("");
 
   // ── localStorage restore on mount ─────────────────────────────────────────
   useEffect(() => {
@@ -666,7 +670,15 @@ export default function RegisterBusinessPage() {
   // ── Submit ────────────────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
-    if (!actor) return;
+    if (!actor) {
+      toast.error("Please connect your wallet before submitting.");
+      return;
+    }
+    if (!termsAccepted || !privacyAccepted || !ndprAccepted) {
+      setComplianceError("Please accept all terms and conditions to proceed");
+      return;
+    }
+    setComplianceError("");
     setIsSubmitting(true);
     try {
       const directorsList =
@@ -689,7 +701,7 @@ export default function RegisterBusinessPage() {
           ? { proprietorName, bvn: proprietorBvn, nin: proprietorNin }
           : null;
 
-      await actor.submitBusinessRegistrationWithKyc(
+      const result = await actor.submitBusinessRegistrationWithKyc(
         businessName,
         cacNumber,
         businessCategory,
@@ -708,14 +720,22 @@ export default function RegisterBusinessPage() {
         directorsList,
         proprietorDetails,
       );
+      if ("err" in result) {
+        toast.error(
+          result.err instanceof Error ? result.err.message : String(result.err),
+        );
+        setIsSubmitting(false);
+        return;
+      }
       localStorage.removeItem(LS_KEY);
       await refetch();
       toast.success(
-        "Business registration submitted! Tawthiq التوثيق is now verifying your details.",
+        "Business registration submitted! Tawthiq is now verifying your details.",
       );
       router.navigate({ to: "/business/dashboard" });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Registration failed");
+      const msg = err instanceof Error ? err.message : "Registration failed";
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -1217,17 +1237,31 @@ export default function RegisterBusinessPage() {
                   <div className="grid gap-5 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label htmlFor="annualRevenue">
-                        Annual Revenue (₦) *
+                        Annual Revenue (NGN) *
                       </Label>
-                      <Input
-                        id="annualRevenue"
-                        type="number"
-                        min="0"
-                        placeholder="5000000"
-                        value={annualRevenue}
-                        onChange={(e) => setAnnualRevenue(e.target.value)}
-                        data-ocid="register_business.annual_revenue_input"
-                      />
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm pointer-events-none">
+                          ₦
+                        </span>
+                        <Input
+                          id="annualRevenue"
+                          inputMode="numeric"
+                          placeholder="5,000,000"
+                          className="pl-7"
+                          value={displayAnnualRevenue}
+                          onChange={(e) => {
+                            const raw = e.target.value.replace(/[^0-9]/g, "");
+                            setAnnualRevenue(raw);
+                            setDisplayAnnualRevenue(
+                              raw ? Number(raw).toLocaleString("en-NG") : "",
+                            );
+                          }}
+                          data-ocid="register_business.annual_revenue_input"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Enter your annual business revenue
+                      </p>
                       <FieldError
                         msg={step5Errors.annualRevenue}
                         ocid="register_business.annual_revenue_error"
@@ -1235,17 +1269,31 @@ export default function RegisterBusinessPage() {
                     </div>
                     <div className="space-y-1.5">
                       <Label htmlFor="financingAmount">
-                        Financing Amount Sought (₦) *
+                        Financing Amount (NGN) *
                       </Label>
-                      <Input
-                        id="financingAmount"
-                        type="number"
-                        min="0"
-                        placeholder="2000000"
-                        value={financingAmount}
-                        onChange={(e) => setFinancingAmount(e.target.value)}
-                        data-ocid="register_business.financing_amount_input"
-                      />
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-sm pointer-events-none">
+                          ₦
+                        </span>
+                        <Input
+                          id="financingAmount"
+                          inputMode="numeric"
+                          placeholder="2,000,000"
+                          className="pl-7"
+                          value={displayFinancingAmount}
+                          onChange={(e) => {
+                            const raw = e.target.value.replace(/[^0-9]/g, "");
+                            setFinancingAmount(raw);
+                            setDisplayFinancingAmount(
+                              raw ? Number(raw).toLocaleString("en-NG") : "",
+                            );
+                          }}
+                          data-ocid="register_business.financing_amount_input"
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Enter the total financing amount you need
+                      </p>
                       <FieldError
                         msg={step5Errors.financingAmount}
                         ocid="register_business.financing_amount_error"
@@ -1498,14 +1546,11 @@ export default function RegisterBusinessPage() {
                       />
                       <span className="text-xs text-foreground leading-relaxed">
                         I have read and agree to the{" "}
-                        <a
-                          href="/terms"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary underline underline-offset-2"
-                        >
-                          Terms and Conditions
-                        </a>
+                        <TermsModal
+                          type="terms"
+                          triggerText="Terms and Conditions"
+                          ocid="register_business.terms_modal_trigger"
+                        />
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
@@ -1523,14 +1568,11 @@ export default function RegisterBusinessPage() {
                       />
                       <span className="text-xs text-foreground leading-relaxed">
                         I have read and agree to the{" "}
-                        <a
-                          href="/privacy"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary underline underline-offset-2"
-                        >
-                          Privacy Policy
-                        </a>
+                        <TermsModal
+                          type="privacy"
+                          triggerText="Privacy Policy"
+                          ocid="register_business.privacy_modal_trigger"
+                        />
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
@@ -1558,6 +1600,14 @@ export default function RegisterBusinessPage() {
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
+                    {complianceError && (
+                      <p
+                        className="text-destructive text-sm mt-2"
+                        data-ocid="register_business.compliance_error"
+                      >
+                        {complianceError}
+                      </p>
+                    )}
                   </div>
                 </motion.div>
               )}

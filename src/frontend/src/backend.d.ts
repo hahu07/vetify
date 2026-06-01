@@ -16,11 +16,7 @@ export class ExternalBlob {
 }
 export type Result_2 = {
     __kind__: "ok";
-    ok: {
-        status: RegistrationStatus;
-        tawthiqDone: boolean;
-        mizanDone: boolean;
-    };
+    ok: bigint;
 } | {
     __kind__: "err";
     err: string;
@@ -224,6 +220,12 @@ export interface FinancierPage {
     pageSize: bigint;
     items: Array<FinancierProfile>;
 }
+export interface DirectMessageThread {
+    lastMessageAt: bigint;
+    messages: Array<Message>;
+    participantIds: Array<Principal>;
+    threadId: string;
+}
 export interface CompatibilityResult {
     halalComplianceScore: bigint;
     applicantType: ApplicantType;
@@ -233,11 +235,6 @@ export interface CompatibilityResult {
     businessId: Principal;
     financingTypes: Array<string>;
     riskLevel: RiskLevel;
-}
-export interface AuditPage {
-    total: bigint;
-    page: bigint;
-    entries: Array<AuditEntry>;
 }
 export type Result_8 = {
     __kind__: "ok";
@@ -249,6 +246,11 @@ export type Result_8 = {
     __kind__: "err";
     err: string;
 };
+export interface AuditPage {
+    total: bigint;
+    page: bigint;
+    entries: Array<AuditEntry>;
+}
 export interface BusinessProfile {
     mizanRecord?: MizanRecord;
     cacNumber: string;
@@ -265,6 +267,7 @@ export interface BusinessProfile {
     preliminaryMizanRecord?: MizanRecord;
     businessName: string;
     businessType: string;
+    photoUrl?: string;
     financingReady: boolean;
     financingReadyScore: bigint;
     preferredInstrument?: string;
@@ -350,6 +353,7 @@ export interface FinancierProfile {
     createdAt: Timestamp;
     contactPerson: string;
     areasOfFinancing: Array<string>;
+    photoUrl?: string;
     email: string;
     financierStatus: FinancierStatus;
     licenseNumber: string;
@@ -387,6 +391,7 @@ export interface IndividualProfile {
     incomeSource: IncomeSource;
     fullName: string;
     accountClosureRequestedAt?: Timestamp;
+    photoUrl?: string;
     amountSought: bigint;
     preferredInstrument: PreferredInstrument;
     kycRecord?: KycCheckRecord;
@@ -427,6 +432,13 @@ export interface BankLinkRecord {
     institutionName?: string;
     currency?: string;
 }
+export interface ProfilePrivacySettings {
+    applicantId: string;
+    showFinancingAmount: boolean;
+    showMizanScore: boolean;
+    showDirectorNames: boolean;
+    showIncome: boolean;
+}
 export interface InviteLinkRecord {
     status: string;
     expiresAt: bigint;
@@ -447,7 +459,11 @@ export interface ScoringRecord {
 }
 export type Result_3 = {
     __kind__: "ok";
-    ok: bigint;
+    ok: {
+        status: RegistrationStatus;
+        tawthiqDone: boolean;
+        mizanDone: boolean;
+    };
 } | {
     __kind__: "err";
     err: string;
@@ -457,6 +473,26 @@ export interface BusinessProfileUpdate {
     businessName?: string;
     address?: string;
     phone?: string;
+}
+export interface PublicApplicantProfile {
+    applicantId: string;
+    fullName: string;
+    amountSought?: bigint;
+    mizanScore?: bigint;
+    preferredInstrument: string;
+    registrationStatus: string;
+    financingPurpose: string;
+    monthlyIncome?: bigint;
+}
+export interface Message {
+    applicantId: string;
+    messageId: bigint;
+    isRead: boolean;
+    messageText: string;
+    timestamp: bigint;
+    financierId: string;
+    recipientId: Principal;
+    senderId: Principal;
 }
 export interface AccountClosureRequest {
     status: Variant_pending_approved_rejected;
@@ -553,6 +589,12 @@ export enum KycStatus {
     InProgress = "InProgress",
     Verified = "Verified",
     Pending = "Pending"
+}
+export enum PipelineStage {
+    dueDiligence = "dueDiligence",
+    closed = "closed",
+    offerSent = "offerSent",
+    reviewing = "reviewing"
 }
 export enum PreferredInstrument {
     murabaha = "murabaha",
@@ -697,14 +739,17 @@ export interface backendInterface {
         __kind__: "err";
         err: string;
     }>;
+    getMockCycleBalance(): Promise<bigint>;
     getMyBusinessProfile(): Promise<BusinessProfile | null>;
     getMyDocument(docType: DocumentType): Promise<DocumentRecord | null>;
     getMyFinancierProfile(): Promise<FinancierProfile | null>;
     getMyIndividualProfile(): Promise<Result_5>;
     getMyNotifications(page: bigint, pageSize: bigint): Promise<Result_4>;
     getMyTawthiqAppeals(): Promise<Array<TawthiqAppeal>>;
+    getPipeline(): Promise<Array<[Principal, PipelineStage]>>;
     getPreliminaryMizanByBusiness(businessId: UserId): Promise<MizanRecord | null>;
     getPreliminaryMizanResult(): Promise<MizanRecord | null>;
+    getProfilePhoto(userId: Principal): Promise<string | null>;
     getShortlist(): Promise<Array<ShortlistEntry>>;
     getStableStateVersion(): Promise<bigint>;
     getTawthiqAdminNote(businessUserId: UserId): Promise<string | null>;
@@ -723,7 +768,12 @@ export interface backendInterface {
         items: Array<BusinessProfile>;
     }>;
     getTawthiqRecord(userId: UserId): Promise<TawthiqRecord | null>;
-    getUnreadNotificationCount(): Promise<Result_3>;
+    getUnreadNotificationCount(): Promise<Result_2>;
+    get_my_threads(): Promise<Array<DirectMessageThread>>;
+    get_privacy_settings(applicantId: string): Promise<ProfilePrivacySettings>;
+    get_public_profile(applicantId: string): Promise<PublicApplicantProfile | null>;
+    get_thread_messages(applicantId: string, financierId: string): Promise<Array<Message>>;
+    get_unread_count(): Promise<bigint>;
     isAdminBootstrapped(): Promise<boolean>;
     isCallerAdmin(): Promise<boolean>;
     linkBankAccount(accountId: string): Promise<BusinessProfile>;
@@ -735,10 +785,19 @@ export interface backendInterface {
     listFinancingReadyApplicants(page: bigint, pageSize: bigint): Promise<Page>;
     listMyDocuments(): Promise<Array<DocumentRecord>>;
     markNotificationsRead(): Promise<Result>;
-    pollIndividualStatus(): Promise<Result_2>;
+    mark_messages_read(applicantId: string, financierId: string): Promise<Result>;
+    mockTopUp(amount: bigint): Promise<bigint>;
+    pollIndividualStatus(): Promise<Result_3>;
     redeemAdminInviteLink(code: string): Promise<Result>;
     registerAsFinancier(institutionName: string, licenseNumber: string, contactPerson: string, email: string, phone: string, areasOfFinancing: Array<string>, financierType: FinancierType, institutionDetails: InstitutionDetails | null, individualDetails: IndividualDetails | null, groupDetails: GroupDetails | null): Promise<FinancierProfile>;
     removeFromShortlist(businessId: Principal): Promise<{
+        __kind__: "ok";
+        ok: null;
+    } | {
+        __kind__: "err";
+        err: string;
+    }>;
+    removePipelineEntry(applicantId: Principal): Promise<{
         __kind__: "ok";
         ok: null;
     } | {
@@ -763,8 +822,23 @@ export interface backendInterface {
         __kind__: "err";
         err: string;
     }>;
+    send_message(applicantId: string, financierId: string, recipientId: Principal, messageText: string): Promise<Result_2>;
     setCredentials(newCreds: CredentialsSettings): Promise<void>;
     setFinancierStatus(financierId: Principal, status: FinancierStatus, reason: string | null): Promise<{
+        __kind__: "ok";
+        ok: null;
+    } | {
+        __kind__: "err";
+        err: string;
+    }>;
+    setPipelineStage(applicantId: Principal, stage: PipelineStage): Promise<{
+        __kind__: "ok";
+        ok: null;
+    } | {
+        __kind__: "err";
+        err: string;
+    }>;
+    setProfilePhoto(photoUrl: string): Promise<{
         __kind__: "ok";
         ok: null;
     } | {
@@ -818,6 +892,7 @@ export interface backendInterface {
         __kind__: "err";
         err: string;
     }>;
+    update_privacy_settings(applicantId: string, settings: ProfilePrivacySettings): Promise<Result>;
     uploadDocument(docType: DocumentType, storageRef: ExternalBlob): Promise<DocumentRecord>;
     validateAdminInviteLink(code: string): Promise<boolean>;
 }

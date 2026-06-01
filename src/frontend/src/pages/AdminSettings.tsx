@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBackend } from "@/hooks/use-backend";
 import { useIsSuperAdmin } from "@/hooks/use-is-super-admin";
+import { humanizeCycleError } from "@/lib/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -31,6 +32,7 @@ import {
   Shield,
   Trash2,
   XCircle,
+  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -162,6 +164,12 @@ export default function AdminSettings() {
   const [twilioAuthToken, setTwilioAuthToken] = useState("");
   const [twilioWhatsappFrom, setTwilioWhatsappFrom] = useState("");
 
+  // Cycle balance state
+  const [realCycleBalance, setRealCycleBalance] = useState<bigint | null>(null);
+  const [mockCycleBalance, setMockCycleBalance] = useState<bigint | null>(null);
+  const [cycleLoading, setCycleLoading] = useState(false);
+  const [mockTopUpAmount, setMockTopUpAmount] = useState("500000000000");
+
   // Invite link modal
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [generatedLink, setGeneratedLink] = useState<string | null>(null);
@@ -194,6 +202,28 @@ export default function AdminSettings() {
       defaultScore: kashifConfigQuery.data.defaultScore,
     });
   }
+
+  const cycleBalanceQuery = useQuery({
+    queryKey: ["cycle_balance"],
+    queryFn: async () => {
+      if (!actor) return null;
+      const bal = await actor.getCycleBalance();
+      setRealCycleBalance(bal);
+      return bal;
+    },
+    enabled: !!actor,
+  });
+
+  const mockCycleBalanceQuery = useQuery({
+    queryKey: ["mock_cycle_balance"],
+    queryFn: async () => {
+      if (!actor) return null;
+      const bal = await actor.getMockCycleBalance();
+      setMockCycleBalance(bal);
+      return bal;
+    },
+    enabled: !!actor,
+  });
 
   const inviteLinksQuery = useQuery({
     queryKey: ["admin_invite_links"],
@@ -430,6 +460,28 @@ export default function AdminSettings() {
       ),
   });
 
+  const mockTopUpMutation = useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Not connected");
+      return actor.mockTopUp(BigInt(mockTopUpAmount));
+    },
+    onSuccess: (result) => {
+      setMockCycleBalance(result);
+      queryClient.invalidateQueries({ queryKey: ["mock_cycle_balance"] });
+      toast.success(`Simulated top-up of ${mockTopUpAmount} cycles applied`);
+    },
+    onError: (err) => {
+      toast.error(humanizeCycleError(err));
+    },
+  });
+
+  const refreshBalances = () => {
+    setCycleLoading(true);
+    queryClient.invalidateQueries({ queryKey: ["cycle_balance"] });
+    queryClient.invalidateQueries({ queryKey: ["mock_cycle_balance"] });
+    setTimeout(() => setCycleLoading(false), 800);
+  };
+
   const revokeInviteMutation = useMutation({
     mutationFn: async (code: string) => {
       if (!actor) throw new Error("Not connected");
@@ -476,6 +528,29 @@ export default function AdminSettings() {
   const isLoading = credentialsQuery.isLoading || inviteLinksQuery.isLoading;
 
   const inviteLinks = inviteLinksQuery.data ?? [];
+
+  function formatCycles(value: bigint): string {
+    const n = Number(value);
+    if (n >= 1_000_000_000_000) return `${(n / 1_000_000_000_000).toFixed(2)}T`;
+    if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    return `${n.toLocaleString()} cycles`;
+  }
+
+  function cycleStatus(balance: bigint): {
+    label: string;
+    variant: "default" | "secondary" | "destructive" | "outline";
+  } {
+    const n = Number(balance);
+    if (n > 2_000_000_000_000) return { label: "Healthy", variant: "default" };
+    if (n >= 500_000_000_000) return { label: "Low", variant: "secondary" };
+    return { label: "Critical", variant: "destructive" };
+  }
+
+  const canisterId =
+    typeof window !== "undefined"
+      ? window.location.hostname.split(".")[0]
+      : "unknown";
 
   return (
     <AdminLayout>
@@ -986,6 +1061,155 @@ export default function AdminSettings() {
                         </tbody>
                       </table>
                     </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </section>
+
+        {/* Cycles & Balance Section */}
+        <section className="mb-10" data-ocid="admin.settings.cycles_section">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2 font-display">
+                <Zap className="h-5 w-5 text-primary" />
+                Cycles &amp; Balance
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {cycleBalanceQuery.isLoading ||
+              mockCycleBalanceQuery.isLoading ? (
+                <div className="space-y-4">
+                  <Skeleton className="h-16 w-full rounded-lg" />
+                  <Skeleton className="h-16 w-full rounded-lg" />
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Real balance */}
+                  <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-3">
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        Canister Cycle Balance
+                      </p>
+                      <p className="text-2xl font-semibold tracking-tight text-foreground">
+                        {formatCycles(realCycleBalance ?? BigInt(0))}
+                      </p>
+                    </div>
+                    <Badge
+                      variant={
+                        cycleStatus(realCycleBalance ?? BigInt(0)).variant
+                      }
+                    >
+                      {cycleStatus(realCycleBalance ?? BigInt(0)).label}
+                    </Badge>
+                  </div>
+
+                  {/* Canister ID */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1">
+                      <Label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Canister ID
+                      </Label>
+                      <p className="mt-0.5 font-mono text-sm text-foreground">
+                        {canisterId}
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(canisterId);
+                        toast.success("Canister ID copied");
+                      }}
+                      data-ocid="admin.settings.copy_canister_id_button"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      Copy
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      asChild
+                      data-ocid="admin.settings.nns_dapp_link"
+                    >
+                      <a
+                        href="https://nns.ic0.app/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Top up via NNS Dapp
+                      </a>
+                    </Button>
+                  </div>
+
+                  <Separator />
+
+                  {/* Mock top-up */}
+                  <div>
+                    <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Testing Only
+                    </p>
+                    <div className="flex items-end gap-3">
+                      <div className="flex-1">
+                        <Label htmlFor="mock-topup-amount">
+                          Simulated Top-up Amount (cycles)
+                        </Label>
+                        <Input
+                          id="mock-topup-amount"
+                          type="number"
+                          value={mockTopUpAmount}
+                          onChange={(e) => setMockTopUpAmount(e.target.value)}
+                          placeholder="500000000000"
+                          data-ocid="admin.settings.mock_topup_input"
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        onClick={() => mockTopUpMutation.mutate()}
+                        disabled={
+                          mockTopUpMutation.isPending || !mockTopUpAmount
+                        }
+                        className="shrink-0 gap-1.5"
+                        data-ocid="admin.settings.simulate_topup_button"
+                      >
+                        {mockTopUpMutation.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Zap className="h-3.5 w-3.5" />
+                        )}
+                        Simulate Top-up
+                      </Button>
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                      Simulated balance:{" "}
+                      {formatCycles(mockCycleBalance ?? BigInt(0))}
+                    </p>
+                  </div>
+
+                  {/* Refresh */}
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={refreshBalances}
+                      disabled={cycleLoading}
+                      data-ocid="admin.settings.refresh_cycles_button"
+                    >
+                      {cycleLoading ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      Refresh
+                    </Button>
                   </div>
                 </div>
               )}

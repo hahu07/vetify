@@ -100,6 +100,7 @@ export interface BusinessProfile {
   'preliminaryMizanRecord' : [] | [MizanRecord],
   'businessName' : string,
   'businessType' : string,
+  'photoUrl' : [] | [string],
   'financingReady' : boolean,
   'financingReadyScore' : bigint,
   'preferredInstrument' : [] | [string],
@@ -157,6 +158,12 @@ export interface DealReport {
   'suggestedFinancingStructure' : string,
   'shariahComplianceStatus' : string,
 }
+export interface DirectMessageThread {
+  'lastMessageAt' : bigint,
+  'messages' : Array<Message>,
+  'participantIds' : Array<Principal>,
+  'threadId' : string,
+}
 export interface DirectorRecord {
   'bvn' : string,
   'nin' : string,
@@ -195,6 +202,7 @@ export interface FinancierProfile {
   'createdAt' : Timestamp,
   'contactPerson' : string,
   'areasOfFinancing' : Array<string>,
+  'photoUrl' : [] | [string],
   'email' : string,
   'financierStatus' : FinancierStatus,
   'licenseNumber' : string,
@@ -271,6 +279,7 @@ export interface IndividualProfile {
   'incomeSource' : IncomeSource,
   'fullName' : string,
   'accountClosureRequestedAt' : [] | [Timestamp],
+  'photoUrl' : [] | [string],
   'amountSought' : bigint,
   'preferredInstrument' : PreferredInstrument,
   'kycRecord' : [] | [KycCheckRecord],
@@ -352,6 +361,16 @@ export interface MaskedCredentials {
   'openAiApiKey' : string,
   'twilioWhatsappFrom' : string,
 }
+export interface Message {
+  'applicantId' : string,
+  'messageId' : bigint,
+  'isRead' : boolean,
+  'messageText' : string,
+  'timestamp' : bigint,
+  'financierId' : string,
+  'recipientId' : Principal,
+  'senderId' : Principal,
+}
 export interface MizanRecord {
   'halalComplianceScore' : bigint,
   'narrativeSummary' : string,
@@ -381,6 +400,10 @@ export interface Page {
   'pageSize' : bigint,
   'items' : Array<ApplicantSummary>,
 }
+export type PipelineStage = { 'dueDiligence' : null } |
+  { 'closed' : null } |
+  { 'offerSent' : null } |
+  { 'reviewing' : null };
 export type PreferredInstrument = { 'murabaha' : null } |
   { 'istisna' : null } |
   { 'other' : null } |
@@ -388,10 +411,27 @@ export type PreferredInstrument = { 'murabaha' : null } |
   { 'salam' : null } |
   { 'musharakah' : null } |
   { 'mudarabah' : null };
+export interface ProfilePrivacySettings {
+  'applicantId' : string,
+  'showFinancingAmount' : boolean,
+  'showMizanScore' : boolean,
+  'showDirectorNames' : boolean,
+  'showIncome' : boolean,
+}
 export interface ProprietorRecord {
   'bvn' : string,
   'nin' : string,
   'proprietorName' : string,
+}
+export interface PublicApplicantProfile {
+  'applicantId' : string,
+  'fullName' : string,
+  'amountSought' : [] | [bigint],
+  'mizanScore' : [] | [bigint],
+  'preferredInstrument' : string,
+  'registrationStatus' : string,
+  'financingPurpose' : string,
+  'monthlyIncome' : [] | [bigint],
 }
 export type RegistrationStatus = { 'pending' : null } |
   { 'underReview' : null } |
@@ -403,15 +443,15 @@ export type Result = { 'ok' : null } |
   { 'err' : string };
 export type Result_1 = { 'ok' : string } |
   { 'err' : string };
-export type Result_2 = {
+export type Result_2 = { 'ok' : bigint } |
+  { 'err' : string };
+export type Result_3 = {
     'ok' : {
       'status' : RegistrationStatus,
       'tawthiqDone' : boolean,
       'mizanDone' : boolean,
     }
   } |
-  { 'err' : string };
-export type Result_3 = { 'ok' : bigint } |
   { 'err' : string };
 export type Result_4 = {
     'ok' : { 'total' : bigint, 'items' : Array<NotificationRecord> }
@@ -609,14 +649,17 @@ export interface _SERVICE {
     { 'ok' : MizanRecord } |
       { 'err' : string }
   >,
+  'getMockCycleBalance' : ActorMethod<[], bigint>,
   'getMyBusinessProfile' : ActorMethod<[], [] | [BusinessProfile]>,
   'getMyDocument' : ActorMethod<[DocumentType], [] | [DocumentRecord]>,
   'getMyFinancierProfile' : ActorMethod<[], [] | [FinancierProfile]>,
   'getMyIndividualProfile' : ActorMethod<[], Result_5>,
   'getMyNotifications' : ActorMethod<[bigint, bigint], Result_4>,
   'getMyTawthiqAppeals' : ActorMethod<[], Array<TawthiqAppeal>>,
+  'getPipeline' : ActorMethod<[], Array<[Principal, PipelineStage]>>,
   'getPreliminaryMizanByBusiness' : ActorMethod<[UserId], [] | [MizanRecord]>,
   'getPreliminaryMizanResult' : ActorMethod<[], [] | [MizanRecord]>,
+  'getProfilePhoto' : ActorMethod<[Principal], [] | [string]>,
   'getShortlist' : ActorMethod<[], Array<ShortlistEntry>>,
   'getStableStateVersion' : ActorMethod<[], bigint>,
   'getTawthiqAdminNote' : ActorMethod<[UserId], [] | [string]>,
@@ -641,7 +684,12 @@ export interface _SERVICE {
     }
   >,
   'getTawthiqRecord' : ActorMethod<[UserId], [] | [TawthiqRecord]>,
-  'getUnreadNotificationCount' : ActorMethod<[], Result_3>,
+  'getUnreadNotificationCount' : ActorMethod<[], Result_2>,
+  'get_my_threads' : ActorMethod<[], Array<DirectMessageThread>>,
+  'get_privacy_settings' : ActorMethod<[string], ProfilePrivacySettings>,
+  'get_public_profile' : ActorMethod<[string], [] | [PublicApplicantProfile]>,
+  'get_thread_messages' : ActorMethod<[string, string], Array<Message>>,
+  'get_unread_count' : ActorMethod<[], bigint>,
   'isAdminBootstrapped' : ActorMethod<[], boolean>,
   'isCallerAdmin' : ActorMethod<[], boolean>,
   'linkBankAccount' : ActorMethod<[string], BusinessProfile>,
@@ -653,7 +701,9 @@ export interface _SERVICE {
   'listFinancingReadyApplicants' : ActorMethod<[bigint, bigint], Page>,
   'listMyDocuments' : ActorMethod<[], Array<DocumentRecord>>,
   'markNotificationsRead' : ActorMethod<[], Result>,
-  'pollIndividualStatus' : ActorMethod<[], Result_2>,
+  'mark_messages_read' : ActorMethod<[string, string], Result>,
+  'mockTopUp' : ActorMethod<[bigint], bigint>,
+  'pollIndividualStatus' : ActorMethod<[], Result_3>,
   'redeemAdminInviteLink' : ActorMethod<[string], Result>,
   'registerAsFinancier' : ActorMethod<
     [
@@ -675,6 +725,11 @@ export interface _SERVICE {
     { 'ok' : null } |
       { 'err' : string }
   >,
+  'removePipelineEntry' : ActorMethod<
+    [Principal],
+    { 'ok' : null } |
+      { 'err' : string }
+  >,
   'requestAccountClosure' : ActorMethod<[], Result>,
   'requestIndividualBankLink' : ActorMethod<[], Result_1>,
   'reviewTawthiqAppeal' : ActorMethod<
@@ -689,9 +744,20 @@ export interface _SERVICE {
     { 'ok' : null } |
       { 'err' : string }
   >,
+  'send_message' : ActorMethod<[string, string, Principal, string], Result_2>,
   'setCredentials' : ActorMethod<[CredentialsSettings], undefined>,
   'setFinancierStatus' : ActorMethod<
     [Principal, FinancierStatus, [] | [string]],
+    { 'ok' : null } |
+      { 'err' : string }
+  >,
+  'setPipelineStage' : ActorMethod<
+    [Principal, PipelineStage],
+    { 'ok' : null } |
+      { 'err' : string }
+  >,
+  'setProfilePhoto' : ActorMethod<
+    [string],
     { 'ok' : null } |
       { 'err' : string }
   >,
@@ -781,6 +847,10 @@ export interface _SERVICE {
     [BusinessProfileUpdate],
     { 'ok' : null } |
       { 'err' : string }
+  >,
+  'update_privacy_settings' : ActorMethod<
+    [string, ProfilePrivacySettings],
+    Result
   >,
   'uploadDocument' : ActorMethod<[DocumentType, ExternalBlob], DocumentRecord>,
   'validateAdminInviteLink' : ActorMethod<[string], boolean>,

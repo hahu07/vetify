@@ -1,5 +1,7 @@
+import { createActor } from "@/backend";
 import { NotificationPanel } from "@/components/NotificationPanel";
 import { SessionTimeoutModal } from "@/components/SessionTimeoutModal";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -12,6 +14,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useDarkMode } from "@/hooks/use-dark-mode";
 import { useUserRole } from "@/hooks/use-user-role";
 import { cn } from "@/lib/utils";
+import { useActor } from "@caffeineai/core-infrastructure";
 import { Link, useLocation, useRouter } from "@tanstack/react-router";
 import {
   BrainCircuit,
@@ -22,13 +25,14 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  MessageCircle,
   Moon,
   Shield,
   Sun,
   User,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const navItems = [
   { label: "Overview", href: "/individual/dashboard", icon: LayoutDashboard },
@@ -40,6 +44,7 @@ const navItems = [
   },
   { label: "Bank Linking", href: "/individual/bank", icon: CreditCard },
   { label: "My Profile", href: "/individual/profile", icon: User },
+  { label: "Messages", href: "/messages", icon: MessageCircle },
 ];
 
 interface IndividualLayoutProps {
@@ -49,11 +54,26 @@ interface IndividualLayoutProps {
 export function IndividualLayout({ children }: IndividualLayoutProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
   const { logout } = useAuth();
   const { isDark, toggleDark } = useDarkMode();
   const { profile } = useUserRole();
   const router = useRouter();
   const location = useLocation();
+  const { actor, isFetching } = useActor(createActor);
+
+  useEffect(() => {
+    if (!actor || isFetching) return;
+    const fetchUnread = () => {
+      actor
+        .get_unread_count()
+        .then((n) => setUnreadCount(Number(n)))
+        .catch(() => {});
+    };
+    fetchUnread();
+    const id = setInterval(fetchUnread, 10_000);
+    return () => clearInterval(id);
+  }, [actor, isFetching]);
 
   const fullName =
     profile && "fullName" in profile
@@ -127,7 +147,16 @@ export function IndividualLayout({ children }: IndividualLayoutProps) {
               title={collapsed && !mobile ? item.label : undefined}
             >
               <Icon className="h-4 w-4 shrink-0" />
-              {(!collapsed || mobile) && <span>{item.label}</span>}
+              {(!collapsed || mobile) && (
+                <span className="flex-1">{item.label}</span>
+              )}
+              {(!collapsed || mobile) &&
+                item.label === "Messages" &&
+                unreadCount > 0 && (
+                  <Badge className="ml-auto h-4 min-w-4 rounded-full px-1 text-[9px] leading-none">
+                    {unreadCount}
+                  </Badge>
+                )}
             </Link>
           );
         })}

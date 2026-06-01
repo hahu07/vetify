@@ -2,116 +2,127 @@
 
 ## Direction
 
-HalalVet Kashif Agent Extension — visual system for investment discovery with compatibility matching, deal reports, and side-by-side profile comparison. Extends existing Tawthiq and Mizan agents with premium analytics dashboard aesthetic for financier-side investment discovery.
+Vetify 2.0 — extended with deal pipeline Kanban board, profile photo uploads, cycle balance monitoring, and admin compliance dashboard. Maintains existing dark/light card-based aesthetic while introducing workflow and operational visibility features.
 
 ## Tone
 
-Premium, data-driven, trustworthy — investment analytics platform optimized for Islamic finance professionals making evidence-based financing decisions. Compatibility scores and deal reports frame borrower profiles as investable opportunities, not approval decisions.
+Professional, data-driven, operationally transparent — extending the existing Kashif investment discovery interface with deal pipeline management, personal identity management, and infrastructure health monitoring for admin oversight.
 
 ## Differentiation
 
-Compatibility scoring visualized as animated gauge indicators ranked in discovery list; side-by-side comparison view surfaces key financial differences and compliance alignments at a glance. Deal report cards generate comprehensive investment narratives from Mono bank data and Mizan underwriting results, positioned as primary input for financier decision-making.
+Kanban board visualizes deal progression stages (Reviewing → Due Diligence → Offer Sent → Closed) with drag-and-drop affordance and real-time status badges. Cycle balance card surfaces ICP infrastructure health at a glance. Profile photo uploads introduce personal identity into the fintech workflow. Admin compliance view maintains regulatory audit trail through message thread monitoring.
 
-## Color Palette Extension (Kashif)
+## Color Palette Extension
 
-| Token                 | OKLCH (Light)     | OKLCH (Dark)      | Role                                        |
-| --------------------- | ----------------- | ----------------- | ------------------------------------------- |
-| compatibility-high    | 0.55 0.18 150     | 0.65 0.2 150      | High-compatibility match, strong investment |
-| compatibility-medium  | 0.7 0.15 85       | 0.75 0.15 85      | Medium compatibility, requires deeper review |
-| compatibility-low     | 0.65 0.2 25       | 0.65 0.2 25       | Low compatibility, low priority ranking      |
-| deal-card-bg          | 1.0 0.0 0         | 0.2 0.01 260      | Deal report card background                 |
-| deal-highlight        | 0.92 0.01 260     | 0.22 0.01 260     | Deal metric highlight zone                  |
-| comparison-diff       | 0.96 0.015 150    | 0.25 0.015 150    | Comparison view diff highlight              |
+| Token | OKLCH (Light) | OKLCH (Dark) | Role |
+| --- | --- | --- | --- |
+| cycle-healthy | 0.65 0.2 150 | 0.65 0.2 150 | Cycles available, platform operational |
+| cycle-low | 0.75 0.15 85 | 0.75 0.15 85 | Cycles below threshold, top-up recommended |
+| cycle-critical | 0.65 0.2 25 | 0.65 0.2 25 | Cycles insufficient, feature blocked |
+| kanban-column-bg | 1.0 0.0 0 | 0.2 0.01 260 | Kanban column background (draggable zone) |
+| compliance-unread | 0.65 0.2 25 | 0.65 0.2 25 | Unread compliance message thread |
 
 ## Typography
 
-- Display: Lora (serif) — deal title headers, investment narrative headers, authority in underwriting context
-- Body: General Sans (sans-serif) — compatibility labels, deal summary text, financier instructions
-- Mono: Geist Mono — compatibility score (0–100), financial metrics, transaction amounts
-- Scale: deal header `text-lg font-semibold`, compatibility label `text-sm font-medium`, metric value `font-mono text-base`, narrative body `text-sm leading-relaxed`
+- Display: Lora (serif) — deal card headers, investment profiles, authority in underwriting
+- Body: General Sans (sans-serif) — Kanban column labels, cycle status text, compliance thread metadata
+- Mono: Geist Mono — cycle balance numbers, currency inputs (NGN), financial metrics
+- Scale: Kanban card `text-sm font-medium`, column header `text-xs font-semibold uppercase`, cycle status `font-mono text-base`, compliance thread `text-xs`
 
 ## Elevation & Depth
 
-Deal cards use elevated shadow (4px blur); on hover, shadow increases (8px); comparison view uses maximum elevation (12px). All shadows dark-mode aware. No inset shadows — deals float above content layer for prominence.
+Kanban cards use base shadow (2px blur); on drag, shadow elevates to 12px for visual feedback. Cycle balance card matches analytics card treatment (3px left accent bar, hover lift). Profile avatar circular zone with overlay opacity shift on hover. Compliance thread list uses minimal elevation — focus on read state indicator (left border) rather than shadow.
 
-## Structural Zones (Kashif Discovery)
+## Structural Zones
 
-| Zone                 | Background       | Border             | Notes                                   |
-| -------------------- | ---------------- | ------------------ | --------------------------------------- |
-| Discovery List       | background       | —                  | Paginated list of ranked compatibilities |
-| Compatibility Gauge  | card             | compatibility-line | 0–100 animated circular gauge per deal  |
-| Matched Badge        | primary faded    | primary border     | Teal badge (right side of card)         |
-| Deal Card            | deal-card-bg     | border subtle      | Investment summary snapshot             |
-| Shortlist Toggle     | muted            | —                  | Star icon, activates on click            |
-| Comparison Trigger   | secondary        | —                  | Button to open side-by-side view        |
-
-## Structural Zones (Kashif Comparison)
-
-| Zone          | Background     | Border        | Notes                                  |
-| ------------- | -------------- | ------------- | -------------------------------------- |
-| Profile Left  | card           | border subtle | Profile A details (business data)      |
-| Profile Right | card           | border subtle | Profile B details (business data)      |
-| Diff Rows     | comparison-diff| —             | Highlighted row when values diverge    |
-| Metrics Bar   | card           | —             | Horizontal bar chart (income/debt)     |
-| Risk/Halal    | badge zone     | colored       | Side-by-side risk and compliance badges |
-| Action Zone   | secondary      | —             | Select/reject buttons below comparison |
+| Zone | Background | Border | Notes |
+| --- | --- | --- | --- |
+| Kanban Column | kanban-column-bg | subtle | Four draggable columns, min-height 400px, gap 1rem |
+| Kanban Card | card | border | Business profile inside column, hover lift on drag |
+| Cycle Balance Card | analytics-kpi-bg | border | 3px left accent bar (color-coded: green/amber/red), horizontal progress bar |
+| Profile Avatar | card | border | Circular 120x120px zone, camera icon overlay, uploading state spinner |
+| Compliance Thread | card | left-accent | Unread state: 3px left border in compliance-unread color |
+| Compliance Avatar | muted | — | 24px circular avatars of thread participants |
 
 ## Spacing & Rhythm
 
-Discovery list uses 1rem vertical spacing between cards; 1.5rem padding inside deal cards. Compatibility gauge 80px diameter, right-aligned in card header. Comparison view uses 2rem horizontal gap between profiles. Metrics bars 12px height with 1rem spacing. Consistent 2rem section breaks between discovery list and detail view.
+Kanban columns use 1rem gap between cards, 1rem padding inside column. Kanban card padding 1rem. Cycle balance card 1.5rem horizontal padding, 1rem vertical. Profile avatar 120px diameter, 2rem spacing from adjacent content. Compliance thread list max-height 400px with scroll, 0.75rem gap between threads, 1rem padding inside thread item.
 
-## Component Patterns — Kashif Additions
+## Component Patterns
 
-- **Compatibility Gauge:** 80px SVG circular gauge, animated fill 0–100 on mount (compatibility-pulse infinite), color-coded: green (high), amber (medium), red (low)
-- **Matched Badge:** Teal primary color, outlined style with 1px border, uppercase label + checkmark icon, floats top-right of discovery card
-- **Deal Card:** Slight elevation (kashif-card shadow), 1.5rem padding, Lora serif h3 title, muted background metric rows, compact layout for scanning
-- **Shortlist Star:** Toggles on click (shortlist-toggle animation), fills primary color when selected, outline style when unselected
-- **Comparison View:** Two-column layout, metrics bars for income/debt/revenue side-by-side, diff rows highlight in comparison-diff background, risk/halal badges side-by-side at bottom
+- **Kanban Column**: Off-white (light) or slate (dark) background, subtle rounded corners (6px), min-height 400px, draggable zone with visual feedback on drag-over
+- **Kanban Card**: Card background, 1px border, Lora header, muted metrics rows, status badge (compatibility gauge or deal status), grab cursor, hover lift (6px blur shadow, -2px translateY)
+- **Cycle Balance Card**: Horizontal layout — status badge (colored circle) + text label (healthy/low/critical) + progress bar + numeric display. Bar height 8px, border-radius 4px, color-coded fill
+- **Profile Avatar**: Circular zone, border-radius 50%, camera icon overlay on hover, uploading state shows spinner or image skeleton, click to trigger file input
+- **Compliance Thread Item**: Card background, unread state shows 3px left border accent, hover background shift to muted/0.5, compact layout with participant avatars (24px circular) + timestamp + message preview (truncated)
 
 ## Motion
 
-- Discovery list: Cards enter with kashif-reveal (0.4s ease-out) staggered by index
-- Compatibility gauge: SVG stroke animates from 0 to final % on mount (1s cubic-easing), continuous subtle pulse (compatibility-pulse 2s)
-- Shortlist toggle: Momentary scale animation on click (shortlist-toggle 0.3s ease-out)
-- Comparison view: Profile cards fade in (200ms), diffs highlight with smooth background color transition (300ms)
-- Hover: Discovery cards lift slightly (kashif-hover shadow on hover), comparison metrics brighten on row hover (opacity shift)
+- Kanban enter: Cards animate in 0.3s ease-out (opacity 0→1, translateY 8px→0)
+- Kanban drag: On active drag, card shadow elevates to 12px, opacity 0.9 for visual feedback
+- Kanban drop: Smooth drop-to-position animation (200ms ease-out)
+- Cycle pulse: Continuous subtle pulse on healthy status (cycle-pulse 2s ease-in-out infinite)
+- Avatar upload: Spinner during upload, fade-in on image load
+- Compliance thread: Thread item fades in on mount (200ms ease-out)
 
 ## Constraints
 
-- No gradients, no gloss effects, no decorative animations — investment analytics require visual clarity
-- Compatibility gauges SVG-based for crisp rendering and precise score visualization
-- All compatibility badge colors conform to WCAG AA contrast requirements
-- Deal card layouts must fit 1200px viewport; mobile uses stacked single-column with full-width shortlist and comparison buttons
-- Comparison view requires side-by-side layout on desktop (≥md), stacked on mobile with clear section dividers
-- All tokens use OKLCH values only — no hex, rgb(), or named colors
-- Discovery list pagination always visible; max 20 results per page to maintain performance
-- Sidebar-first layout preserved; Kashif discovery/comparison views use full content area
+- Kanban board designed for 1200px+ viewport; mobile uses single-column with horizontal scroll for columns
+- Cycle balance card always visible in dashboard header or sticky panel
+- Profile avatar upload zone max-size 120x120px; squared proportions enforced (circular crop)
+- Compliance thread list max-height 400px with scroll; unread count badge separate from thread list
+- All cycle status colors conform to WCAG AA contrast on both light and dark backgrounds
+- No new fonts — extend existing Lora/General Sans/Geist Mono palette
+- NGN currency inputs use mono font for alignment and clarity; leading zero suppression in display
+- Kanban cards remain draggable on touch devices; touch feedback via scale() instead of transform (performance)
 
 ## Signature Detail
 
-Compatibility gauge animation frames deal-discovery not as binary approval but as investment opportunity ranking — the visual progression from 0 to final score creates a moment of investment assessment, positioning Kashif as the analytical lens through which financiers evaluate opportunities. Animated reveal on discovery list reinforces the sense of discovering new matching opportunities.
+Kanban card drag-and-drop interaction creates a tangible sense of deal progression — financiers physically move opportunities through stages, reinforcing active deal management. Cycle balance indicator surfaces infrastructure health without requiring admin clicks, inverting the usual pattern where operational status is hidden behind a settings page. Profile avatar as circular zone with overlay affordance creates a persistent identity anchor across the platform, grounding abstract financing instruments in real business/person relationships.
 
-## Kashif Structural Zones (Financier Discovery)
+## Kanban Board (Deal Pipeline)
 
-| Zone                     | Content                                          | Notes                                                    |
-| ------------------------ | ------------------------------------------------ | -------------------------------------------------------- |
-| Discovery Ranking List   | Business cards ranked by compatibility score     | Animated reveal, highest matches first, pagination 20/page |
-| Compatibility Gauge      | 0–100 circular SVG, color-coded (green/amber/red) | Right side of card header, animated fill on mount        |
-| Matched Badge            | Checkmark + "Matched" label in primary color     | Top-right corner of discovery card                       |
-| Deal Summary Card        | Business name, industry, risk level, compliance  | Compact snapshot, Lora header, muted metric rows         |
-| Shortlist Star Toggle    | Click to add to personal shortlist                | Primary color when selected, outline when unselected     |
-| Comparison Trigger       | Opens side-by-side detail view                    | Secondary button, appears below discover card            |
-| Deal Report Preview      | AI-generated investment narrative                 | Truncated prose, "View Full Report" expands inline       |
+| Zone | Content | Notes |
+| --- | --- | --- |
+| Column Header | Stage label (Reviewing, Due Diligence, Offer Sent, Closed) | Uppercase, 1px bottom border, slight text-transform shadow |
+| Column Body | Draggable business cards, ranked by compatibility score | Min 400px height, cards enter with animation, drag-over state shows insert line |
+| Business Card | Business name, risk level, compatibility gauge, shortlist star, comparison button | Lora header, muted metric rows, drag affordance cursor |
+| Status Badge | Compatibility gauge 0-100 circular SVG | Right side of card, color-coded (green/amber/red) |
 
-## Kashif Structural Zones (Comparison View)
+## Cycle Balance Card (Infrastructure Health)
 
-| Zone                 | Content                                   | Notes                                           |
-| -------------------- | ----------------------------------------- | ----------------------------------------------- |
-| Profile Left         | Business A full profile (name, CAC, etc.) | Card background, teal left border accent        |
-| Profile Right        | Business B full profile                   | Card background, muted left border              |
-| Risk Badge Pair      | Low/Medium/High risks side-by-side        | Color-coded badges, clear visual contrast       |
-| Halal Compliance     | Compliance scores and flags compared      | Side-by-side check marks and warnings           |
-| Financial Metrics    | Income, debt, revenue horizontal bars     | Normalized 0–100 scale for easy comparison      |
-| Transaction Summary  | Top categories, frequency, patterns       | Muted background rows, mono font for values     |
-| Action Buttons       | Select / Reject investment opportunity    | Bottom row, clear hierarchy (primary / secondary) |
+| Zone | Content | Notes |
+| --- | --- | --- |
+| Status Icon | Colored circle (green/amber/red) | Matches cycle-healthy / cycle-low / cycle-critical token |
+| Status Label | "Healthy" / "Low" / "Critical" | Text color matches status icon |
+| Progress Bar | Horizontal bar chart (current cycles / max cycles) | Height 8px, background muted, fill color-coded |
+| Numeric Display | "Current: 500K / Max: 1M cycles" | Mono font, smaller text |
+| Action Link | "Top Up" button (if low/critical) | Links to admin settings or cycles wallet page |
 
+## Admin Compliance Message View
+
+| Zone | Content | Notes |
+| --- | --- | --- |
+| Thread Header | Participant avatars + names + timestamp | 24px avatars, left-align |
+| Unread Badge | Red dot or number badge | Compliance-unread color, right side |
+| Message Preview | First 80 characters of latest message | Muted text, ellipsis if truncated |
+| Read State | Left border accent (3px) for unread | Visual affordance without text label |
+| Hover State | Background shift to muted/0.5 | Indicates interactivity |
+
+## Form Input Improvements
+
+| Input Type | Pattern | Notes |
+| --- | --- | --- |
+| NGN Currency | "₦ 500,000" with number formatting | Mono font, group separators (1000s), no decimals |
+| Monthly Income | "₦ 250,000 / month" with label | Mono font, clear unit label |
+| Helper Text | "e.g. ₦ 1,000,000 for loan amount" | Muted foreground, 0.75rem spacing below input |
+| Validation | Red border + error message on blur if invalid | Message: "Enter a valid amount (numbers only)" |
+| Placeholder | "e.g. 500000" | Muted color, no Tawthiq/agent placeholder text bleeding in |
+
+## Light Mode Adjustments
+
+Light mode uses inverse token values: kanban-column-bg white (1.0 0.0 0), cycle status colors remain consistent, compliance thread borders use same accent colors. Avatar overlay semi-transparent black (0.0 0.0 0 / 0.4). All shadows remain subtle — no sharp elevation differences between light and dark.
+
+## Dark Mode Adjustments
+
+Dark mode kanban-column-bg slate (0.2 0.01 260), card background remains dark-slate (0.2 0.01 260), cycle status colors vibrant (higher chroma). Avatar overlay pure black. Shadows slightly stronger for depth on dark canvas (0 12px 24px / 0.25 opacity vs light 0.15).

@@ -28,6 +28,7 @@ import { AlertCircle, CheckCircle2, Info, Shield, User } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { TermsModal } from "../components/TermsModal";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,7 @@ const DRAFT_KEY = "vetify_individual_draft";
 const STEPS = [
   { label: "Applicant Type" },
   { label: "Personal Identity" },
+  { label: "Identity Verification" },
   { label: "Financing Purpose" },
   { label: "Financial Profile" },
   { label: "Shariah & Terms" },
@@ -404,6 +406,10 @@ export default function RegisterIndividualPage() {
   const [draft, setDraft] = useState<FormDraft>(EMPTY_DRAFT);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // Formatted display values for currency inputs (with commas)
+  const [displayAmountSought, setDisplayAmountSought] = useState("");
+  const [displayMonthlyIncome, setDisplayMonthlyIncome] = useState("");
+
   const cardRef = useRef<HTMLDivElement>(null);
 
   // ── LocalStorage draft ──────────────────────────────────────────────────────
@@ -416,6 +422,16 @@ export default function RegisterIndividualPage() {
       if (saved) {
         const parsed = JSON.parse(saved) as Partial<FormDraft>;
         setDraft((prev) => ({ ...prev, ...parsed }));
+        if (parsed.amountSought) {
+          const num = Number(parsed.amountSought);
+          if (!Number.isNaN(num))
+            setDisplayAmountSought(num.toLocaleString("en-NG"));
+        }
+        if (parsed.monthlyIncome) {
+          const num = Number(parsed.monthlyIncome);
+          if (!Number.isNaN(num))
+            setDisplayMonthlyIncome(num.toLocaleString("en-NG"));
+        }
       }
     } catch {
       // ignore corrupt draft
@@ -433,6 +449,8 @@ export default function RegisterIndividualPage() {
   function clearDraft() {
     localStorage.removeItem(DRAFT_KEY);
     setDraft(EMPTY_DRAFT);
+    setDisplayAmountSought("");
+    setDisplayMonthlyIncome("");
     setStep(0);
     setErrors({});
     setReturnToSummary(false);
@@ -591,12 +609,15 @@ export default function RegisterIndividualPage() {
       localStorage.removeItem(DRAFT_KEY);
       await refetch();
       setSubmitSuccess(true);
+      toast.success("Application submitted successfully!");
+      router.navigate({ to: "/individual/dashboard" });
     } catch (err) {
       const msg =
         err instanceof Error
           ? err.message
           : "Submission failed. Please try again.";
       setSubmitError(msg);
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -766,7 +787,7 @@ export default function RegisterIndividualPage() {
                       Personal Identity
                     </h2>
                     <p className="text-sm text-muted-foreground mt-0.5">
-                      Step 1 of 6 \u2014 Tell us about yourself
+                      Step 2 of 6 — Tell us about yourself
                     </p>
                   </div>
 
@@ -908,7 +929,7 @@ export default function RegisterIndividualPage() {
                       Identity Verification
                     </h2>
                     <p className="text-sm text-muted-foreground mt-0.5">
-                      Step 2 of 6 \u2014 BVN and NIN for Tawthiq KYC screening
+                      Step 3 of 6 — BVN and NIN for Tawthiq KYC screening
                     </p>
                   </div>
 
@@ -1008,7 +1029,7 @@ export default function RegisterIndividualPage() {
                       Financing Purpose
                     </h2>
                     <p className="text-sm text-muted-foreground mt-0.5">
-                      Step 3 of 6 \u2014 Your financing needs and preferred
+                      Step 4 of 6 — Your financing needs and preferred
                       instrument
                     </p>
                   </div>
@@ -1069,30 +1090,35 @@ export default function RegisterIndividualPage() {
                       </motion.div>
                     )}
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-6">
                       <div>
                         <Label htmlFor="amountSought">
                           Amount Sought (NGN) *
                         </Label>
                         <div className="relative mt-1.5">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">
                             \u20a6
                           </span>
                           <Input
                             id="amountSought"
-                            type="number"
-                            min={10000}
-                            placeholder="e.g. 2000000"
-                            value={draft.amountSought}
-                            onChange={(e) =>
-                              set("amountSought", e.target.value)
-                            }
-                            className="pl-7"
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="\u20a60"
+                            value={displayAmountSought}
+                            onChange={(e) => {
+                              const raw = e.target.value.replace(/\D/g, "");
+                              const num = raw ? Number.parseInt(raw, 10) : 0;
+                              set("amountSought", raw);
+                              setDisplayAmountSought(
+                                num > 0 ? num.toLocaleString("en-NG") : "",
+                              );
+                            }}
+                            className="pl-10"
                             data-ocid="register_individual.amount_sought_input"
                           />
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          Minimum: \u20a610,000
+                        <p className="text-xs text-muted-foreground mt-1.5">
+                          Enter amount in Nigerian Naira (NGN)
                         </p>
                         <FieldError
                           msg={errors.amountSought}
@@ -1105,22 +1131,30 @@ export default function RegisterIndividualPage() {
                           Monthly Income (NGN) *
                         </Label>
                         <div className="relative mt-1.5">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground pointer-events-none">
                             \u20a6
                           </span>
                           <Input
                             id="monthlyIncome"
-                            type="number"
-                            min={1}
-                            placeholder="e.g. 350000"
-                            value={draft.monthlyIncome}
-                            onChange={(e) =>
-                              set("monthlyIncome", e.target.value)
-                            }
-                            className="pl-7"
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="\u20a60"
+                            value={displayMonthlyIncome}
+                            onChange={(e) => {
+                              const raw = e.target.value.replace(/\D/g, "");
+                              const num = raw ? Number.parseInt(raw, 10) : 0;
+                              set("monthlyIncome", raw);
+                              setDisplayMonthlyIncome(
+                                num > 0 ? num.toLocaleString("en-NG") : "",
+                              );
+                            }}
+                            className="pl-10"
                             data-ocid="register_individual.monthly_income_input"
                           />
                         </div>
+                        <p className="text-xs text-muted-foreground mt-1.5">
+                          Your average monthly take-home income
+                        </p>
                         <FieldError
                           msg={errors.monthlyIncome}
                           ocid="register_individual.monthly_income_input.field_error"
@@ -1206,7 +1240,7 @@ export default function RegisterIndividualPage() {
                       Terms &amp; Compliance
                     </h2>
                     <p className="text-sm text-muted-foreground mt-0.5">
-                      Step 4 of 6 \u2014 Review what happens next and accept our
+                      Step 5 of 7 — Review what happens next and accept our
                       terms
                     </p>
                   </div>
@@ -1288,16 +1322,12 @@ export default function RegisterIndividualPage() {
                           className="text-sm text-foreground cursor-pointer"
                         >
                           I have read and agree to the{" "}
-                          <button
-                            type="button"
-                            className="underline font-medium hover:opacity-80"
-                            style={{
-                              color: "oklch(var(--individual-accent))",
-                            }}
-                            data-ocid="register_individual.terms_link"
-                          >
-                            Terms and Conditions
-                          </button>
+                          <TermsModal
+                            type="terms"
+                            triggerText="Terms & Conditions"
+                            triggerClassName="text-[oklch(var(--individual-accent))]"
+                            ocid="register_individual.terms_link"
+                          />
                         </label>
                         <FieldError
                           msg={errors.termsAccepted}
@@ -1325,16 +1355,12 @@ export default function RegisterIndividualPage() {
                           className="text-sm text-foreground cursor-pointer"
                         >
                           I have read and agree to the{" "}
-                          <button
-                            type="button"
-                            className="underline font-medium hover:opacity-80"
-                            style={{
-                              color: "oklch(var(--individual-accent))",
-                            }}
-                            data-ocid="register_individual.privacy_link"
-                          >
-                            Privacy Policy
-                          </button>
+                          <TermsModal
+                            type="privacy"
+                            triggerText="Privacy Policy"
+                            triggerClassName="text-[oklch(var(--individual-accent))]"
+                            ocid="register_individual.privacy_link"
+                          />
                         </label>
                         <FieldError
                           msg={errors.privacyAccepted}
@@ -1580,10 +1606,16 @@ export default function RegisterIndividualPage() {
                 {step === 0 ? "Cancel" : "\u2190 Back"}
               </Button>
 
-              {step < 4 ? (
+              {step < 5 ? (
                 <Button
                   type="button"
                   onClick={handleNext}
+                  disabled={
+                    step === 4 &&
+                    (!draft.termsAccepted ||
+                      !draft.privacyAccepted ||
+                      !draft.ndprAccepted)
+                  }
                   style={{
                     background: "oklch(var(--individual-accent))",
                     color: "oklch(var(--individual-accent-foreground))",
@@ -1592,13 +1624,15 @@ export default function RegisterIndividualPage() {
                 >
                   {returnToSummary
                     ? "Return to Summary \u2192"
-                    : "Continue \u2192"}
+                    : step === 4
+                      ? "Next \u2192"
+                      : "Continue \u2192"}
                 </Button>
               ) : (
                 <Button
                   type="button"
                   onClick={handleSubmit}
-                  disabled={isSubmitting || !actor || !draft.ndprAccepted}
+                  disabled={isSubmitting || !actor}
                   className="gap-2 min-w-[160px]"
                   style={{
                     background: "oklch(var(--individual-accent))",

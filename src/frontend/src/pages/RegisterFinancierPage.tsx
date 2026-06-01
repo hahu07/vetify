@@ -6,6 +6,7 @@ import type {
 import { Layout } from "@/components/Layout";
 import { LoadingSpinner } from "@/components/LoadingSpinner";
 import { PageHeader } from "@/components/PageHeader";
+import { TermsModal } from "@/components/TermsModal";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -452,6 +453,7 @@ export default function RegisterFinancierPage() {
   const [grpRisk, setGrpRisk] = useState("");
 
   const [detailErrors, setDetailErrors] = useState<Record<string, string>>({});
+  const [complianceError, setComplianceError] = useState("");
   // ── localStorage restore on mount ─────────────────────────────────────────
   useEffect(() => {
     if (isRestored.current) return;
@@ -612,7 +614,15 @@ export default function RegisterFinancierPage() {
   // ── Submit ────────────────────────────────────────────────────────────────
 
   const handleSubmit = async () => {
-    if (!validateDetails() || !actor) return;
+    if (!validateDetails() || !actor) {
+      if (!actor) toast.error("Please connect your wallet before submitting.");
+      return;
+    }
+    if (!termsAccepted || !privacyAccepted || !ndprAccepted) {
+      setComplianceError("Please accept all terms and conditions to proceed");
+      return;
+    }
+    setComplianceError("");
     setIsSubmitting(true);
     try {
       const institutionDetails =
@@ -669,7 +679,7 @@ export default function RegisterFinancierPage() {
             ? indivName
             : grpName;
 
-      await actor.registerAsFinancier(
+      const result = await actor.registerAsFinancier(
         displayName,
         financierType === "institution" ? instLicense : "",
         financierType === "institution"
@@ -685,6 +695,13 @@ export default function RegisterFinancierPage() {
         individualDetails,
         groupDetails,
       );
+      if ("err" in result) {
+        toast.error(
+          result.err instanceof Error ? result.err.message : String(result.err),
+        );
+        setIsSubmitting(false);
+        return;
+      }
       await refetch();
       toast.success(
         "Financier registration submitted! Your account is under review.",
@@ -692,7 +709,8 @@ export default function RegisterFinancierPage() {
       localStorage.removeItem(DRAFT_KEY);
       router.navigate({ to: "/financier/dashboard" });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Registration failed");
+      const msg = err instanceof Error ? err.message : "Registration failed";
+      toast.error(msg);
     } finally {
       setIsSubmitting(false);
     }
@@ -705,7 +723,40 @@ export default function RegisterFinancierPage() {
     else if (step === 1 && validateDetails()) {
       setReturnToSummary(false);
       setStep(2);
-    } else if (step >= 2 && step < 4) {
+    } else if (step === 2) {
+      const instruments =
+        financierType === "institution"
+          ? instInstruments
+          : financierType === "individual"
+            ? indivInstruments
+            : grpInstruments;
+      if (!instruments || instruments.length === 0) {
+        setDetailErrors((prev) => ({
+          ...prev,
+          instruments:
+            "Please select at least one preferred financing instrument",
+        }));
+        return;
+      }
+      setDetailErrors((prev) => ({ ...prev, instruments: "" }));
+      setReturnToSummary(false);
+      setStep((s) => s + 1);
+    } else if (step === 3) {
+      if (financierType === "individual" && !indivRisk) {
+        setDetailErrors((prev) => ({
+          ...prev,
+          riskAppetite: "Please select your risk appetite",
+        }));
+        return;
+      }
+      if (financierType === "group" && !grpRisk) {
+        setDetailErrors((prev) => ({
+          ...prev,
+          riskAppetite: "Please select your risk appetite",
+        }));
+        return;
+      }
+      setDetailErrors((prev) => ({ ...prev, riskAppetite: "" }));
       setReturnToSummary(false);
       setStep((s) => s + 1);
     }
@@ -911,6 +962,15 @@ export default function RegisterFinancierPage() {
                     onChange={setInstInstruments}
                     prefix="register_financier.inst"
                   />
+                  {detailErrors?.instruments &&
+                    financierType === "institution" && (
+                      <p
+                        className="text-destructive text-sm mt-2"
+                        data-ocid="register_financier.inst_instruments_error"
+                      >
+                        {detailErrors.instruments}
+                      </p>
+                    )}
                 </motion.div>
               )}
 
@@ -935,6 +995,15 @@ export default function RegisterFinancierPage() {
                     onChange={setIndivInstruments}
                     prefix="register_financier.indiv"
                   />
+                  {detailErrors?.instruments &&
+                    financierType === "individual" && (
+                      <p
+                        className="text-destructive text-sm mt-2"
+                        data-ocid="register_financier.indiv_instruments_error"
+                      >
+                        {detailErrors.instruments}
+                      </p>
+                    )}
                 </motion.div>
               )}
 
@@ -959,6 +1028,14 @@ export default function RegisterFinancierPage() {
                     onChange={setGrpInstruments}
                     prefix="register_financier.grp"
                   />
+                  {detailErrors?.instruments && financierType === "group" && (
+                    <p
+                      className="text-destructive text-sm mt-2"
+                      data-ocid="register_financier.grp_instruments_error"
+                    >
+                      {detailErrors.instruments}
+                    </p>
+                  )}
                 </motion.div>
               )}
 
@@ -1127,6 +1204,15 @@ export default function RegisterFinancierPage() {
                         msg={detailErrors.indivRisk}
                         ocid="register_financier.indiv_risk_error"
                       />
+                      {detailErrors?.riskAppetite &&
+                        financierType === "individual" && (
+                          <p
+                            className="text-destructive text-sm mt-1"
+                            data-ocid="register_financier.indiv_risk_appetite_error"
+                          >
+                            {detailErrors.riskAppetite}
+                          </p>
+                        )}
                     </div>
                     <div className="space-y-2 sm:col-span-2">
                       <Label className="block text-sm font-medium text-foreground mb-1">
@@ -1234,6 +1320,15 @@ export default function RegisterFinancierPage() {
                         msg={detailErrors.grpRisk}
                         ocid="register_financier.grp_risk_error"
                       />
+                      {detailErrors?.riskAppetite &&
+                        financierType === "group" && (
+                          <p
+                            className="text-destructive text-sm mt-1"
+                            data-ocid="register_financier.grp_risk_appetite_error"
+                          >
+                            {detailErrors.riskAppetite}
+                          </p>
+                        )}
                     </div>
                     <div className="space-y-2 sm:col-span-2">
                       <Label className="block text-sm font-medium text-foreground mb-1">
@@ -1864,14 +1959,11 @@ export default function RegisterFinancierPage() {
                       />
                       <span className="text-xs text-foreground leading-relaxed">
                         I have read and agree to the{" "}
-                        <a
-                          href="/terms"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary underline underline-offset-2"
-                        >
-                          Terms and Conditions
-                        </a>
+                        <TermsModal
+                          type="terms"
+                          triggerText="Terms and Conditions"
+                          triggerClassName="text-primary underline underline-offset-2"
+                        />
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
@@ -1889,14 +1981,11 @@ export default function RegisterFinancierPage() {
                       />
                       <span className="text-xs text-foreground leading-relaxed">
                         I have read and agree to the{" "}
-                        <a
-                          href="/privacy"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary underline underline-offset-2"
-                        >
-                          Privacy Policy
-                        </a>
+                        <TermsModal
+                          type="privacy"
+                          triggerText="Privacy Policy"
+                          triggerClassName="text-primary underline underline-offset-2"
+                        />
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
@@ -1924,6 +2013,14 @@ export default function RegisterFinancierPage() {
                         . <span className="text-destructive">*</span>
                       </span>
                     </label>
+                    {complianceError && (
+                      <p
+                        className="text-destructive text-sm mt-2"
+                        data-ocid="register_financier.compliance_error"
+                      >
+                        {complianceError}
+                      </p>
+                    )}
                   </div>
                 </motion.div>
               )}

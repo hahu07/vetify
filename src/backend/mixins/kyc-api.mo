@@ -140,6 +140,7 @@ mixin (
       proprietorDetails;
       preliminaryMizanRecord = null;
       mizanDivergenceAlert = false;
+      photoUrl = null;
     };
     businessProfiles.add(caller, profile);
 

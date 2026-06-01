@@ -100,6 +100,14 @@
     --analytics-accent-bar: 0.5 0.22 135;
     --compliance-modal-bg: 1.0 0.0 0;
     --compliance-modal-overlay: 0.0 0.0 0;
+
+    --cycle-healthy: 0.65 0.2 150;
+    --cycle-low: 0.75 0.15 85;
+    --cycle-critical: 0.65 0.2 25;
+    --kanban-column-bg: 1.0 0.0 0;
+    --kanban-card-drag: 0.95 0.005 260;
+    --compliance-unread: 0.65 0.2 25;
+    --avatar-overlay: 0.0 0.0 0;
   }
 
   .dark {
@@ -172,6 +180,14 @@
     --analytics-accent-bar: 0.65 0.2 135;
     --compliance-modal-bg: 0.2 0.01 260;
     --compliance-modal-overlay: 0.0 0.0 0;
+
+    --cycle-healthy: 0.65 0.2 150;
+    --cycle-low: 0.75 0.15 85;
+    --cycle-critical: 0.65 0.2 25;
+    --kanban-column-bg: 0.2 0.01 260;
+    --kanban-card-drag: 0.25 0.01 260;
+    --compliance-unread: 0.65 0.2 25;
+    --avatar-overlay: 0.0 0.0 0;
   }
 
   * {

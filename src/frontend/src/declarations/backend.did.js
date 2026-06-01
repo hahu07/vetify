@@ -173,6 +173,7 @@ export const BusinessProfile = IDL.Record({
   'preliminaryMizanRecord' : IDL.Opt(MizanRecord),
   'businessName' : IDL.Text,
   'businessType' : IDL.Text,
+  'photoUrl' : IDL.Opt(IDL.Text),
   'financingReady' : IDL.Bool,
   'financingReadyScore' : IDL.Nat,
   'preferredInstrument' : IDL.Opt(IDL.Text),
@@ -274,6 +275,7 @@ export const IndividualProfile = IDL.Record({
   'incomeSource' : IncomeSource,
   'fullName' : IDL.Text,
   'accountClosureRequestedAt' : IDL.Opt(Timestamp),
+  'photoUrl' : IDL.Opt(IDL.Text),
   'amountSought' : IDL.Nat,
   'preferredInstrument' : PreferredInstrument,
   'kycRecord' : IDL.Opt(KycCheckRecord),
@@ -350,6 +352,7 @@ export const FinancierProfile = IDL.Record({
   'createdAt' : Timestamp,
   'contactPerson' : IDL.Text,
   'areasOfFinancing' : IDL.Vec(IDL.Text),
+  'photoUrl' : IDL.Opt(IDL.Text),
   'email' : IDL.Text,
   'financierStatus' : FinancierStatus,
   'licenseNumber' : IDL.Text,
@@ -513,6 +516,12 @@ export const TawthiqAppeal = IDL.Record({
   'adminNote' : IDL.Opt(IDL.Text),
   'appealText' : IDL.Text,
 });
+export const PipelineStage = IDL.Variant({
+  'dueDiligence' : IDL.Null,
+  'closed' : IDL.Null,
+  'offerSent' : IDL.Null,
+  'reviewing' : IDL.Null,
+});
 export const ShortlistEntry = IDL.Record({
   'businessId' : IDL.Principal,
   'addedAt' : IDL.Int,
@@ -524,7 +533,40 @@ export const TawthiqOverviewStats = IDL.Record({
   'notReadyCount' : IDL.Nat,
   'passedCount' : IDL.Nat,
 });
-export const Result_3 = IDL.Variant({ 'ok' : IDL.Nat, 'err' : IDL.Text });
+export const Result_2 = IDL.Variant({ 'ok' : IDL.Nat, 'err' : IDL.Text });
+export const Message = IDL.Record({
+  'applicantId' : IDL.Text,
+  'messageId' : IDL.Nat,
+  'isRead' : IDL.Bool,
+  'messageText' : IDL.Text,
+  'timestamp' : IDL.Int,
+  'financierId' : IDL.Text,
+  'recipientId' : IDL.Principal,
+  'senderId' : IDL.Principal,
+});
+export const DirectMessageThread = IDL.Record({
+  'lastMessageAt' : IDL.Int,
+  'messages' : IDL.Vec(Message),
+  'participantIds' : IDL.Vec(IDL.Principal),
+  'threadId' : IDL.Text,
+});
+export const ProfilePrivacySettings = IDL.Record({
+  'applicantId' : IDL.Text,
+  'showFinancingAmount' : IDL.Bool,
+  'showMizanScore' : IDL.Bool,
+  'showDirectorNames' : IDL.Bool,
+  'showIncome' : IDL.Bool,
+});
+export const PublicApplicantProfile = IDL.Record({
+  'applicantId' : IDL.Text,
+  'fullName' : IDL.Text,
+  'amountSought' : IDL.Opt(IDL.Nat),
+  'mizanScore' : IDL.Opt(IDL.Nat),
+  'preferredInstrument' : IDL.Text,
+  'registrationStatus' : IDL.Text,
+  'financingPurpose' : IDL.Text,
+  'monthlyIncome' : IDL.Opt(IDL.Nat),
+});
 export const InviteLinkRecord = IDL.Record({
   'status' : IDL.Text,
   'expiresAt' : IDL.Int,
@@ -551,7 +593,7 @@ export const Page = IDL.Record({
   'pageSize' : IDL.Nat,
   'items' : IDL.Vec(ApplicantSummary),
 });
-export const Result_2 = IDL.Variant({
+export const Result_3 = IDL.Variant({
   'ok' : IDL.Record({
     'status' : RegistrationStatus,
     'tawthiqDone' : IDL.Bool,
@@ -719,6 +761,7 @@ export const idlService = IDL.Service({
       [IDL.Variant({ 'ok' : MizanRecord, 'err' : IDL.Text })],
       ['query'],
     ),
+  'getMockCycleBalance' : IDL.Func([], [IDL.Nat], ['query']),
   'getMyBusinessProfile' : IDL.Func([], [IDL.Opt(BusinessProfile)], ['query']),
   'getMyDocument' : IDL.Func(
       [DocumentType],
@@ -733,12 +776,18 @@ export const idlService = IDL.Service({
   'getMyIndividualProfile' : IDL.Func([], [Result_5], ['query']),
   'getMyNotifications' : IDL.Func([IDL.Nat, IDL.Nat], [Result_4], ['query']),
   'getMyTawthiqAppeals' : IDL.Func([], [IDL.Vec(TawthiqAppeal)], ['query']),
+  'getPipeline' : IDL.Func(
+      [],
+      [IDL.Vec(IDL.Tuple(IDL.Principal, PipelineStage))],
+      ['query'],
+    ),
   'getPreliminaryMizanByBusiness' : IDL.Func(
       [UserId],
       [IDL.Opt(MizanRecord)],
       ['query'],
     ),
   'getPreliminaryMizanResult' : IDL.Func([], [IDL.Opt(MizanRecord)], ['query']),
+  'getProfilePhoto' : IDL.Func([IDL.Principal], [IDL.Opt(IDL.Text)], ['query']),
   'getShortlist' : IDL.Func([], [IDL.Vec(ShortlistEntry)], []),
   'getStableStateVersion' : IDL.Func([], [IDL.Nat], ['query']),
   'getTawthiqAdminNote' : IDL.Func([UserId], [IDL.Opt(IDL.Text)], ['query']),
@@ -769,7 +818,24 @@ export const idlService = IDL.Service({
       ['query'],
     ),
   'getTawthiqRecord' : IDL.Func([UserId], [IDL.Opt(TawthiqRecord)], ['query']),
-  'getUnreadNotificationCount' : IDL.Func([], [Result_3], ['query']),
+  'getUnreadNotificationCount' : IDL.Func([], [Result_2], ['query']),
+  'get_my_threads' : IDL.Func([], [IDL.Vec(DirectMessageThread)], ['query']),
+  'get_privacy_settings' : IDL.Func(
+      [IDL.Text],
+      [ProfilePrivacySettings],
+      ['query'],
+    ),
+  'get_public_profile' : IDL.Func(
+      [IDL.Text],
+      [IDL.Opt(PublicApplicantProfile)],
+      ['query'],
+    ),
+  'get_thread_messages' : IDL.Func(
+      [IDL.Text, IDL.Text],
+      [IDL.Vec(Message)],
+      ['query'],
+    ),
+  'get_unread_count' : IDL.Func([], [IDL.Nat], ['query']),
   'isAdminBootstrapped' : IDL.Func([], [IDL.Bool], ['query']),
   'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
   'linkBankAccount' : IDL.Func([IDL.Text], [BusinessProfile], []),
@@ -786,7 +852,9 @@ export const idlService = IDL.Service({
     ),
   'listMyDocuments' : IDL.Func([], [IDL.Vec(DocumentRecord)], ['query']),
   'markNotificationsRead' : IDL.Func([], [Result], []),
-  'pollIndividualStatus' : IDL.Func([], [Result_2], ['query']),
+  'mark_messages_read' : IDL.Func([IDL.Text, IDL.Text], [Result], []),
+  'mockTopUp' : IDL.Func([IDL.Nat], [IDL.Nat], []),
+  'pollIndividualStatus' : IDL.Func([], [Result_3], ['query']),
   'redeemAdminInviteLink' : IDL.Func([IDL.Text], [Result], []),
   'registerAsFinancier' : IDL.Func(
       [
@@ -809,6 +877,11 @@ export const idlService = IDL.Service({
       [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
       [],
     ),
+  'removePipelineEntry' : IDL.Func(
+      [IDL.Principal],
+      [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+      [],
+    ),
   'requestAccountClosure' : IDL.Func([], [Result], []),
   'requestIndividualBankLink' : IDL.Func([], [Result_1], []),
   'reviewTawthiqAppeal' : IDL.Func(
@@ -823,9 +896,24 @@ export const idlService = IDL.Service({
       [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
       [],
     ),
+  'send_message' : IDL.Func(
+      [IDL.Text, IDL.Text, IDL.Principal, IDL.Text],
+      [Result_2],
+      [],
+    ),
   'setCredentials' : IDL.Func([CredentialsSettings], [], []),
   'setFinancierStatus' : IDL.Func(
       [IDL.Principal, FinancierStatus, IDL.Opt(IDL.Text)],
+      [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+      [],
+    ),
+  'setPipelineStage' : IDL.Func(
+      [IDL.Principal, PipelineStage],
+      [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+      [],
+    ),
+  'setProfilePhoto' : IDL.Func(
+      [IDL.Text],
       [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
       [],
     ),
@@ -922,6 +1010,11 @@ export const idlService = IDL.Service({
   'updateMyProfile' : IDL.Func(
       [BusinessProfileUpdate],
       [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+      [],
+    ),
+  'update_privacy_settings' : IDL.Func(
+      [IDL.Text, ProfilePrivacySettings],
+      [Result],
       [],
     ),
   'uploadDocument' : IDL.Func(
@@ -1100,6 +1193,7 @@ export const idlFactory = ({ IDL }) => {
     'preliminaryMizanRecord' : IDL.Opt(MizanRecord),
     'businessName' : IDL.Text,
     'businessType' : IDL.Text,
+    'photoUrl' : IDL.Opt(IDL.Text),
     'financingReady' : IDL.Bool,
     'financingReadyScore' : IDL.Nat,
     'preferredInstrument' : IDL.Opt(IDL.Text),
@@ -1201,6 +1295,7 @@ export const idlFactory = ({ IDL }) => {
     'incomeSource' : IncomeSource,
     'fullName' : IDL.Text,
     'accountClosureRequestedAt' : IDL.Opt(Timestamp),
+    'photoUrl' : IDL.Opt(IDL.Text),
     'amountSought' : IDL.Nat,
     'preferredInstrument' : PreferredInstrument,
     'kycRecord' : IDL.Opt(KycCheckRecord),
@@ -1274,6 +1369,7 @@ export const idlFactory = ({ IDL }) => {
     'createdAt' : Timestamp,
     'contactPerson' : IDL.Text,
     'areasOfFinancing' : IDL.Vec(IDL.Text),
+    'photoUrl' : IDL.Opt(IDL.Text),
     'email' : IDL.Text,
     'financierStatus' : FinancierStatus,
     'licenseNumber' : IDL.Text,
@@ -1434,6 +1530,12 @@ export const idlFactory = ({ IDL }) => {
     'adminNote' : IDL.Opt(IDL.Text),
     'appealText' : IDL.Text,
   });
+  const PipelineStage = IDL.Variant({
+    'dueDiligence' : IDL.Null,
+    'closed' : IDL.Null,
+    'offerSent' : IDL.Null,
+    'reviewing' : IDL.Null,
+  });
   const ShortlistEntry = IDL.Record({
     'businessId' : IDL.Principal,
     'addedAt' : IDL.Int,
@@ -1445,7 +1547,40 @@ export const idlFactory = ({ IDL }) => {
     'notReadyCount' : IDL.Nat,
     'passedCount' : IDL.Nat,
   });
-  const Result_3 = IDL.Variant({ 'ok' : IDL.Nat, 'err' : IDL.Text });
+  const Result_2 = IDL.Variant({ 'ok' : IDL.Nat, 'err' : IDL.Text });
+  const Message = IDL.Record({
+    'applicantId' : IDL.Text,
+    'messageId' : IDL.Nat,
+    'isRead' : IDL.Bool,
+    'messageText' : IDL.Text,
+    'timestamp' : IDL.Int,
+    'financierId' : IDL.Text,
+    'recipientId' : IDL.Principal,
+    'senderId' : IDL.Principal,
+  });
+  const DirectMessageThread = IDL.Record({
+    'lastMessageAt' : IDL.Int,
+    'messages' : IDL.Vec(Message),
+    'participantIds' : IDL.Vec(IDL.Principal),
+    'threadId' : IDL.Text,
+  });
+  const ProfilePrivacySettings = IDL.Record({
+    'applicantId' : IDL.Text,
+    'showFinancingAmount' : IDL.Bool,
+    'showMizanScore' : IDL.Bool,
+    'showDirectorNames' : IDL.Bool,
+    'showIncome' : IDL.Bool,
+  });
+  const PublicApplicantProfile = IDL.Record({
+    'applicantId' : IDL.Text,
+    'fullName' : IDL.Text,
+    'amountSought' : IDL.Opt(IDL.Nat),
+    'mizanScore' : IDL.Opt(IDL.Nat),
+    'preferredInstrument' : IDL.Text,
+    'registrationStatus' : IDL.Text,
+    'financingPurpose' : IDL.Text,
+    'monthlyIncome' : IDL.Opt(IDL.Nat),
+  });
   const InviteLinkRecord = IDL.Record({
     'status' : IDL.Text,
     'expiresAt' : IDL.Int,
@@ -1472,7 +1607,7 @@ export const idlFactory = ({ IDL }) => {
     'pageSize' : IDL.Nat,
     'items' : IDL.Vec(ApplicantSummary),
   });
-  const Result_2 = IDL.Variant({
+  const Result_3 = IDL.Variant({
     'ok' : IDL.Record({
       'status' : RegistrationStatus,
       'tawthiqDone' : IDL.Bool,
@@ -1646,6 +1781,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'ok' : MizanRecord, 'err' : IDL.Text })],
         ['query'],
       ),
+    'getMockCycleBalance' : IDL.Func([], [IDL.Nat], ['query']),
     'getMyBusinessProfile' : IDL.Func(
         [],
         [IDL.Opt(BusinessProfile)],
@@ -1664,6 +1800,11 @@ export const idlFactory = ({ IDL }) => {
     'getMyIndividualProfile' : IDL.Func([], [Result_5], ['query']),
     'getMyNotifications' : IDL.Func([IDL.Nat, IDL.Nat], [Result_4], ['query']),
     'getMyTawthiqAppeals' : IDL.Func([], [IDL.Vec(TawthiqAppeal)], ['query']),
+    'getPipeline' : IDL.Func(
+        [],
+        [IDL.Vec(IDL.Tuple(IDL.Principal, PipelineStage))],
+        ['query'],
+      ),
     'getPreliminaryMizanByBusiness' : IDL.Func(
         [UserId],
         [IDL.Opt(MizanRecord)],
@@ -1672,6 +1813,11 @@ export const idlFactory = ({ IDL }) => {
     'getPreliminaryMizanResult' : IDL.Func(
         [],
         [IDL.Opt(MizanRecord)],
+        ['query'],
+      ),
+    'getProfilePhoto' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Opt(IDL.Text)],
         ['query'],
       ),
     'getShortlist' : IDL.Func([], [IDL.Vec(ShortlistEntry)], []),
@@ -1712,7 +1858,24 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Opt(TawthiqRecord)],
         ['query'],
       ),
-    'getUnreadNotificationCount' : IDL.Func([], [Result_3], ['query']),
+    'getUnreadNotificationCount' : IDL.Func([], [Result_2], ['query']),
+    'get_my_threads' : IDL.Func([], [IDL.Vec(DirectMessageThread)], ['query']),
+    'get_privacy_settings' : IDL.Func(
+        [IDL.Text],
+        [ProfilePrivacySettings],
+        ['query'],
+      ),
+    'get_public_profile' : IDL.Func(
+        [IDL.Text],
+        [IDL.Opt(PublicApplicantProfile)],
+        ['query'],
+      ),
+    'get_thread_messages' : IDL.Func(
+        [IDL.Text, IDL.Text],
+        [IDL.Vec(Message)],
+        ['query'],
+      ),
+    'get_unread_count' : IDL.Func([], [IDL.Nat], ['query']),
     'isAdminBootstrapped' : IDL.Func([], [IDL.Bool], ['query']),
     'isCallerAdmin' : IDL.Func([], [IDL.Bool], ['query']),
     'linkBankAccount' : IDL.Func([IDL.Text], [BusinessProfile], []),
@@ -1738,7 +1901,9 @@ export const idlFactory = ({ IDL }) => {
       ),
     'listMyDocuments' : IDL.Func([], [IDL.Vec(DocumentRecord)], ['query']),
     'markNotificationsRead' : IDL.Func([], [Result], []),
-    'pollIndividualStatus' : IDL.Func([], [Result_2], ['query']),
+    'mark_messages_read' : IDL.Func([IDL.Text, IDL.Text], [Result], []),
+    'mockTopUp' : IDL.Func([IDL.Nat], [IDL.Nat], []),
+    'pollIndividualStatus' : IDL.Func([], [Result_3], ['query']),
     'redeemAdminInviteLink' : IDL.Func([IDL.Text], [Result], []),
     'registerAsFinancier' : IDL.Func(
         [
@@ -1761,6 +1926,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
         [],
       ),
+    'removePipelineEntry' : IDL.Func(
+        [IDL.Principal],
+        [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+        [],
+      ),
     'requestAccountClosure' : IDL.Func([], [Result], []),
     'requestIndividualBankLink' : IDL.Func([], [Result_1], []),
     'reviewTawthiqAppeal' : IDL.Func(
@@ -1775,9 +1945,24 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
         [],
       ),
+    'send_message' : IDL.Func(
+        [IDL.Text, IDL.Text, IDL.Principal, IDL.Text],
+        [Result_2],
+        [],
+      ),
     'setCredentials' : IDL.Func([CredentialsSettings], [], []),
     'setFinancierStatus' : IDL.Func(
         [IDL.Principal, FinancierStatus, IDL.Opt(IDL.Text)],
+        [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+        [],
+      ),
+    'setPipelineStage' : IDL.Func(
+        [IDL.Principal, PipelineStage],
+        [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+        [],
+      ),
+    'setProfilePhoto' : IDL.Func(
+        [IDL.Text],
         [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
         [],
       ),
@@ -1874,6 +2059,11 @@ export const idlFactory = ({ IDL }) => {
     'updateMyProfile' : IDL.Func(
         [BusinessProfileUpdate],
         [IDL.Variant({ 'ok' : IDL.Null, 'err' : IDL.Text })],
+        [],
+      ),
+    'update_privacy_settings' : IDL.Func(
+        [IDL.Text, ProfilePrivacySettings],
+        [Result],
         [],
       ),
     'uploadDocument' : IDL.Func(

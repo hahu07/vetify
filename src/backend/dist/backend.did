@@ -172,16 +172,16 @@ type Result_4 =
 type Result_3 = 
  variant {
    err: text;
-   ok: nat;
- };
-type Result_2 = 
- variant {
-   err: text;
    ok: record {
          mizanDone: bool;
          status: RegistrationStatus;
          tawthiqDone: bool;
        };
+ };
+type Result_2 = 
+ variant {
+   err: text;
+   ok: nat;
  };
 type Result_1 = 
  variant {
@@ -202,11 +202,30 @@ type RegistrationStatus =
    rejected;
    underReview;
  };
+type PublicApplicantProfile = 
+ record {
+   amountSought: opt nat;
+   applicantId: text;
+   financingPurpose: text;
+   fullName: text;
+   mizanScore: opt nat;
+   monthlyIncome: opt nat;
+   preferredInstrument: text;
+   registrationStatus: text;
+ };
 type ProprietorRecord = 
  record {
    bvn: text;
    nin: text;
    proprietorName: text;
+ };
+type ProfilePrivacySettings = 
+ record {
+   applicantId: text;
+   showDirectorNames: bool;
+   showFinancingAmount: bool;
+   showIncome: bool;
+   showMizanScore: bool;
  };
 type PreferredInstrument = 
  variant {
@@ -217,6 +236,13 @@ type PreferredInstrument =
    musharakah;
    other;
    salam;
+ };
+type PipelineStage = 
+ variant {
+   closed;
+   dueDiligence;
+   offerSent;
+   reviewing;
  };
 type Page = 
  record {
@@ -252,6 +278,17 @@ type MizanRecord =
    revenueTrendScore: nat;
    riskClassification: RiskLevel;
    stage: MizanStage;
+ };
+type Message = 
+ record {
+   applicantId: text;
+   financierId: text;
+   isRead: bool;
+   messageId: nat;
+   messageText: text;
+   recipientId: principal;
+   senderId: principal;
+   timestamp: int;
  };
 type MaskedCredentials = 
  record {
@@ -362,6 +399,7 @@ type IndividualProfile =
    monthlyIncome: nat;
    nin: text;
    occupation: text;
+   photoUrl: opt text;
    preferredInstrument: PreferredInstrument;
    registrationStatus: RegistrationStatus;
    tawthiqRecord: opt IndividualTawthiqRecord;
@@ -459,6 +497,7 @@ type FinancierProfile =
    institutionName: text;
    licenseNumber: text;
    phone: text;
+   photoUrl: opt text;
    registrationStatus: RegistrationStatus;
    userId: UserId;
  };
@@ -498,6 +537,13 @@ type DirectorRecord =
    nationality: text;
    nin: text;
    ownershipPercentage: float64;
+ };
+type DirectMessageThread = 
+ record {
+   lastMessageAt: int;
+   messages: vec Message;
+   participantIds: vec principal;
+   threadId: text;
  };
 type DealReport = 
  record {
@@ -572,6 +618,7 @@ type BusinessProfile =
    mizanDivergenceAlert: bool;
    mizanRecord: opt MizanRecord;
    phoneNumber: text;
+   photoUrl: opt text;
    preferredInstrument: opt text;
    preliminaryMizanRecord: opt MizanRecord;
    proprietorDetails: opt ProprietorRecord;
@@ -750,15 +797,21 @@ service : {
       err: text;
       ok: MizanRecord;
     }) query;
+  getMockCycleBalance: () -> (nat) query;
   getMyBusinessProfile: () -> (opt BusinessProfile) query;
   getMyDocument: (docType: DocumentType) -> (opt DocumentRecord) query;
   getMyFinancierProfile: () -> (opt FinancierProfile) query;
   getMyIndividualProfile: () -> (Result_5) query;
   getMyNotifications: (page: nat, pageSize: nat) -> (Result_4) query;
   getMyTawthiqAppeals: () -> (vec TawthiqAppeal) query;
+  getPipeline: () -> (vec record {
+                            principal;
+                            PipelineStage;
+                          }) query;
   getPreliminaryMizanByBusiness: (businessId: UserId) ->
    (opt MizanRecord) query;
   getPreliminaryMizanResult: () -> (opt MizanRecord) query;
+  getProfilePhoto: (userId: principal) -> (opt text) query;
   getShortlist: () -> (vec ShortlistEntry);
   getStableStateVersion: () -> (nat) query;
   getTawthiqAdminNote: (businessUserId: UserId) -> (opt text) query;
@@ -780,7 +833,14 @@ service : {
       totalCount: nat;
     }) query;
   getTawthiqRecord: (userId: UserId) -> (opt TawthiqRecord) query;
-  getUnreadNotificationCount: () -> (Result_3) query;
+  getUnreadNotificationCount: () -> (Result_2) query;
+  get_my_threads: () -> (vec DirectMessageThread) query;
+  get_privacy_settings: (applicantId: text) -> (ProfilePrivacySettings) query;
+  get_public_profile: (applicantId: text) ->
+   (opt PublicApplicantProfile) query;
+  get_thread_messages: (applicantId: text, financierId: text) ->
+   (vec Message) query;
+  get_unread_count: () -> (nat) query;
   isAdminBootstrapped: () -> (bool) query;
   isCallerAdmin: () -> (bool) query;
   linkBankAccount: (accountId: text) -> (BusinessProfile);
@@ -793,7 +853,9 @@ service : {
   listFinancingReadyApplicants: (page: nat, pageSize: nat) -> (Page) query;
   listMyDocuments: () -> (vec DocumentRecord) query;
   markNotificationsRead: () -> (Result);
-  pollIndividualStatus: () -> (Result_2) query;
+  mark_messages_read: (applicantId: text, financierId: text) -> (Result);
+  mockTopUp: (amount: nat) -> (nat);
+  pollIndividualStatus: () -> (Result_3) query;
   redeemAdminInviteLink: (code: text) -> (Result);
   registerAsFinancier: (institutionName: text, licenseNumber: text,
    contactPerson: text, email: text, phone: text, areasOfFinancing: vec text,
@@ -804,6 +866,10 @@ service : {
                                                      err: text;
                                                      ok;
                                                    });
+  removePipelineEntry: (applicantId: principal) -> (variant {
+                                                      err: text;
+                                                      ok;
+                                                    });
   requestAccountClosure: () -> (Result);
   requestIndividualBankLink: () -> (Result_1);
   reviewTawthiqAppeal: (businessId: UserId, appealId: text, decision:
@@ -818,12 +884,23 @@ service : {
       err: text;
       ok;
     });
+  send_message: (applicantId: text, financierId: text, recipientId:
+   principal, messageText: text) -> (Result_2);
   setCredentials: (newCreds: CredentialsSettings) -> ();
   setFinancierStatus: (financierId: principal, status: FinancierStatus,
    reason: opt text) -> (variant {
                            err: text;
                            ok;
                          });
+  setPipelineStage: (applicantId: principal, stage: PipelineStage) ->
+   (variant {
+      err: text;
+      ok;
+    });
+  setProfilePhoto: (photoUrl: text) -> (variant {
+                                          err: text;
+                                          ok;
+                                        });
   shortlistBorrower: (businessId: principal) -> (variant {
                                                    err: text;
                                                    ok;
@@ -873,6 +950,8 @@ service : {
       err: text;
       ok;
     });
+  update_privacy_settings: (applicantId: text, settings:
+   ProfilePrivacySettings) -> (Result);
   uploadDocument: (docType: DocumentType, storageRef: ExternalBlob) ->
    (DocumentRecord);
   validateAdminInviteLink: (code: text) -> (bool) query;

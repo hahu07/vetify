@@ -1,4 +1,4 @@
-// Version: 1.0.0
+// Version: 3.0.0
 type AccountClosureRequest__425840582 =
   {
     adminNote : ?Text;
@@ -55,6 +55,7 @@ type BusinessProfile__463469443 =
     mizanDivergenceAlert : Bool;
     mizanRecord : ?MizanRecord__531753583;
     phoneNumber : Text;
+    photoUrl : ?Text;
     preferredInstrument : ?Text;
     preliminaryMizanRecord : ?MizanRecord__531753583;
     proprietorDetails : ?ProprietorRecord__328097117;
@@ -94,6 +95,13 @@ type DealReport__294169206 =
     suggestedFinancingStructure : Text;
     tawthiqVersion : Int
   };
+type DirectMessageThread__243678911 =
+  {
+    lastMessageAt : Int;
+    messages : [Message__837885351];
+    participantIds : [Principal];
+    threadId : Text
+  };
 type DirectorRecord__326079025 =
   {
     bvn : Text;
@@ -129,6 +137,7 @@ type FinancierProfile__626746893 =
     institutionName : Text;
     licenseNumber : Text;
     phone : Text;
+    photoUrl : ?Text;
     registrationStatus : RegistrationStatus__788629418;
     userId : UserId__158757552
   };
@@ -197,6 +206,7 @@ type IndividualProfile__639634021 =
     monthlyIncome : Nat;
     nin : Text;
     occupation : Text;
+    photoUrl : ?Text;
     preferredInstrument : PreferredInstrument__174685913;
     registrationStatus : RegistrationStatus__788629418;
     tawthiqRecord : ?IndividualTawthiqRecord__389342546;
@@ -269,6 +279,17 @@ type Map__222667396<K, V> = Map__912772452<K, V>;
 type Map__709709801<K, V> =
   {var root : Node__1000929467<K, V>; var size : Nat__1040412405};
 type Map__912772452<K, V> = Map__709709801<K, V>;
+type Message__837885351 =
+  {
+    applicantId : Text;
+    financierId : Text;
+    isRead : Bool;
+    messageId : Nat;
+    messageText : Text;
+    recipientId : Principal;
+    senderId : Principal;
+    timestamp : Int
+  };
 type MizanRecord__531753583 =
   {
     borderlineReasons : [Text];
@@ -297,8 +318,247 @@ type NotificationRecord__292780569 =
     statusChange : Text;
     success : Bool
   };
+type OldBankLinkRecord__219776807 =
+  {
+    accountId : ?Text;
+    balance : ?Nat;
+    currency : ?Text;
+    institutionName : ?Text;
+    linkedAt : ?Int;
+    status : OldBankLinkStatus__472440420;
+    transactionSummary : ?OldTransactionSummary__780708386
+  };
+type OldBankLinkStatusInd__94359949 =
+  {#LinkFailed : Text; #Linked; #NotLinked};
+type OldBankLinkStatus__472440420 = {#LinkFailed : Text; #Linked; #NotLinked};
+type OldBusinessProfile__539100565 =
+  {
+    address : Text;
+    annualRevenue : Nat;
+    bankLinkRecord : OldBankLinkRecord__219776807;
+    businessDescription : ?Text;
+    businessName : Text;
+    businessType : Text;
+    businessTypeEnum : ?OldBusinessTypeEnum__216655309;
+    cacNumber : Text;
+    contactPerson : Text;
+    createdAt : Int;
+    directorsList : ?[OldDirectorRecord__377827843];
+    financingAmountSought : ?Nat;
+    financingReady : Bool;
+    financingReadyScore : Nat;
+    halalComplianceStatus : OldHalalComplianceStatus__44760483;
+    kycRecord : OldKycCheckRecord__595924000;
+    mizanDivergenceAlert : Bool;
+    mizanRecord : ?OldMizanRecord__961959476;
+    phoneNumber : Text;
+    preferredInstrument : ?Text;
+    preliminaryMizanRecord : ?OldMizanRecord__961959476;
+    proprietorDetails : ?OldProprietorRecord__384265280;
+    purposeOfFinancing : ?Text;
+    registrationStatus : OldRegistrationStatus__899451982;
+    riskLevel : OldCommonRiskLevel__284284539;
+    scoringRecord : OldScoringRecord__300835380;
+    tawthiqRecord : ?OldTawthiqRecord__242082243;
+    userId : Principal;
+    yearOfIncorporation : ?Text
+  };
+type OldBusinessTypeEnum__216655309 = {#businessName; #llc};
+type OldCommonRiskLevel__284284539 = {#high; #low; #medium; #pending};
+type OldDirectorRecord__377827843 =
+  {
+    bvn : Text;
+    directorName : Text;
+    nationality : Text;
+    nin : Text;
+    ownershipPercentage : Float
+  };
+type OldEmploymentStatus__446073943 =
+  {#employed; #selfEmployed; #student; #unemployed};
+type OldFinancierProfile__489338070 =
+  {
+    areasOfFinancing : [Text];
+    contactPerson : Text;
+    createdAt : Int;
+    email : Text;
+    financierStatus : {#Active; #Inactive; #PendingReview};
+    financierType : ?OldFinancierType__764391202;
+    groupDetails : ?OldGroupDetails__18234465;
+    individualDetails : ?OldIndividualDetails__937970608;
+    institutionDetails : ?OldInstitutionDetails__262531989;
+    institutionName : Text;
+    licenseNumber : Text;
+    phone : Text;
+    registrationStatus : OldRegistrationStatus__899451982;
+    userId : Principal
+  };
+type OldFinancierType__764391202 = {#group; #individual; #institution};
+type OldFinancingPurpose__698816977 =
+  {#education; #homePurchase; #medical; #other; #startupCapital; #vehicle};
+type OldGroupDetails__18234465 =
+  {
+    combinedInvestmentCapacity : Nat;
+    groupName : Text;
+    leadContactBvn : Text;
+    leadContactName : Text;
+    leadContactNin : Text;
+    legalBasis : Text;
+    numberOfMembers : Nat;
+    preferredInstruments : [OldPreferredInstrument__591419851];
+    riskAppetite : Text
+  };
+type OldHalalComplianceStatus__44760483 = {#compliant; #flagged; #pending};
+type OldIncomeSource__683070592 =
+  {#business; #employment; #other; #selfEmployment};
+type OldInconsistencyFlag__157153186 =
+  {declaredValue : Text; field : Text; verifiedValue : Text};
+type OldIndividualDetails__937970608 =
+  {
+    bvn : Text;
+    fullName : Text;
+    investmentCapacity : Nat;
+    nin : Text;
+    occupation : Text;
+    preferredInstruments : [OldPreferredInstrument__591419851];
+    riskAppetite : Text
+  };
+type OldIndividualMizanRecord__199638454 =
+  {
+    borderlineFlag : Bool;
+    completedAt : ?Int;
+    debtBehaviorScore : Nat;
+    incomeStabilityScore : Nat;
+    narrativeSummary : Text;
+    overallScore : Nat;
+    repaymentCapacityScore : Nat;
+    riskLevel : OldCommonRiskLevel__284284539;
+    stage : {#full; #preliminary}
+  };
+type OldIndividualProfile__472068732 =
+  {
+    accountClosureRequested : Bool;
+    accountClosureRequestedAt : ?Int;
+    address : Text;
+    amountSought : Nat;
+    bankLinkStatus : OldBankLinkStatusInd__94359949;
+    bvn : Text;
+    createdAt : Int;
+    dateOfBirth : Text;
+    employerName : ?Text;
+    employmentStatus : OldEmploymentStatus__446073943;
+    financingPurpose : OldFinancingPurpose__698816977;
+    financingPurposeOther : ?Text;
+    fullName : Text;
+    id : Principal;
+    incomeSource : OldIncomeSource__683070592;
+    kycRecord : ?OldKycCheckRecord__595924000;
+    mizanRecord : ?OldIndividualMizanRecord__199638454;
+    monthlyIncome : Nat;
+    nin : Text;
+    occupation : Text;
+    preferredInstrument : OldPreferredInstrument__591419851;
+    registrationStatus : OldRegistrationStatus__899451982;
+    tawthiqRecord : ?OldIndividualTawthiqRecord__846096843;
+    termsAcceptedAt : ?Int;
+    updatedAt : Int
+  };
+type OldIndividualTawthiqRecord__846096843 =
+  {
+    bvnVerified : Bool;
+    completedAt : ?Int;
+    creditReadiness : {#conditionalReady; #notReady; #ready};
+    incomeAnalysis : Text;
+    narrativeSummary : Text;
+    ninVerified : Bool;
+    shariaComplianceScore : Nat;
+    shariaFlags : [Text];
+    watchlistClean : Bool
+  };
+type OldInstitutionDetails__262531989 =
+  {
+    licenseNumber : Text;
+    preferredInstruments : [OldPreferredInstrument__591419851];
+    riskAppetite : Text;
+    ticketSizeMax : Nat;
+    ticketSizeMin : Nat
+  };
+type OldKycCheckRecord__595924000 =
+  {
+    bvnVerified : Bool;
+    cacVerified : Bool;
+    creditScore : Nat;
+    kycStatus : {#Failed; #InProgress; #Pending; #Verified};
+    ninVerified : Bool;
+    tinVerified : Bool;
+    verifiedAt : ?Int;
+    watchlistClean : Bool;
+    watchlistParseError : Bool
+  };
+type OldMizanRecord__961959476 =
+  {
+    borderlineReasons : [Text];
+    computedAt : Int;
+    debtBehaviorScore : Nat;
+    halalComplianceScore : Nat;
+    incomeStabilityScore : Nat;
+    isBorderline : Bool;
+    narrativeSummary : Text;
+    overallReadinessScore : Nat;
+    repaymentPatternScore : Nat;
+    revenueTrendScore : Nat;
+    riskClassification : OldRiskLevel__287419303;
+    stage : OldMizanStage__638803014
+  };
+type OldMizanStage__638803014 = {#full; #preliminary};
+type OldPreferredInstrument__591419851 =
+  {#ijarah; #istisna; #mudarabah; #murabaha; #musharakah; #other; #salam};
+type OldProprietorRecord__384265280 =
+  {bvn : Text; nin : Text; proprietorName : Text};
+type OldRegistrationStatus__899451982 =
+  {
+    #approved;
+    #financingReady;
+    #kycInProgress;
+    #pending;
+    #rejected;
+    #underReview
+  };
+type OldRiskLevel__287419303 = {#High; #Low; #Medium};
+type OldScoringRecord__300835380 =
+  {
+    financingReadinessScore : Nat;
+    halalComplianceScore : Nat;
+    riskLevel : OldRiskLevel__287419303;
+    scoredAt : Int;
+    scoringNotes : Text
+  };
+type OldShariaFlag__1098807 =
+  {category : Text; indicator : Text; severity : {#major; #minor}};
+type OldTawthiqRecord__242082243 =
+  {
+    completedAt : ?Int;
+    creditReadinessVerdict : {#conditionalReady; #notReady; #ready};
+    inconsistencyFlags : [OldInconsistencyFlag__157153186];
+    inconsistencyStatus : {#Clean; #Flagged; #Pending};
+    narrativeSummary : Text;
+    shariaFlags : [OldShariaFlag__1098807];
+    shariaScreeningNotes : Text;
+    shariaScreeningStatus : {#Failed; #Passed; #Pending}
+  };
+type OldTransactionSummary__780708386 =
+  {income : Nat; months : Nat; totalCredits : Nat; totalDebits : Nat};
+type PipelineStage__817156195 =
+  {#closed; #dueDiligence; #offerSent; #reviewing};
 type PreferredInstrument__174685913 =
   {#ijarah; #istisna; #mudarabah; #murabaha; #musharakah; #other; #salam};
+type ProfilePrivacySettings__49994729 =
+  {
+    applicantId : Text;
+    showDirectorNames : Bool;
+    showFinancingAmount : Bool;
+    showIncome : Bool;
+    showMizanScore : Bool
+  };
 type ProprietorRecord__328097117 =
   {bvn : Text; nin : Text; proprietorName : Text};
 type RSVP__1062564422 =
@@ -363,7 +623,110 @@ type TransactionSummary__1041030361 =
 type UploadStatus__611753328 = {#notUploaded; #uploaded};
 type UserId__158757552 = Principal;
 type UserRole__1073662873 = {#admin; #guest; #user};
-actor {
+actor ({
+  stable INDIVIDUAL_REGISTRATION_COOLDOWN_NS : Int;
+  stable KASHIF_COOLDOWN_NS : Int;
+  stable KASHIF_MIN_CYCLES : Nat;
+  stable KYC_MIN_CYCLES : Nat;
+  stable MAX_APPEALS_PER_BUSINESS : Nat;
+  stable MIN_CYCLES : Nat;
+  stable MIZAN_COOLDOWN_NS : Int;
+  stable MIZAN_MIN_CYCLES : Nat;
+  stable REGISTRATION_COOLDOWN_NS : Int;
+  stable accessControlState :
+    {
+      var adminAssigned : Bool;
+      userRoles : Map__222667396<Principal, UserRole__1073662873>
+    };
+  stable accountClosureRequests :
+    {
+      var root : Node__1000929467<Text, AccountClosureRequest__425840582>;
+      var size : Nat__1040412405
+    };
+  stable auditEntries :
+    {
+      var blockIndex : Nat__1040412405;
+      var blocks : [var [var ?AuditEntry__60967837]];
+      var elementIndex : Nat__1040412405
+    };
+  stable bootstrapState :
+    {var bootstrapAdmin : ?Principal; var bootstrapped : Bool};
+  in businessProfiles :
+    Map__222667396<Principal, OldBusinessProfile__539100565>;
+  stable credentialsState :
+    {var credentials : CredentialsSettings__121020671};
+  stable dealPipeline :
+    {
+      var root :
+        Node__1000929467<Principal,
+                          Map__222667396<Principal, PipelineStage__817156195>>;
+      var size : Nat__1040412405
+    };
+  stable documents :
+    {
+      var root :
+        Node__1000929467<(Principal, DocumentType__1018277930),
+                          DocumentRecord__870998661>;
+      var size : Nat__1040412405
+    };
+  in financierProfiles :
+    Map__222667396<Principal, OldFinancierProfile__489338070>;
+  in individualsProfiles :
+    Map__222667396<Principal, OldIndividualProfile__472068732>;
+  stable inviteLinksState :
+    {
+      var inviteCodes : Map__222667396<Text, InviteCode__179565162>;
+      var rsvps : Map__222667396<Text, RSVP__1062564422>
+    };
+  stable kashifCache :
+    {
+      var root : Node__1000929467<Principal, KashifCacheEntry__55922675>;
+      var size : Nat__1040412405
+    };
+  stable kashifLogs :
+    {
+      var root : Node__1000929467<Principal, KashifReportLog__681178799>;
+      var size : Nat__1040412405
+    };
+  stable kashifScoringConfig : {var config : KashifScoringConfig__330439399};
+  stable messagingState :
+    {
+      var nextMessageId : Nat;
+      threads : Map__222667396<Text, DirectMessageThread__243678911>
+    };
+  stable mockCycleState : {var mockCycleBalance : Nat};
+  stable notifications :
+    {
+      var root : Node__1000929467<Principal, NotificationRecord__292780569>;
+      var size : Nat__1040412405
+    };
+  stable publicProfileState :
+    {
+      privacySettings : Map__222667396<Text, ProfilePrivacySettings__49994729>
+    };
+  stable rateLimitState :
+    {var root : Node__1000929467<Principal, Int>; var size : Nat__1040412405};
+  stable sevenDaysNs : Int;
+  stable shortlists :
+    {
+      var root :
+        Node__1000929467<Principal,
+                          List__560604548<ShortlistEntry__544057556>>;
+      var size : Nat__1040412405
+    };
+  stable stableStateVersion : Nat;
+  stable tawthiqAdminNotes :
+    {
+      var root : Node__1000929467<UserId__158757552, Text>;
+      var size : Nat__1040412405
+    };
+  stable tawthiqAppeals :
+    {
+      var root :
+        Node__1000929467<Text, List__560604548<TawthiqAppeal__348497519>>;
+      var size : Nat__1040412405
+    }
+}, {
   stable INDIVIDUAL_REGISTRATION_COOLDOWN_NS : Int;
   stable KASHIF_COOLDOWN_NS : Int;
   stable KASHIF_MIN_CYCLES : Nat;
@@ -398,6 +761,13 @@ actor {
     };
   stable credentialsState :
     {var credentials : CredentialsSettings__121020671};
+  stable dealPipeline :
+    {
+      var root :
+        Node__1000929467<Principal,
+                          Map__222667396<Principal, PipelineStage__817156195>>;
+      var size : Nat__1040412405
+    };
   stable documents :
     {
       var root :
@@ -431,10 +801,20 @@ actor {
       var size : Nat__1040412405
     };
   stable kashifScoringConfig : {var config : KashifScoringConfig__330439399};
+  stable messagingState :
+    {
+      var nextMessageId : Nat;
+      threads : Map__222667396<Text, DirectMessageThread__243678911>
+    };
+  stable mockCycleState : {var mockCycleBalance : Nat};
   stable notifications :
     {
       var root : Node__1000929467<Principal, NotificationRecord__292780569>;
       var size : Nat__1040412405
+    };
+  stable publicProfileState :
+    {
+      privacySettings : Map__222667396<Text, ProfilePrivacySettings__49994729>
     };
   stable rateLimitState :
     {var root : Node__1000929467<Principal, Int>; var size : Nat__1040412405};
@@ -458,4 +838,4 @@ actor {
         Node__1000929467<Text, List__560604548<TawthiqAppeal__348497519>>;
       var size : Nat__1040412405
     }
-};
+});
