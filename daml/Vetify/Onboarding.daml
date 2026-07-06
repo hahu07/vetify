@@ -1,0 +1,725 @@
+-- | Stage 1–2: Borrower onboarding and Verification Agent decision.
+--   Independent of downstream modules — ComplianceReview (Stage 3) is created
+--   off-ledger by the backend/agent after an approved VerificationResult.
+module Vetify.Onboarding where
+
+import Vetify.Types
+import Vetify.Governance (requireActivePolicyApprover)
+import DA.Text (isPrefixOf, length, drop, isDigit)
+import DA.Date (toDateUTC)
+import DA.List (uniqueOn)
+import DA.Time (hours, addRelTime)
+
+-- | True iff text is non-empty and every character is an ASCII decimal digit (0–9).
+-- Delegates to DA.Text.isDigit (non-empty, all-digit predicate).
+-- Used to validate NIN, BVN (11 digits, CBN/NIMC) and CAC numeric suffix.
+isAllDigits : Text -> Bool
+isAllDigits = isDigit
+
+-- ─── Stage 1: Business Onboarding ─────────────────────────────────────────
+
+template BusinessOnboarding
+  with
+    borrower        : Party
+    vetify          : Party
+    verifier        : Party  -- Stage 2 decision authority (KYC); vetify keeps process/ops choices
+    business        : BusinessProfile
+    kyc             : BusinessKyc
+    status          : ReviewStatus
+    agentScore      : Optional Int
+    agentRisk       : Optional RiskLevel
+    submittedAt     : Optional Time
+    amendmentCount  : Int
+    documents       : [DocumentRef]      -- submitted evidence (hash + storage reference)
+    documentHistory : [[DocumentRef]]    -- Gap 12: one snapshot per completed amendment cycle
+    agentNote       : Optional Text      -- persisted when flagged for manual review
+    agentVersion    : Optional Text      -- agent model version that raised the ManualReview flag
+    onboardingRef   : Optional Text      -- backend correlation ID, e.g. "ONB-2026-000001"
+    schemaVersion   : Int                -- data schema version; must be >= 1
+    workflowVersion : Int                -- Gap 11: workflow policy version in effect
+  where
+    signatory borrower
+    observer vetify, verifier
+
+    -- ── Uniqueness ─────────────────────────────────────────────────────────
+    -- LF 2.3 contract key: the ledger rejects any second active contract for
+    -- the same (borrower, CAC) pair. Consuming choices (SubmitForReview, Amend,
+    -- FlagForManualReview, RequestAmendment) archive and recreate with the same
+    -- key atomically — valid within a single transaction.
+    -- Approve and Reject do not recreate, so the key is released and a fresh
+    -- onboarding cycle can begin.
+    key (borrower, kyc.cacRegNumber) : (Party, Text)
+    maintainer key._1
+
+    ensure
+      -- ── Director count ─────────────────────────────────────────────────
+      -- CAMA 2020 s271(1): private company requires at least 1 director.
+      -- A registered business name (sole proprietorship) lists its proprietors;
+      -- at least 1 is required in both cases.
+      not (null business.directors) &&
+
+      -- ── Director field integrity ────────────────────────────────────────
+      -- Every director/proprietor must be fully identified.
+      -- NIN and BVN are both 11-digit numbers (NIMC / CBN standard).
+      -- Gap 13: NIN and BVN must consist entirely of decimal digits.
+      all (\d ->
+            d.name /= "" &&
+            d.address /= "" &&
+            d.phoneNumber /= "" &&
+            d.email /= "" &&
+            DA.Text.length d.ninNumber == 11 &&
+            DA.Text.length d.bvn == 11 &&
+            isAllDigits d.ninNumber &&
+            isAllDigits d.bvn
+          ) business.directors &&
+
+      -- ── Business profile completeness ───────────────────────────────────
+      business.name /= "" &&
+      business.address /= "" &&
+      business.state /= "" &&
+      business.phoneNumber /= "" &&
+      business.email /= "" &&
+      -- Required by the Shariah Agent for AAOIFI sector screening
+      business.businessActivity /= "" &&
+      business.businessSector /= "" &&
+
+      -- ── KYC / CAC number format ─────────────────────────────────────────
+      -- CAC prefix is entity-specific under CAMA 2020 and CAC regulations:
+      --   RC (Registered Company) — for private companies (LimitedCompany)
+      --   BN (Business Name)      — for sole proprietorships / partnerships
+      (case business.businessType of
+        LimitedCompany     -> isPrefixOf "RC" kyc.cacRegNumber
+        SoleProprietorship -> isPrefixOf "BN" kyc.cacRegNumber) &&
+      -- Minimum: 2-char prefix + at least 2 digits = 4 chars
+      DA.Text.length kyc.cacRegNumber >= 4 &&
+      -- Gap 14: CAC suffix (after 2-char prefix) must be all digits
+      isAllDigits (DA.Text.drop 2 kyc.cacRegNumber) &&
+
+      -- TIN is mandatory for all registered entities (NRS requirement)
+      kyc.taxId /= "" &&
+
+      amendmentCount >= 0 &&
+
+      -- ── Director uniqueness ──────────────────────────────────────────────
+      -- No two directors/proprietors may share a NIN or BVN.
+      uniqueOn (\d -> d.ninNumber) business.directors &&
+      uniqueOn (\d -> d.bvn)       business.directors &&
+
+      -- ── Document integrity ───────────────────────────────────────────────
+      -- Gap 5: every stored document must have a non-empty hash, type, and storage ref.
+      all (\d -> d.contentHash /= "" && d.docType /= "" && d.storageRef /= "") documents &&
+      -- Gap 5: document types must be unique within a single submission.
+      uniqueOn (\d -> d.docType) documents &&
+
+      schemaVersion >= 1 &&
+      workflowVersion >= 1
+
+    -- Borrower submits a Draft application for Verification Agent review.
+    -- Gap 9: onboardingRef must be set before submission — it becomes the primary
+    -- business identifier and must not be absent once the workflow starts.
+    -- Validates that the incorporation date is not in the future
+    -- (time-dependent checks belong here, not in `ensure` which has no clock).
+    choice SubmitForReview : ContractId BusinessOnboarding
+      controller borrower
+      do
+        assertMsg "Only a Draft application can be submitted" (status == Draft)
+        assertMsg "Onboarding reference must be set before submission" (onboardingRef /= None)
+        t <- getTime
+        let today = toDateUTC t
+        assertMsg "Incorporation date cannot be in the future"
+          (business.incorporationDate <= today)
+        create this with
+          status      = UnderReview
+          submittedAt = Some t
+
+    -- Gap 1: Vetify escalates an application that has exceeded its SLA window.
+    -- Transitions UnderReview → ManualReview so a human can complete the review.
+    -- The effective SLA is read from the active VerificationPolicy when present;
+    -- the slaHours parameter serves as a fallback when no policy is configured.
+    choice EscalateOverdue : ContractId BusinessOnboarding
+      with slaHours : Int  -- Gap 1: fallback only; policy.slaHours takes precedence when a policy is active
+      controller vetify
+      do
+        assertMsg "Can only escalate an application under review" (status == UnderReview)
+        assertMsg "SLA hours must be positive" (slaHours > 0)
+        -- Gap 1: use the authoritative SLA window from the active VerificationPolicy
+        mPolicyCid <- lookupByKey @VerificationPolicy vetify
+        effectiveSlaHours <- case mPolicyCid of
+          Some cid -> do
+            policy <- fetch cid
+            return policy.slaHours
+          None -> return slaHours
+        case submittedAt of
+          None -> assertFail "Application has not been submitted yet"
+          Some submittedTime -> do
+            now <- getTime
+            let deadline = addRelTime submittedTime (hours effectiveSlaHours)
+            assertMsg "SLA window has not yet expired" (now > deadline)
+            create this with status = ManualReview
+
+    -- Verification Agent (Low risk) or human vetify (post-ManualReview) approves.
+    -- autoDecided=True: agent auto-path. False: human reviewed.
+    -- All four verification checks must pass before approval is permitted.
+    -- Gap 3: human decisions must identify the reviewer via reviewerParty.
+    -- Gap 4: agentVersion and aiMetadata.modelVersion must be consistent when both set.
+    -- Gap 5: at least one supporting document must be present.
+    -- Gap 6: high-risk applications may not be auto-approved by the agent.
+    -- Gap 7: when a human overrides an agent-flagged application, justification is required.
+    choice Approve : ContractId VerificationResult
+      with
+        checks                : VerificationChecks
+        checkScores           : Optional VerificationCheckScores
+        riskScore             : Int
+        riskLevel             : RiskLevel
+        autoDecided           : Bool
+        reviewerParty         : Optional Party    -- Canton party of the human reviewer; None on agent path
+        reviewedBy            : Optional Text     -- human-readable reviewer identity for audit trail
+        agentVersion          : Optional Text
+        aiMetadata            : Optional AIDecisionMetadata
+        verificationRef       : Text              -- business identifier, e.g. "VER-2026-000001"
+        overrideJustification : Optional Text         -- Gap 7: required when human reverses agent flag
+        policyVersion         : Text                 -- Gap 17: policy version in effect at decision time
+        overrideType          : Optional OverrideType  -- Gap 5: OverrodeApproval or OverrodeRejection
+        reviewNotes           : Optional Text          -- Gap 9: reviewer's assessment notes for audit
+      -- Dual controller: verifier makes the decision, vetify co-signs so the
+      -- VerificationPolicy lookupByKey below is authorized (its maintainer is
+      -- vetify; lookupByKey requires the maintainer to be an authorizing party).
+      controller verifier, vetify
+      do
+        assertMsg "Can only approve from UnderReview or ManualReview"
+          (status == UnderReview || status == ManualReview)
+        assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
+        -- Gap 3: human decisions must identify the reviewing party
+        assertMsg "Human decisions require a reviewer party (reviewerParty)"
+          (autoDecided || reviewerParty /= None)
+        -- Gap 4: agent version must be consistent with aiMetadata.modelVersion
+        case (agentVersion, aiMetadata) of
+          (Some v, Some m) ->
+            assertMsg "agentVersion must match aiMetadata.modelVersion" (v == m.modelVersion)
+          _ -> return ()
+        -- Gap 5: at least one supporting document must be present for approval
+        assertMsg "At least one supporting document is required for approval"
+          (not (null documents))
+        -- Gap 6: high-risk applications cannot be auto-approved by the agent
+        assertMsg "High-risk applications cannot be auto-approved; human review required"
+          (not (autoDecided && riskLevel == High))
+        -- Gap 7: when a human decides after the agent flagged the application,
+        -- the reviewer must record why (even if they agree with the agent's risk level)
+        case (autoDecided, agentScore) of
+          (False, Some _) ->
+            assertMsg "Override justification required when a human decides after agent review"
+              (overrideJustification /= None)
+          _ -> return ()
+        -- Gap 10: agent auto-decisions must include per-check scores for AI traceability
+        assertMsg "Agent auto-decisions (autoDecided=True) must include VerificationCheckScores"
+          (not autoDecided || checkScores /= None)
+        -- Gap 1/2/4: fetch the active VerificationPolicy to enforce score thresholds,
+        -- required document types, and derive policyVersion authoritatively.
+        -- vetify is the signatory of VerificationPolicy so the lookup is always visible.
+        mPolicyCid <- lookupByKey @VerificationPolicy vetify
+        effectivePolicyVersion <- case mPolicyCid of
+          Some cid -> do
+            policy <- fetch cid
+            -- Gap 1: agent auto-approvals must meet the policy's minimum score threshold
+            if autoDecided
+              then assertMsg ("Agent auto-approval requires score >= " <> show policy.autoApproveMin)
+                     (riskScore >= policy.autoApproveMin)
+              else return ()
+            -- Gap 2: all required document types must be present before approval
+            assertMsg "All required document types must be submitted"
+              (all (\req -> any (\d -> d.docType == req) documents) policy.requiredDocTypes)
+            return policy.policyVersion  -- Gap 4: authoritative version from the active policy
+          None -> return policyVersion   -- fallback: no active policy, use caller-provided value
+        -- Gap 7 (document security): no document may have a FLAGGED malware scan result
+        assertMsg "Documents with a FLAGGED malware scan status cannot be approved"
+          (all (\d -> d.malwareScanStatus /= Some "FLAGGED") documents)
+        -- All four verification checks must pass before approval
+        assertMsg "Cannot approve: identity not verified" checks.identityVerified
+        assertMsg "Cannot approve: CAC not registered" checks.cacRegistered
+        assertMsg "Cannot approve: documents not valid" checks.documentsValid
+        assertMsg "Cannot approve: data not consistent" checks.dataConsistent
+        assertMsg "Verification reference must not be empty" (verificationRef /= "")
+        assertMsg "Policy version must not be empty" (effectivePolicyVersion /= "")
+        t <- getTime
+        create VerificationResult with
+          borrower
+          vetify
+          verifier
+          businessName          = business.name
+          cacRegNumber          = kyc.cacRegNumber
+          checks
+          checkScores
+          riskScore
+          riskLevel
+          outcome               = Approved
+          autoDecided
+          verificationRef
+          reviewerParty
+          reviewedBy
+          agentVersion
+          aiMetadata
+          note                  = None
+          overrideJustification
+          overrideType
+          reviewNotes
+          submittedAt
+          policyVersion         = effectivePolicyVersion
+          decidedAt             = t
+
+    -- Verification Agent (High risk) or human vetify rejects.
+    -- Rejection does not require all checks to pass — a reject may arise precisely
+    -- because one or more checks failed.
+    choice Reject : ContractId VerificationResult
+      with
+        checks                : VerificationChecks
+        checkScores           : Optional VerificationCheckScores
+        riskScore             : Int
+        riskLevel             : RiskLevel
+        autoDecided           : Bool
+        reviewerParty         : Optional Party
+        reviewedBy            : Optional Text
+        agentVersion          : Optional Text
+        aiMetadata            : Optional AIDecisionMetadata
+        verificationRef       : Text
+        reason                : Text
+        overrideJustification : Optional Text         -- Gap 7
+        policyVersion         : Text                 -- Gap 17
+        overrideType          : Optional OverrideType  -- Gap 5
+        reviewNotes           : Optional Text          -- Gap 9
+      -- Dual controller: same reason as Approve — vetify co-signs so the
+      -- VerificationPolicy lookupByKey below is authorized.
+      controller verifier, vetify
+      do
+        assertMsg "Can only reject from UnderReview or ManualReview"
+          (status == UnderReview || status == ManualReview)
+        assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
+        assertMsg "Rejection reason must not be empty" (reason /= "")
+        assertMsg "Verification reference must not be empty" (verificationRef /= "")
+        -- Gap 3: human decisions must identify the reviewing party
+        assertMsg "Human decisions require a reviewer party (reviewerParty)"
+          (autoDecided || reviewerParty /= None)
+        -- Gap 4: agent version consistency
+        case (agentVersion, aiMetadata) of
+          (Some v, Some m) ->
+            assertMsg "agentVersion must match aiMetadata.modelVersion" (v == m.modelVersion)
+          _ -> return ()
+        -- Gap 7: justification required when human decides after agent review
+        case (autoDecided, agentScore) of
+          (False, Some _) ->
+            assertMsg "Override justification required when a human decides after agent review"
+              (overrideJustification /= None)
+          _ -> return ()
+        -- Gap 10: agent auto-decisions must include per-check scores for AI traceability
+        assertMsg "Agent auto-decisions (autoDecided=True) must include VerificationCheckScores"
+          (not autoDecided || checkScores /= None)
+        -- Gap 4: derive policyVersion from the active VerificationPolicy when present
+        mPolicyCidR <- lookupByKey @VerificationPolicy vetify
+        effectivePolicyVersionR <- case mPolicyCidR of
+          Some cid -> do
+            policy <- fetch cid
+            return policy.policyVersion
+          None -> return policyVersion
+        assertMsg "Policy version must not be empty" (effectivePolicyVersionR /= "")
+        t <- getTime
+        create VerificationResult with
+          borrower
+          vetify
+          verifier
+          businessName          = business.name
+          cacRegNumber          = kyc.cacRegNumber
+          checks
+          checkScores
+          riskScore
+          riskLevel
+          outcome               = Rejected
+          autoDecided
+          verificationRef
+          reviewerParty
+          reviewedBy
+          agentVersion
+          aiMetadata
+          note                  = Some reason
+          overrideJustification
+          overrideType
+          reviewNotes
+          submittedAt
+          policyVersion         = effectivePolicyVersionR
+          decidedAt             = t
+
+    -- Verification Agent stores its score and flags the application for human review.
+    choice FlagForManualReview : ContractId BusinessOnboarding
+      with
+        riskScore    : Int
+        riskLevel    : RiskLevel
+        agentVersion : Text
+        note         : Text
+      controller verifier
+      do
+        assertMsg "Can only flag from UnderReview" (status == UnderReview)
+        assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
+        create this with
+          status       = ManualReview
+          agentScore   = Some riskScore
+          agentRisk    = Some riskLevel
+          agentNote    = Some note
+          agentVersion = Some agentVersion
+
+    -- Vetify returns the application to the borrower with a correction request.
+    choice RequestAmendment : ContractId BusinessOnboarding
+      with note : Text
+      controller vetify
+      do
+        assertMsg "Can only request amendment from UnderReview or ManualReview"
+          (status == UnderReview || status == ManualReview)
+        create this with status = PendingAmendment
+
+    -- Borrower resubmits with corrections and updated document evidence.
+    -- CAC number is the identity anchor and cannot change between amendments.
+    -- Agent scoring and review notes are cleared so the agent re-evaluates fresh.
+    -- Maximum 5 amendments — the FI escalates to manual handling beyond that.
+    -- Gap 12: the document set at the time of amendment is appended to documentHistory
+    -- before the new documents replace them, preserving a full audit trail.
+    choice Amend : ContractId BusinessOnboarding
+      with
+        updatedBusiness     : BusinessProfile
+        updatedKyc          : BusinessKyc
+        updatedDocuments    : [DocumentRef]
+        policyMaxAmendments : Optional Int   -- Gap 1: from VerificationPolicy; None = default 5
+      controller borrower
+      do
+        assertMsg "Can only amend a PendingAmendment application" (status == PendingAmendment)
+        assertMsg "CAC registration number cannot change during amendment"
+          (updatedKyc.cacRegNumber == kyc.cacRegNumber)
+        let maxAmend = case policyMaxAmendments of Some n -> n; None -> 5
+        assertMsg ("Amendment limit reached; maximum " <> show maxAmend <> " amendments permitted")
+          (amendmentCount < maxAmend)
+        create this with
+          business        = updatedBusiness
+          kyc             = updatedKyc
+          documents       = updatedDocuments
+          documentHistory = documentHistory ++ [documents]   -- preserve current doc snapshot
+          status          = Draft
+          agentScore      = None
+          agentRisk       = None
+          agentNote       = None
+          agentVersion    = None
+          amendmentCount  = amendmentCount + 1
+
+
+-- ─── Stage 2: Verification Result ─────────────────────────────────────────
+-- Immutable on-ledger record of the verification decision.
+-- Both approvals AND rejections are preserved for audit completeness.
+template VerificationResult
+  with
+    borrower              : Party
+    vetify                : Party
+    verifier              : Party  -- decision authority (Stage 2); vetify observes only
+    businessName          : Text
+    cacRegNumber          : Text
+    checks                : VerificationChecks
+    checkScores           : Optional VerificationCheckScores
+    riskScore             : Int
+    riskLevel             : RiskLevel
+    outcome               : ReviewStatus
+    autoDecided           : Bool
+    verificationRef       : Text                          -- "VER-YYYY-NNNNNN"
+    reviewerParty         : Optional Party                -- Canton party of the human reviewer
+    reviewedBy            : Optional Text                 -- human-readable reviewer identity
+    agentVersion          : Optional Text
+    aiMetadata            : Optional AIDecisionMetadata
+    note                  : Optional Text
+    overrideJustification : Optional Text   -- Gap 7: recorded when human overrides agent
+    overrideType          : Optional OverrideType  -- Gap 5: OverrodeApproval or OverrodeRejection
+    reviewNotes           : Optional Text   -- Gap 9: reviewer's assessment notes
+    submittedAt           : Optional Time   -- Gap 16: onboarding submission time; enables review duration computation
+    policyVersion         : Text            -- Gap 17: policy version at time of decision
+    decidedAt             : Time
+  where
+    signatory verifier
+    observer vetify, borrower
+
+    -- Gap 8: ledger-enforced uniqueness of verificationRef per verifier party.
+    -- Prevents two decisions from sharing the same business identifier.
+    key (verifier, verificationRef) : (Party, Text)
+    maintainer key._1
+
+    -- Terminal decisions only; score in range; ref and policy version must be set.
+    -- Gap 10: agent auto-decisions must include per-check scores for full traceability.
+    -- Agent auto-decisions must follow the canonical Model C score→level mapping:
+    --   Low ≥ 80, Medium 50–79, High < 50.
+    -- Human decisions may deviate based on qualitative factors not in the score.
+    ensure
+      (outcome == Approved || outcome == Rejected)
+      && riskScore >= 0 && riskScore <= 100
+      && verificationRef /= ""
+      && policyVersion /= ""
+      && (not autoDecided || checkScores /= None)
+      && (if autoDecided then
+            case riskLevel of
+              Low    -> riskScore >= 80
+              Medium -> riskScore >= 50 && riskScore < 80
+              High   -> riskScore < 50
+          else True)
+
+    -- Gap 2: Vetify supersedes an erroneous decision with a documented correction.
+    -- Archives this VerificationResult and creates an immutable audit record.
+    -- The corrected decision takes effect outside this contract (e.g. a new
+    -- ComplianceReview is opened) — the correction record is the source of truth
+    -- for what happened and why.
+    choice Supersede : ContractId VerificationCorrection
+      with
+        correctionRef    : Text          -- unique reference, e.g. "COR-2026-000001"
+        correctedOutcome : ReviewStatus  -- the correct terminal decision
+        reason           : Text          -- why the original decision was wrong
+        correctedBy      : Party         -- the human who authorized the correction
+      controller vetify
+      do
+        assertMsg "Correction reason must not be empty" (reason /= "")
+        assertMsg "Correction reference must not be empty" (correctionRef /= "")
+        assertMsg "Corrected outcome must be a terminal decision"
+          (correctedOutcome == Approved || correctedOutcome == Rejected)
+        t <- getTime
+        create VerificationCorrection with
+          vetify
+          verifier
+          borrower
+          originalRef      = verificationRef
+          originalOutcome  = outcome
+          correctionRef
+          correctedOutcome
+          reason
+          correctedBy
+          correctedAt      = t
+
+
+-- ─── Stage 2 audit: Verification Correction ───────────────────────────────
+-- Gap 2: Immutable on-ledger correction record.
+-- Created when Vetify supersedes an erroneous VerificationResult.
+-- Preserves the full audit trail: original decision + corrected decision + reason.
+-- The contract key prevents the same correctionRef from being issued twice.
+template VerificationCorrection
+  with
+    vetify           : Party
+    verifier         : Party         -- the party whose original decision this corrects
+    borrower         : Party
+    originalRef      : Text          -- verificationRef of the superseded decision
+    originalOutcome  : ReviewStatus  -- what was decided (Approved/Rejected)
+    correctionRef    : Text          -- unique reference for this correction event
+    correctedOutcome : ReviewStatus  -- what the decision should have been
+    reason           : Text          -- documented justification for the correction
+    correctedBy      : Party         -- human who authorized the correction
+    correctedAt      : Time
+  where
+    signatory vetify
+    observer borrower, verifier
+
+    key (vetify, correctionRef) : (Party, Text)
+    maintainer key._1
+
+    ensure
+      (correctedOutcome == Approved || correctedOutcome == Rejected)
+      && originalRef /= ""
+      && correctionRef /= ""
+      && reason /= ""
+      && correctionRef /= originalRef  -- correction reference is distinct from original
+
+
+-- ─── Policy Configuration ──────────────────────────────────────────────────
+-- Gap 10: Vetify-controlled configuration that externalizes workflow thresholds
+-- and policy parameters. The contract key ensures only one active policy exists
+-- per Vetify party.
+--
+-- Maker-checker: do not update this by creating a new VerificationPolicy
+-- directly — that is a single vetify signature with no independent review,
+-- unlike every other consequential decision in this platform (Approve/Reject
+-- require both verifier and vetify; ComplianceResult.Supersede requires a
+-- different corrector than the original reviewer). Go through
+-- PendingVerificationPolicy.ApprovePolicyChange instead, which requires a
+-- named approver distinct from the proposer. Note this is an application-layer
+-- convention, not a ledger-enforced one — see PendingVerificationPolicy's own
+-- comment for why Daml cannot force that at the template level.
+template VerificationPolicy
+  with
+    vetify           : Party
+    maxAmendments    : Int    -- maximum amendment cycles (e.g. 5)
+    slaHours         : Int    -- SLA window in hours before EscalateOverdue is valid (e.g. 48)
+    autoApproveMin   : Int    -- minimum score qualifying for agent auto-approval (e.g. 80)
+    autoRejectMax    : Int    -- score below which agent auto-rejects (e.g. 50)
+    requiredDocTypes : [Text] -- mandatory document types for approval (e.g. ["CAC_CERTIFICATE"])
+    policyVersion    : Text   -- version string identifying this policy (e.g. "2026-v1")
+    scoringWeights   : VerificationScoringWeights  -- off-ledger Stage 2 scoring engine point values
+  where
+    signatory vetify
+
+    key vetify : Party
+    maintainer key
+
+    ensure
+      maxAmendments  > 0 &&
+      slaHours       > 0 &&
+      autoApproveMin > autoRejectMax &&
+      autoApproveMin <= 100 &&
+      autoRejectMax  >= 0 &&
+      policyVersion  /= "" &&
+      -- Sanity bounds on the scoring weights: no negative point values in this
+      -- rubric today, and the best-case combination should not exceed 100 —
+      -- otherwise Model C's score bands (0-100) stop meaning what they say.
+      scoringWeights.identityPerfect        >= 0 &&
+      scoringWeights.identityDobMissing     >= 0 &&
+      scoringWeights.identityDobMismatch    >= 0 &&
+      scoringWeights.identityBvnNotFound    >= 0 &&
+      scoringWeights.identityNinNotFound    >= 0 &&
+      scoringWeights.cacActiveExactMatch    >= 0 &&
+      scoringWeights.cacActiveCloseMatch    >= 0 &&
+      scoringWeights.cacActiveNameMismatch  >= 0 &&
+      scoringWeights.cacPending             >= 0 &&
+      scoringWeights.cacInactiveOrStruckOff >= 0 &&
+      scoringWeights.cacNotFound            >= 0 &&
+      scoringWeights.tinVerifiedMatchesCac       >= 0 &&
+      scoringWeights.tinVerifiedDifferentEntity  >= 0 &&
+      scoringWeights.tinNotFound                 >= 0 &&
+      scoringWeights.tinApiError                 >= 0 &&
+      (scoringWeights.identityPerfect + scoringWeights.cacActiveExactMatch + scoringWeights.tinVerifiedMatchesCac) <= 100
+
+-- Maker-checker gate for VerificationPolicy changes. vetify proposes a new
+-- policy version here (with a reason and the proposer's name); a DIFFERENT
+-- named individual must then exercise ApprovePolicyChange before it replaces
+-- the active VerificationPolicy (Layer 0/1), and — since this pass — the
+-- Risk Committee (a genuinely distinct Canton party, Layer 2, see
+-- EndorseByRiskCommittee below) must have separately endorsed it first.
+-- Without this, a single vetify signature could silently retune Stage 2's
+-- entire auto-decision rubric — including the scoring weights added for
+-- off-ledger determinism — with no independent review, unlike every other
+-- consequential choice in this platform.
+--
+-- Residual limitation (unchanged by Layer 2, permanently accepted — see
+-- docs/deferred-gaps.md's Policy-Approval Security Roadmap): Daml authorizes
+-- `create` by signatory, not by "two distinct individuals under one party" —
+-- there is no template-level way to stop someone holding vetify's ledger
+-- credentials from bypassing this and creating VerificationPolicy directly.
+-- Enforcing "always propose, never create directly" has to be an
+-- application-layer convention (e.g. the backend/ops tooling simply never
+-- exposing a raw create-VerificationPolicy capability) — not something this
+-- template can guarantee by itself. Layer 2 closes the gap in the *approval*
+-- path specifically (a single actor can no longer complete ApprovePolicyChange
+-- alone, cryptographically, since riskCommittee's own separate signature is
+-- now asserted) — it does not touch this separate direct-create escape hatch.
+template PendingVerificationPolicy
+  with
+    vetify           : Party
+    riskCommittee    : Party  -- Layer 2: a distinct Canton party from vetify, held by the Risk
+                              -- & Credit Governance Committee (docs/risk-governance-charter.md)
+    maxAmendments    : Int
+    slaHours         : Int
+    autoApproveMin   : Int
+    autoRejectMax    : Int
+    requiredDocTypes : [Text]
+    policyVersion    : Text
+    scoringWeights   : VerificationScoringWeights
+    proposedBy       : Text  -- name of the individual proposing this change
+    reason           : Text  -- why this change is being made
+    proposedAt       : Time
+    riskCommitteeEndorsedBy : Optional Text  -- Layer 2: set by EndorseByRiskCommittee
+    riskCommitteeEndorsedAt : Optional Time
+  where
+    signatory vetify
+    observer riskCommittee
+
+    key vetify : Party
+    maintainer key
+
+    ensure
+      maxAmendments  > 0 &&
+      slaHours       > 0 &&
+      autoApproveMin > autoRejectMax &&
+      autoApproveMin <= 100 &&
+      autoRejectMax  >= 0 &&
+      policyVersion  /= "" &&
+      proposedBy     /= "" &&
+      reason         /= "" &&
+      scoringWeights.identityPerfect        >= 0 &&
+      scoringWeights.identityDobMissing     >= 0 &&
+      scoringWeights.identityDobMismatch    >= 0 &&
+      scoringWeights.identityBvnNotFound    >= 0 &&
+      scoringWeights.identityNinNotFound    >= 0 &&
+      scoringWeights.cacActiveExactMatch    >= 0 &&
+      scoringWeights.cacActiveCloseMatch    >= 0 &&
+      scoringWeights.cacActiveNameMismatch  >= 0 &&
+      scoringWeights.cacPending             >= 0 &&
+      scoringWeights.cacInactiveOrStruckOff >= 0 &&
+      scoringWeights.cacNotFound            >= 0 &&
+      scoringWeights.tinVerifiedMatchesCac       >= 0 &&
+      scoringWeights.tinVerifiedDifferentEntity  >= 0 &&
+      scoringWeights.tinNotFound                 >= 0 &&
+      scoringWeights.tinApiError                 >= 0 &&
+      (scoringWeights.identityPerfect + scoringWeights.cacActiveExactMatch + scoringWeights.tinVerifiedMatchesCac) <= 100
+
+    -- Layer 2 of the Policy-Approval Security Roadmap: a genuinely distinct
+    -- Canton party (riskCommittee, held by the Risk & Credit Governance
+    -- Committee, not by whoever operates the vetify platform party) must
+    -- independently sign its own transaction endorsing this proposal before
+    -- vetify may finalize it below. This is deliberately a separate choice
+    -- exercised by riskCommittee alone — not a single `controller vetify,
+    -- riskCommittee` exercise on ApprovePolicyChange — because a single
+    -- combined exercise only proves whoever submitted the command held
+    -- authority for both parties; it does nothing to prove two distinct
+    -- signers acted, if the same backend process happens to hold both
+    -- parties' credentials. Two separate ledger transactions, each
+    -- authorized by only one party's own JWT, is what actually establishes
+    -- non-repudiation here: the ledger records that riskCommittee's own
+    -- credentials specifically authorized this transaction.
+    choice EndorseByRiskCommittee : ContractId PendingVerificationPolicy
+      with
+        endorsedBy : Text  -- name of the specific committee member endorsing
+      controller riskCommittee
+      do
+        assertMsg "endorsedBy must not be empty" (endorsedBy /= "")
+        assertMsg "Already endorsed by the Risk Committee" (riskCommitteeEndorsedBy == None)
+        t <- getTime
+        create this with
+          riskCommitteeEndorsedBy = Some endorsedBy
+          riskCommitteeEndorsedAt = Some t
+
+    -- Activates this proposal: archives whichever VerificationPolicy is
+    -- currently active (if any) and creates the new one in its place.
+    choice ApprovePolicyChange : ContractId VerificationPolicy
+      with
+        approvedBy : Text
+      controller vetify
+      do
+        assertMsg "approvedBy must not be empty" (approvedBy /= "")
+        assertMsg "Approver must differ from proposer (maker-checker)" (approvedBy /= proposedBy)
+        -- Layer 1 of the Policy-Approval Security Roadmap: approvedBy must
+        -- name a real, currently-active registered PolicyApprover, not just
+        -- any Text that differs from proposedBy.
+        requireActivePolicyApprover vetify approvedBy
+        -- Layer 2: the Risk Committee's own separately-signed endorsement
+        -- transaction must have already occurred (see EndorseByRiskCommittee).
+        assertMsg "Layer 2: Risk Committee must endorse this change before vetify can approve it"
+          (riskCommitteeEndorsedBy /= None)
+        mCurrentCid <- lookupByKey @VerificationPolicy vetify
+        case mCurrentCid of
+          Some cid -> archive cid
+          None -> pure ()
+        create VerificationPolicy with
+          vetify
+          maxAmendments
+          slaHours
+          autoApproveMin
+          autoRejectMax
+          requiredDocTypes
+          policyVersion
+          scoringWeights
+
+    -- Withdraws/declines this proposal without it ever taking effect. Unlike
+    -- Approve, self-rejection (rejectedBy == proposedBy) is fine — withdrawing
+    -- your own draft isn't the security-sensitive action; activating one is.
+    choice RejectPolicyChange : ()
+      with
+        rejectedBy      : Text
+        rejectionReason : Text
+      controller vetify
+      do
+        assertMsg "rejectedBy must not be empty" (rejectedBy /= "")
+        assertMsg "rejectionReason must not be empty" (rejectionReason /= "")
+        pure ()

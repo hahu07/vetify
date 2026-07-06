@@ -1,0 +1,22 @@
+-- | Ongoing: regulatory portfolio reporting. Leaf module — depends only on
+--   Vetify.Types. Created off-ledger by the Reporting Agent for regulator visibility.
+module Vetify.Reporting where
+
+-- Regulatory portfolio report. Field set reconciled with the backend
+-- getPortfolioSummary aggregation (review finding F11 added defaultedCount).
+template PortfolioReport
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    reportDate           : Date
+    totalActiveContracts : Int
+    totalDisbursed       : Decimal
+    totalOutstanding     : Decimal
+    delinquentCount      : Int
+    completedCount       : Int
+    defaultedCount       : Int
+    summary              : Text
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator

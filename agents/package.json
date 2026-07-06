@@ -1,0 +1,40 @@
+{
+  "name": "vetify-agents",
+  "version": "0.1.0",
+  "description": "AI agents for the Vetify financing workflow",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "acp": "tsx src/acp.ts",
+    "mcp:canton": "tsx src/mcp/canton-server.ts",
+    "mcp:mono": "tsx src/mcp/mono-server.ts",
+    "mcp:youverify": "tsx src/mcp/youverify-server.ts",
+    "mcp:shariah": "tsx src/mcp/shariah-server.ts",
+    "rag:ingest:shariah": "tsx src/rag/shariah/ingest.ts",
+    "test": "tsx --test src/scoring/*.test.ts"
+  },
+  "dependencies": {
+    "deepagents": "^1.10.5",
+    "deepagents-acp": "latest",
+    "@langchain/community": "latest",
+    "@langchain/textsplitters": "latest",
+    "faiss-node": "^0.5.1",
+    "pdf-parse": "^1.1.1",
+    "langchain": "latest",
+    "@langchain/anthropic": "latest",
+    "@langchain/openai": "latest",
+    "@langchain/langgraph": "latest",
+    "@langchain/mcp-adapters": "latest",
+    "@modelcontextprotocol/sdk": "latest",
+    "dotenv": "^16.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0"
+  }
+}

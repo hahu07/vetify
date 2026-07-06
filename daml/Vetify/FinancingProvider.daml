@@ -1,0 +1,147 @@
+-- | Stage 0: Financing provider self-registration and Vetify approval.
+--   Every party that wishes to offer financing on the platform must complete
+--   this onboarding before they can exercise ApproveFunding on a FinancingRequest.
+--
+--   Lighter-weight than borrower onboarding: no AI agent, no compliance review.
+--   Vetify performs off-ledger due diligence and approves a specific set of
+--   financing instruments permitted for that provider, based on their governing
+--   documents (CBN license, deed of Waqf, cooperative constitution, fund prospectus).
+--
+--   Supports all provider types: CBN-licensed NIFIs, SEC fund managers, pension funds,
+--   cooperative societies, investment clubs, Waqf funds, Zakat funds, and philanthropies.
+--   Unlicensed providers set licenseNumber = None and regulatoryBody = None.
+--
+--   Contract key: financialInstitution (Party) — one active onboarding per provider party.
+--   Leaf module — depends only on Vetify.Types.
+module Vetify.FinancingProvider where
+
+import Vetify.Types
+
+-- ─── Stage 0: Provider Onboarding ─────────────────────────────────────────────
+-- Self-registered by the financing provider; reviewed and approved by Vetify.
+-- Key: financialInstitution Party — enforces one active onboarding record per party.
+template FinancingProviderOnboarding
+  with
+    financialInstitution : Party
+    vetify               : Party
+    providerName         : Text
+    address              : Text
+    providerType         : ProviderType
+    regulatoryBody       : Optional RegulatoryBody  -- None for unregulated providers
+    licenseNumber        : Optional Text             -- None if no external license
+    governingDocRef      : DocumentRef               -- CBN license, deed of Waqf, constitution, etc.
+    declaredInstruments  : [FinancingInstrument]     -- instruments the provider wishes to offer
+    status               : ReviewStatus
+    submittedAt          : Optional Time
+    amendmentCount       : Int                       -- max 5; immutable after each approval cycle
+  where
+    signatory financialInstitution
+    observer vetify
+    ensure providerName /= ""
+        && not (null declaredInstruments)
+        && amendmentCount >= 0
+    key (financialInstitution, vetify) : (Party, Party)
+    maintainer key._1
+
+    -- Provider submits the registration for Vetify review.
+    choice SubmitProviderForReview : ContractId FinancingProviderOnboarding
+      controller financialInstitution
+      do
+        assertMsg "Can only submit from Draft" (status == Draft)
+        t <- getTime
+        create this with
+          status      = UnderReview
+          submittedAt = Some t
+
+    -- Vetify approves the provider and records which instruments they may offer.
+    -- approvedInstruments may be a subset of declaredInstruments — Vetify gates
+    -- based on governing documents (e.g. a Waqf Khairi gets only QardHasan).
+    choice ApproveProvider : ContractId ApprovedProvider
+      with
+        approvedInstruments : [FinancingInstrument]
+        regulator           : Optional Party  -- supervisory observer (e.g. CBN for NIFIs)
+      controller vetify
+      do
+        assertMsg "Can only approve from UnderReview or ManualReview"
+          (status == UnderReview || status == ManualReview)
+        assertMsg "Must approve at least one financing instrument"
+          (not (null approvedInstruments))
+        t <- getTime
+        create ApprovedProvider with
+          financialInstitution
+          vetify
+          providerName
+          providerType
+          regulatoryBody
+          licenseNumber
+          approvedInstruments
+          approvedAt = t
+          regulator
+
+    -- Vetify rejects the registration with a reason recorded off-ledger.
+    -- The onboarding contract is archived; the provider may re-register.
+    choice RejectProvider : ()
+      with
+        reason : Text
+      controller vetify
+      do
+        assertMsg "Can only reject from UnderReview or ManualReview"
+          (status == UnderReview || status == ManualReview)
+        assertMsg "Rejection reason must not be empty" (reason /= "")
+        return ()
+
+    -- Vetify requests corrections before approval.
+    choice RequestProviderAmendment : ContractId FinancingProviderOnboarding
+      with
+        note : Text
+      controller vetify
+      do
+        assertMsg "Can only request amendment from UnderReview" (status == UnderReview)
+        create this with status = PendingAmendment
+
+    -- Provider responds to amendment request; clears submission and increments count.
+    choice AmendProvider : ContractId FinancingProviderOnboarding
+      with
+        updatedProviderName        : Text
+        updatedAddress             : Text
+        updatedLicenseNumber       : Optional Text
+        updatedGoverningDocRef     : DocumentRef
+        updatedDeclaredInstruments : [FinancingInstrument]
+      controller financialInstitution
+      do
+        assertMsg "Can only amend from PendingAmendment" (status == PendingAmendment)
+        assertMsg "Amendment limit reached" (amendmentCount < 5)
+        assertMsg "Updated provider name must not be empty" (updatedProviderName /= "")
+        assertMsg "Must declare at least one instrument" (not (null updatedDeclaredInstruments))
+        create this with
+          providerName        = updatedProviderName
+          address             = updatedAddress
+          licenseNumber       = updatedLicenseNumber
+          governingDocRef     = updatedGoverningDocRef
+          declaredInstruments = updatedDeclaredInstruments
+          status              = Draft
+          amendmentCount      = amendmentCount + 1
+
+
+-- ─── Approved Provider Status Record ──────────────────────────────────────────
+-- Created by ApproveProvider; acts as the ledger credential that gates
+-- ApproveFunding in Vetify.Financing.  Vetify is signatory; the provider
+-- and regulator are observers.
+-- Key: financialInstitution Party — fetched by ApproveFunding using CID.
+template ApprovedProvider
+  with
+    financialInstitution : Party
+    vetify               : Party
+    providerName         : Text
+    providerType         : ProviderType
+    regulatoryBody       : Optional RegulatoryBody
+    licenseNumber        : Optional Text
+    approvedInstruments  : [FinancingInstrument]  -- ledger-enforced instrument permissions
+    approvedAt           : Time
+    regulator            : Optional Party          -- supervisory observer (None if unregulated)
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure not (null approvedInstruments)
+    key (vetify, financialInstitution) : (Party, Party)
+    maintainer key._1

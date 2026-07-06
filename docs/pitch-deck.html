@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vetify — Hackathon Pitch Deck</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/black.min.css" />
+  <style>
+    :root {
+      --gold: #c9a84c;
+      --gold-light: #e8c76a;
+      --teal: #00b894;
+      --teal-light: #55efc4;
+      --bg-dark: #080c14;
+      --bg-card: #111827;
+      --bg-card2: #1a2235;
+      --text-dim: #8899aa;
+      --text-main: #e8edf5;
+      --red: #e55353;
+    }
+
+    .reveal-viewport { background: var(--bg-dark); }
+    .reveal .slides section { text-align: left; }
+    .reveal h1, .reveal h2, .reveal h3 { font-family: 'Segoe UI', system-ui, sans-serif; text-transform: none; letter-spacing: -0.02em; }
+    .reveal p, .reveal li, .reveal td, .reveal th { font-family: 'Segoe UI', system-ui, sans-serif; }
+
+    /* ── Title slide ── */
+    .slide-title { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; height: 100%; padding: 0 0 0 0.5em; }
+    .slide-title .logo { font-size: 5em; font-weight: 800; color: var(--gold); letter-spacing: -0.03em; line-height: 1; margin-bottom: 0.15em; }
+    .slide-title .tagline { font-size: 1.3em; color: var(--text-main); font-weight: 400; line-height: 1.5; margin-bottom: 0.5em; max-width: 700px; }
+    .slide-title .sub { font-size: 0.85em; color: var(--text-dim); border-left: 3px solid var(--gold); padding-left: 0.8em; }
+    .slide-title .badge-row { display: flex; gap: 0.6em; margin-top: 1.2em; flex-wrap: wrap; }
+    .badge { background: var(--bg-card2); border: 1px solid var(--gold); color: var(--gold); border-radius: 20px; padding: 0.25em 0.9em; font-size: 0.7em; font-weight: 600; }
+    .badge.teal { border-color: var(--teal); color: var(--teal); }
+
+    /* ── Section label ── */
+    .section-label { font-size: 0.65em; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold); margin-bottom: 0.4em; }
+
+    /* ── Slide headline ── */
+    .slide-headline { font-size: 1.9em !important; font-weight: 700 !important; color: var(--text-main) !important; line-height: 1.2 !important; margin-bottom: 0.6em !important; }
+    .slide-headline span { color: var(--gold); }
+
+    /* ── Cards ── */
+    .card-grid { display: grid; gap: 0.7em; }
+    .card-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+    .card-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+    .card { background: var(--bg-card); border: 1px solid #1e2d42; border-radius: 10px; padding: 1em 1.2em; }
+    .card.gold-border { border-color: var(--gold); }
+    .card.teal-border { border-color: var(--teal); }
+    .card-title { font-size: 0.85em; font-weight: 700; color: var(--gold); margin-bottom: 0.4em; }
+    .card-title.teal { color: var(--teal); }
+    .card p, .card li { font-size: 0.72em; color: var(--text-dim); line-height: 1.5; margin: 0; }
+    .card ul { margin: 0; padding-left: 1.2em; }
+    .card li { margin-bottom: 0.25em; }
+    .card .stat { font-size: 2em; font-weight: 800; color: var(--gold); line-height: 1; }
+    .card .stat-label { font-size: 0.7em; color: var(--text-dim); }
+
+    /* ── Pain row ── */
+    .pain-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.7em; margin-bottom: 1em; }
+    .pain-col .pain-head { font-size: 0.75em; font-weight: 700; color: var(--gold); border-bottom: 1px solid #1e2d42; padding-bottom: 0.3em; margin-bottom: 0.5em; }
+    .pain-col li { font-size: 0.68em; color: var(--text-dim); list-style: none; padding: 0; margin: 0 0 0.4em 0; }
+    .pain-col li::before { content: "✗  "; color: var(--red); font-weight: 700; }
+
+    /* ── Pipeline ── */
+    .pipeline { display: flex; align-items: center; gap: 0.3em; flex-wrap: wrap; margin: 0.8em 0; }
+    .pipe-box { background: var(--bg-card); border: 1px solid #1e2d42; border-radius: 8px; padding: 0.5em 0.8em; font-size: 0.68em; color: var(--text-main); font-weight: 600; text-align: center; flex: 1; min-width: 80px; }
+    .pipe-box.active { border-color: var(--gold); color: var(--gold); }
+    .pipe-arrow { color: var(--text-dim); font-size: 1em; flex-shrink: 0; }
+
+    /* ── Stage grid ── */
+    .stage-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0.5em; }
+    .stage-box { background: var(--bg-card); border: 1px solid #1e2d42; border-radius: 8px; padding: 0.6em 0.5em; text-align: center; }
+    .stage-box .stage-num { font-size: 1.1em; font-weight: 800; color: var(--gold); line-height: 1; }
+    .stage-box .stage-name { font-size: 0.58em; color: var(--text-dim); line-height: 1.3; margin-top: 0.3em; }
+    .stage-box.highlight { border-color: var(--teal); }
+    .stage-box.highlight .stage-num { color: var(--teal); }
+
+    /* ── Agent table ── */
+    .agent-table { width: 100%; border-collapse: collapse; font-size: 0.72em; }
+    .agent-table th { background: var(--bg-card2); color: var(--gold); font-weight: 700; padding: 0.5em 0.7em; text-align: left; border-bottom: 1px solid #1e2d42; }
+    .agent-table td { padding: 0.5em 0.7em; color: var(--text-dim); border-bottom: 1px solid #111827; vertical-align: top; }
+    .agent-table tr:hover td { background: #0f1826; }
+    .agent-name { color: var(--text-main) !important; font-weight: 600; }
+    .agent-stage { color: var(--teal) !important; font-size: 0.9em; }
+
+    /* ── Risk gate ── */
+    .risk-row { display: flex; gap: 0.6em; margin-top: 0.8em; }
+    .risk-box { flex: 1; border-radius: 8px; padding: 0.6em 0.8em; font-size: 0.68em; }
+    .risk-box.green { background: rgba(0,184,148,0.1); border: 1px solid var(--teal); }
+    .risk-box.amber { background: rgba(201,168,76,0.1); border: 1px solid var(--gold); }
+    .risk-box.red { background: rgba(229,83,83,0.1); border: 1px solid var(--red); }
+    .risk-score { font-size: 1.6em; font-weight: 800; margin-bottom: 0.2em; }
+    .risk-box.green .risk-score { color: var(--teal); }
+    .risk-box.amber .risk-score { color: var(--gold); }
+    .risk-box.red .risk-score { color: var(--red); }
+    .risk-label { color: var(--text-dim); }
+
+    /* ── Architecture diagram ── */
+    .arch { display: flex; flex-direction: column; gap: 0.4em; align-items: center; }
+    .arch-layer { display: flex; gap: 0.5em; justify-content: center; width: 100%; }
+    .arch-box { background: var(--bg-card); border: 1px solid #1e2d42; border-radius: 8px; padding: 0.45em 1em; font-size: 0.65em; color: var(--text-main); text-align: center; font-weight: 600; }
+    .arch-box.gold { border-color: var(--gold); color: var(--gold); }
+    .arch-box.teal { border-color: var(--teal); color: var(--teal); }
+    .arch-box.dim { border-color: #1e2d42; color: var(--text-dim); }
+    .arch-arrow { text-align: center; font-size: 0.9em; color: #1e2d42; line-height: 0.8; }
+    .arch-arrow.split { display: flex; justify-content: center; gap: 6em; }
+
+    /* ── Demo flow ── */
+    .demo-list { list-style: none; margin: 0; padding: 0; }
+    .demo-list li { display: flex; align-items: flex-start; gap: 0.7em; margin-bottom: 0.5em; font-size: 0.72em; color: var(--text-dim); line-height: 1.4; }
+    .demo-list .num { background: var(--gold); color: #000; border-radius: 50%; width: 1.6em; height: 1.6em; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 0.85em; flex-shrink: 0; margin-top: 0.1em; }
+    .demo-list .num.teal { background: var(--teal); }
+    .demo-list strong { color: var(--text-main); }
+
+    /* ── Built table ── */
+    .built-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; }
+    .built-col .built-head { font-size: 0.75em; font-weight: 700; color: var(--gold); margin-bottom: 0.5em; padding-bottom: 0.3em; border-bottom: 1px solid #1e2d42; }
+    .built-col ul { margin: 0; padding-left: 1.2em; }
+    .built-col li { font-size: 0.68em; color: var(--text-dim); margin-bottom: 0.35em; list-style: none; padding: 0; }
+    .built-col li::before { content: "✓  "; color: var(--teal); font-weight: 700; }
+
+    /* ── Market & CTA ── */
+    .market-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; margin-bottom: 0.8em; }
+    .cta-box { background: linear-gradient(135deg, rgba(201,168,76,0.12), rgba(0,184,148,0.08)); border: 1px solid var(--gold); border-radius: 12px; padding: 1em 1.4em; text-align: center; margin-top: 0.6em; }
+    .cta-box p { font-size: 0.85em; color: var(--text-main); font-weight: 600; margin: 0; font-style: italic; }
+
+    /* ── Shariah verdict table ── */
+    .verdict-table { width: 100%; border-collapse: collapse; font-size: 0.72em; }
+    .verdict-table th { background: var(--bg-card2); color: var(--gold); padding: 0.5em 0.8em; text-align: left; border-bottom: 1px solid #1e2d42; }
+    .verdict-table td { padding: 0.55em 0.8em; border-bottom: 1px solid #111827; color: var(--text-dim); }
+    .verdict-table .v-compliant { color: var(--teal); font-weight: 700; }
+    .verdict-table .v-review { color: var(--gold); font-weight: 700; }
+    .verdict-table .v-reject { color: var(--red); font-weight: 700; }
+
+    /* ── Canton callout ── */
+    .canton-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8em; }
+    .canton-col .canton-head { font-size: 0.75em; font-weight: 700; color: var(--gold); margin-bottom: 0.5em; padding-bottom: 0.3em; border-bottom: 1px solid #1e2d42; }
+    .canton-col ul { margin: 0; padding-left: 1.2em; }
+    .canton-col li { font-size: 0.68em; color: var(--text-dim); margin-bottom: 0.4em; }
+    .canton-quote { background: var(--bg-card2); border-left: 3px solid var(--gold); padding: 0.6em 1em; font-size: 0.7em; color: var(--text-dim); font-style: italic; margin-top: 0.8em; border-radius: 0 8px 8px 0; }
+
+    /* ── Footer / slide number ── */
+    .slide-footer { position: absolute; bottom: 0.4em; right: 0.6em; font-size: 0.55em; color: #2a3a50; }
+
+    /* ── Utility ── */
+    .gold { color: var(--gold); }
+    .teal { color: var(--teal); }
+    .dim { color: var(--text-dim); }
+    .mt { margin-top: 0.6em; }
+    .small { font-size: 0.65em; color: var(--text-dim); }
+
+    /* Reveal overrides */
+    .reveal .slides > section { padding: 1.5em 2em; }
+    .reveal h2 { font-size: 1.9em; color: var(--text-main); margin: 0 0 0.3em 0; }
+    .reveal ul { margin: 0; }
+    .reveal li { font-size: 0.78em; color: var(--text-dim); margin-bottom: 0.3em; }
+
+    /* Progress bar */
+    .reveal .progress { color: var(--gold); }
+    .reveal .controls { color: var(--gold); }
+  </style>
+</head>
+<body>
+<div class="reveal">
+  <div class="slides">
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 1 — TITLE
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="slide-title">
+        <div class="logo">Vetify</div>
+        <div class="tagline">AI-Powered Non-Interest Credit Infrastructure<br>on the Canton Blockchain</div>
+        <div class="sub">Connecting Nigerian SME borrowers with licensed financial institutions<br>through a fully digital, Shariah-compliant Murabahah financing workflow</div>
+        <div class="badge-row">
+          <span class="badge">Canton / Daml</span>
+          <span class="badge teal">5 AI Agents</span>
+          <span class="badge">AAOIFI Compliant</span>
+          <span class="badge teal">CBN NIFI-Aligned</span>
+          <span class="badge">10-Stage Borrower Lifecycle</span>
+          <span class="badge teal">FI Provider Onboarding</span>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 2 — PROBLEM
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">The Problem</div>
+      <h2 class="slide-headline">SME Financing in Nigeria is <span>Broken</span></h2>
+
+      <div class="pain-row">
+        <div class="pain-col">
+          <div class="pain-head">Borrowers</div>
+          <ul>
+            <li>Weeks to get approved</li>
+            <li>Repeat document submissions</li>
+            <li>No transparency into status</li>
+            <li>Inconsistent risk assessments</li>
+          </ul>
+        </div>
+        <div class="pain-col">
+          <div class="pain-head">Financial Institutions</div>
+          <ul>
+            <li>Manual verification processes</li>
+            <li>High underwriting cost</li>
+            <li>Fragmented borrower data</li>
+            <li>Compliance burden at every stage</li>
+          </ul>
+        </div>
+        <div class="pain-col">
+          <div class="pain-head">Regulators</div>
+          <ul>
+            <li>No real-time portfolio visibility</li>
+            <li>Audit trails are paper-based</li>
+            <li>Fragmented compliance reporting</li>
+            <li>Limited supervisory oversight</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card-grid cols-3 mt">
+        <div class="card gold-border">
+          <div class="stat">40M+</div>
+          <div class="stat-label">Nigerian SMEs underserved by conventional credit</div>
+        </div>
+        <div class="card teal-border">
+          <div class="stat">₦4.5T</div>
+          <div class="stat-label">Islamic finance market — growing 10–12% annually</div>
+        </div>
+        <div class="card gold-border">
+          <div class="stat">0</div>
+          <div class="stat-label">Shared digital rails for non-interest lenders in Nigeria</div>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 3 — SOLUTION
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">The Solution</div>
+      <h2 class="slide-headline">One Platform. <span>Every Stage</span> of Murabahah Financing.</h2>
+
+      <div style="font-size:0.62em;font-weight:700;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.25em">Parallel track — runs once per provider</div>
+      <div class="pipeline" style="margin-bottom:0.3em">
+        <div class="pipe-box active" style="background:rgba(201,168,76,0.07)">FI Registers</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active" style="background:rgba(201,168,76,0.07)">Vetify Reviews</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active" style="background:rgba(201,168,76,0.07)">Instruments Approved</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box" style="border-color:var(--gold);color:var(--gold)">ApproveFunding Unlocked</div>
+      </div>
+
+      <div style="font-size:0.62em;font-weight:700;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.25em;margin-top:0.3em">Borrower lifecycle — per financing request</div>
+      <div class="pipeline">
+        <div class="pipe-box active">Borrower KYC</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active">AI Verification</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active">AI Compliance</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active">AI Underwriting</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active">Murabahah Contract</div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-box active">Repayment Monitor</div>
+      </div>
+
+      <div class="card-grid cols-3 mt">
+        <div class="card gold-border">
+          <div class="card-title">Automated</div>
+          <p>AI agents handle identity verification, AML/KYB, DSCR scoring, and delinquency detection — decisions in seconds, not weeks.</p>
+        </div>
+        <div class="card teal-border">
+          <div class="card-title teal">Shariah-Compliant</div>
+          <p>Shariah Agent screens every application against AAOIFI Standards. NON_COMPLIANT applications are rejected before any API call is made.</p>
+        </div>
+        <div class="card gold-border">
+          <div class="card-title">Provider-Gated</div>
+          <p>Every FI must complete provider onboarding before they can offer financing. CBN NIFIs, Waqf funds, cooperatives — all supported. Instrument permissions set per provider.</p>
+        </div>
+      </div>
+
+      <div class="cta-box mt">
+        <p>"Every workflow transition is a Canton smart contract. Invalid state changes are compile-time errors — not runtime bugs."</p>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 4 — LIFECYCLE
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">How It Works</div>
+      <h2 class="slide-headline">Two Onboarding Tracks. <span>Every Step On-Chain.</span></h2>
+
+      <!-- Stage 0 prerequisite strip -->
+      <div style="display:flex;align-items:center;gap:0.5em;background:rgba(201,168,76,0.06);border:1px solid var(--gold);border-radius:8px;padding:0.45em 0.9em;margin-bottom:0.5em;font-size:0.65em;flex-wrap:wrap">
+        <span style="font-size:1.2em;font-weight:800;color:var(--gold);flex-shrink:0">Stage 0</span>
+        <span style="color:var(--gold);font-weight:700;flex-shrink:0">FI Provider Onboarding</span>
+        <span style="color:var(--text-dim);flex-shrink:0">—</span>
+        <span style="color:var(--text-dim)">FI self-registers → Vetify approves instruments (Murabahah / Ijarah / QardHasan)</span>
+        <span style="color:var(--text-dim);flex-shrink:0">→</span>
+        <span style="color:var(--gold);font-weight:600;flex-shrink:0">ApprovedProvider contract gates ApproveFunding</span>
+        <span style="color:var(--text-dim);margin-left:auto;flex-shrink:0">Supports CBN NIFIs · Waqf · Cooperatives · Philanthropies</span>
+      </div>
+
+      <div style="font-size:0.62em;font-weight:700;color:var(--text-dim);letter-spacing:0.08em;text-transform:uppercase;margin-bottom:0.3em">Borrower financing lifecycle (10 stages)</div>
+      <div class="stage-grid">
+        <div class="stage-box highlight">
+          <div class="stage-num">1</div>
+          <div class="stage-name">Borrower<br>Onboarding</div>
+        </div>
+        <div class="stage-box highlight">
+          <div class="stage-num">2</div>
+          <div class="stage-name">AI Verification<br>(CAC · BVN · NIN)</div>
+        </div>
+        <div class="stage-box highlight">
+          <div class="stage-num">3</div>
+          <div class="stage-name">Compliance Review<br>(Shariah · AML · CDD)</div>
+        </div>
+        <div class="stage-box">
+          <div class="stage-num">4</div>
+          <div class="stage-name">Borrower<br>Approved</div>
+        </div>
+        <div class="stage-box">
+          <div class="stage-num">5</div>
+          <div class="stage-name">Financing<br>Request</div>
+        </div>
+        <div class="stage-box highlight">
+          <div class="stage-num">6</div>
+          <div class="stage-name">AI Underwriting<br>(DSCR · Cash Flow)</div>
+        </div>
+        <div class="stage-box">
+          <div class="stage-num">7</div>
+          <div class="stage-name">Institution<br>Decision</div>
+        </div>
+        <div class="stage-box">
+          <div class="stage-num">8</div>
+          <div class="stage-name">Murabahah<br>Execution</div>
+        </div>
+        <div class="stage-box highlight">
+          <div class="stage-num">9</div>
+          <div class="stage-name">AI Repayment<br>Monitoring</div>
+        </div>
+        <div class="stage-box">
+          <div class="stage-num">10</div>
+          <div class="stage-name">Contract<br>Closure</div>
+        </div>
+      </div>
+
+      <div class="card-grid cols-2 mt">
+        <div class="card gold-border">
+          <div class="card-title">Murabahah Acquisition Chain (AAOIFI Std No. 8)</div>
+          <p>Wad (promise) → Wakala (agency) → Asset Purchase → Qabdh (delivery) → Proposal → Bilateral Contract</p>
+        </div>
+        <div class="card teal-border">
+          <div class="card-title teal">FI Provider Gate — ApproveFunding</div>
+          <p><code style="color:var(--teal)">ApproveFunding</code> verifies <code style="color:var(--teal)">ApprovedProvider</code> CID on-chain: correct FI + Murabahah in approved instruments. Unlicensed providers may still offer QardHasan. One active record per provider party — contract key enforced.</p>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 5 — AI AGENTS
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">AI Agents</div>
+      <h2 class="slide-headline">5 Agents. <span>Humans Stay in Control.</span></h2>
+
+      <table class="agent-table">
+        <thead>
+          <tr>
+            <th>Agent</th>
+            <th>What It Does</th>
+            <th>APIs Used</th>
+            <th>Stage</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="agent-name">Verification</td>
+            <td>Identity, CAC registry, BVN/NIN, TIN validation</td>
+            <td>mono.co Lookup</td>
+            <td class="agent-stage">Stage 2</td>
+          </tr>
+          <tr>
+            <td class="agent-name">Shariah</td>
+            <td>RAG over AAOIFI Standards — screens business type &amp; financing purpose</td>
+            <td>FAISS · OpenAI Embeddings</td>
+            <td class="agent-stage">Stage 3 Step 0</td>
+          </tr>
+          <tr>
+            <td class="agent-name">Compliance</td>
+            <td>AML screening, PEP check, KYB, customer due diligence</td>
+            <td>Youverify</td>
+            <td class="agent-stage">Stage 3</td>
+          </tr>
+          <tr>
+            <td class="agent-name">Underwriting</td>
+            <td>DSCR analysis, bank statements, cash flow, risk score 0–100</td>
+            <td>mono.co Connect · Creditworthiness</td>
+            <td class="agent-stage">Stage 6</td>
+          </tr>
+          <tr>
+            <td class="agent-name">Monitoring</td>
+            <td>Delinquency detection, installment tracking, early warnings</td>
+            <td>Canton ledger</td>
+            <td class="agent-stage">Stage 9</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="risk-row">
+        <div class="risk-box green">
+          <div class="risk-score">≥ 80</div>
+          <div class="risk-label">Auto-approve · Low risk · Choice exercised on-chain immediately</div>
+        </div>
+        <div class="risk-box amber">
+          <div class="risk-score">50–79</div>
+          <div class="risk-label">Flag for manual review · Compliance officer notified in IDE</div>
+        </div>
+        <div class="risk-box red">
+          <div class="risk-score">&lt; 50</div>
+          <div class="risk-label">Auto-reject · Reason recorded on ledger permanently</div>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 6 — SHARIAH AGENT DEEP DIVE
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Shariah Compliance</div>
+      <h2 class="slide-headline">Shariah Agent — <span>Hard Gate Before Any AML Check</span></h2>
+
+      <table class="verdict-table">
+        <thead>
+          <tr>
+            <th>Verdict</th>
+            <th>Condition</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="v-compliant">COMPLIANT</td>
+            <td>Business activity and financing purpose clearly permissible under AAOIFI</td>
+            <td>Set <code style="color:var(--teal);font-size:0.9em">shariahCompliant: true</code> — proceed to AML/KYB</td>
+          </tr>
+          <tr>
+            <td class="v-review">REQUIRES_REVIEW</td>
+            <td>Mixed business (5–25% prohibited revenue) or ambiguous sector</td>
+            <td>Run AML/KYB, but force <code style="color:var(--gold);font-size:0.9em">FlagComplianceForManualReview</code></td>
+          </tr>
+          <tr>
+            <td class="v-reject">NON_COMPLIANT</td>
+            <td>Clearly prohibited sector (alcohol, riba, gambling) or invalid Murabahah structure</td>
+            <td>Immediately exercise <code style="color:var(--red);font-size:0.9em">RejectCompliance</code> — no API calls made</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="card-grid cols-3 mt">
+        <div class="card gold-border">
+          <div class="card-title">RAG Knowledge Base</div>
+          <p>AAOIFI Std No. 8, 28 &amp; 40 + CBN Non-Interest Financial Institutions Framework — ingested as FAISS vector store</p>
+        </div>
+        <div class="card teal-border">
+          <div class="card-title teal">MCP Tools</div>
+          <p><code style="color:var(--teal)">query_shariah_ruling</code> — semantic search over standards<br><code style="color:var(--teal)">check_prohibited_sector</code> — keyword + embedding match</p>
+        </div>
+        <div class="card gold-border">
+          <div class="card-title">Embeddings</div>
+          <p>OpenAI text-embedding-3-small · Chunk size 1200, overlap 200 · FAISS persistent store</p>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 7 — WHY CANTON
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Technology Choice</div>
+      <h2 class="slide-headline">Why <span>Canton + Daml</span></h2>
+
+      <div class="canton-cols">
+        <div class="canton-col">
+          <div class="canton-head">What Canton Gives Us</div>
+          <ul>
+            <li>Sub-transaction privacy — each party sees only their contracts, not each other's</li>
+            <li>Immutable audit trail baked into the ledger protocol</li>
+            <li>Bilateral contract execution — both borrower &amp; institution must sign the Murabahah</li>
+            <li>Contract keys (LF 2.3) enforce one active onboarding per CAC number and one ApprovedProvider per FI party</li>
+            <li>Regulator observes only <em>ApprovedProvider</em>, <em>MurabahahContract</em> &amp; <em>PortfolioReport</em></li>
+          </ul>
+        </div>
+        <div class="canton-col">
+          <div class="canton-head">What Daml Gives Us</div>
+          <ul>
+            <li>Type-safe choice logic — invalid workflow transitions are compile-time errors</li>
+            <li>Role-based authorization enforced by the ledger, not application code</li>
+            <li>20 templates across 7 modules covering the full lifecycle</li>
+            <li>Daml Script test suite — 226 tests across 5 test files, all passing</li>
+            <li>Import DAG: Types → FinancingProvider; Types → Compliance → Financing → Murabahah</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="canton-quote">
+        "This isn't blockchain for the sake of it. Canton's privacy model is the only way to run a shared SME credit infrastructure where borrowers, institutions, and regulators coexist without leaking data to each other."
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 8 — ARCHITECTURE
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Architecture</div>
+      <h2 class="slide-headline">Full-Stack: <span>Smart Contracts + AI Agents + Real APIs</span></h2>
+
+      <div class="arch">
+        <div class="arch-layer">
+          <div class="arch-box gold" style="width:200px">React Frontend</div>
+        </div>
+        <div class="arch-arrow">↓  HTTP/REST</div>
+        <div class="arch-layer">
+          <div class="arch-box gold" style="width:260px">Node.js / Express Backend</div>
+        </div>
+        <div class="arch-arrow split">
+          <span>↓ Writes (exercise/create)</span>
+          <span>↓ Reads (SQL)</span>
+        </div>
+        <div class="arch-layer">
+          <div class="arch-box teal" style="width:200px">Canton HTTP JSON API</div>
+          <div class="arch-box dim" style="width:200px">PQS PostgreSQL</div>
+        </div>
+        <div class="arch-arrow" style="display:flex;justify-content:space-around;width:100%">
+          <span>↓ gRPC :6865</span>
+          <span>↑ Scribe (transaction stream)</span>
+        </div>
+        <div class="arch-layer">
+          <div class="arch-box gold" style="width:260px">Canton Ledger</div>
+        </div>
+        <div class="arch-arrow">↕  polls + exercises choices</div>
+        <div class="arch-layer">
+          <div class="arch-box teal" style="width:480px">AI Agents — deepagents / LangGraph</div>
+        </div>
+        <div class="arch-arrow" style="display:flex;justify-content:space-around;width:80%">
+          <span>↓</span><span>↓</span><span>↓</span>
+        </div>
+        <div class="arch-layer">
+          <div class="arch-box dim">mono.co<br><span style="font-size:0.8em;color:#445">KYC · DSCR</span></div>
+          <div class="arch-box dim">Youverify<br><span style="font-size:0.8em;color:#445">AML · KYB</span></div>
+          <div class="arch-box dim">Shariah RAG<br><span style="font-size:0.8em;color:#445">FAISS · AAOIFI</span></div>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 9 — DEMO
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Live Demo</div>
+      <h2 class="slide-headline">SME Applies for <span>₦5M Murabahah Financing</span></h2>
+
+      <ul class="demo-list">
+        <li>
+          <div class="num teal">0</div>
+          <div><strong>Wema Islamic Finance Ltd registers as a provider</strong> — submits CBN NIFI license, declares Murabahah + Ijarah instruments. Vetify approves → <code style="color:var(--teal)">ApprovedProvider</code> contract created on-chain.</div>
+        </li>
+        <li>
+          <div class="num">1</div>
+          <div><strong>Borrower submits onboarding</strong> — business profile, CAC number, BVN, NIN, directors list, KYC docs.</div>
+        </li>
+        <li>
+          <div class="num">2</div>
+          <div><strong>Verification Agent runs</strong> — NIN/BVN/CAC/TIN checked via mono.co. Score: 82/100. <span class="teal">Auto-approves</span> on-chain instantly.</div>
+        </li>
+        <li>
+          <div class="num teal">3</div>
+          <div><strong>Shariah Agent</strong> — textile trade cleared against AAOIFI Std No. 28. Verdict: <span class="teal">COMPLIANT</span>. Proceeds to AML.</div>
+        </li>
+        <li>
+          <div class="num">4</div>
+          <div><strong>Compliance Agent</strong> — AML, PEP, KYB, CDD all pass via Youverify. <code style="color:var(--teal)">ApprovedBorrower</code> contract created.</div>
+        </li>
+        <li>
+          <div class="num">5</div>
+          <div><strong>Borrower submits ₦5M financing request</strong> — purpose: inventory purchase, 12-month tenure.</div>
+        </li>
+        <li>
+          <div class="num teal">6</div>
+          <div><strong>Underwriting Agent</strong> — bank statements pulled via mono.co Connect. DSCR: 1.8. Score: 78. Recommends <span class="gold">₦7M limit</span>.</div>
+        </li>
+        <li>
+          <div class="num">7</div>
+          <div><strong>Institution approves</strong> — Wad signed → Wakala → Asset Purchase → Qabdh acknowledged → Bilateral Murabahah Contract executed.</div>
+        </li>
+        <li>
+          <div class="num teal">8</div>
+          <div><strong>Monitoring Agent detects delinquency</strong> — installment 2 overdue by 7 days. <code style="color:var(--red)">FlagDelinquent</code> exercised. Portfolio report updated.</div>
+        </li>
+      </ul>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 10 — WHAT WE BUILT
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Hackathon Build</div>
+      <h2 class="slide-headline">Fully Functional MVP — <span>Every Stage Implemented</span></h2>
+
+      <div class="built-grid">
+        <div class="built-col">
+          <div class="built-head">Daml Smart Contracts</div>
+          <ul>
+            <li>20 templates across 7 modules</li>
+            <li>FI Provider Onboarding — FinancingProviderOnboarding + ApprovedProvider</li>
+            <li>ApproveFunding gated by on-chain instrument permissions</li>
+            <li>Full Murabahah AAOIFI Std No. 8 acquisition chain</li>
+            <li>Bilateral signatory enforcement; Ibra, Rahn, LatePaymentCharity</li>
+            <li>226 Daml Script tests — all passing across 5 test files</li>
+          </ul>
+        </div>
+        <div class="built-col">
+          <div class="built-head">AI Agent System</div>
+          <ul>
+            <li>5 agents — deepagents / LangGraph</li>
+            <li>Shariah RAG — FAISS + AAOIFI PDFs</li>
+            <li>mono.co: KYC, DSCR, bank statements, credit history</li>
+            <li>Youverify: AML, PEP, adverse media, KYB</li>
+            <li>Model C risk-gating with human-in-the-loop interrupts</li>
+            <li>ACP server → IDE integration (VS Code / JetBrains)</li>
+          </ul>
+        </div>
+        <div class="built-col">
+          <div class="built-head">Backend + Infrastructure</div>
+          <ul>
+            <li>Node.js/Express API — Canton HTTP JSON API writes</li>
+            <li>PQS PostgreSQL reads via Scribe sidecar</li>
+            <li>4 MCP servers (Canton · mono · Youverify · Shariah)</li>
+            <li>Docker Compose — PQS + Scribe + Canton sandbox</li>
+          </ul>
+        </div>
+        <div class="built-col">
+          <div class="built-head">Frontend</div>
+          <ul>
+            <li>React dashboard — borrower + institution views</li>
+            <li>Real-time contract status from PQS</li>
+            <li>Financing lifecycle progress tracker</li>
+            <li>Repayment schedule &amp; delinquency alerts</li>
+          </ul>
+        </div>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+    <!-- ══════════════════════════════════════════════
+         SLIDE 11 — MARKET & CTA
+    ══════════════════════════════════════════════ -->
+    <section>
+      <div class="section-label">Opportunity</div>
+      <h2 class="slide-headline">Non-Interest Finance Needs <span>Digital Rails</span></h2>
+
+      <div class="market-row">
+        <div class="card gold-border">
+          <div class="card-title">Market</div>
+          <ul style="margin:0;padding-left:1.1em">
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">40M+ Nigerian SMEs excluded from conventional credit</li>
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">CBN NIFIs, Waqf funds, cooperatives, and philanthropies all lack shared digital infrastructure</li>
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">Global Islamic finance: $4.5T AUM, 10–12% annual growth</li>
+            <li style="font-size:0.7em;color:var(--text-dim)">Nigeria's non-interest banking sector in early-growth phase</li>
+          </ul>
+        </div>
+        <div class="card teal-border">
+          <div class="card-title teal">What's Next</div>
+          <ul style="margin:0;padding-left:1.1em">
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">Production deployment on Canton mainnet</li>
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">CBN NIFI regulatory sandbox application</li>
+            <li style="font-size:0.7em;color:var(--text-dim);margin-bottom:0.35em">Ijarah and QardHasan financing modules (instrument expansion)</li>
+            <li style="font-size:0.7em;color:var(--text-dim)">Shariah board advisory partnership (AAOIFI certification)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="card-grid cols-3">
+        <div class="card">
+          <div class="stat">₦5M</div>
+          <div class="stat-label">Average SME financing request handled end-to-end</div>
+        </div>
+        <div class="card">
+          <div class="stat">&lt; 24h</div>
+          <div class="stat-label">Approval time target — vs. weeks in manual processes</div>
+        </div>
+        <div class="card">
+          <div class="stat">100%</div>
+          <div class="stat-label">Audit trail on-chain — every decision, every party</div>
+        </div>
+      </div>
+
+      <div class="cta-box mt">
+        <p>"Vetify — Where Shariah compliance, AI intelligence, and blockchain trust meet."</p>
+      </div>
+      <div class="slide-footer">Vetify · Hackathon 2025</div>
+    </section>
+
+  </div><!-- /slides -->
+</div><!-- /reveal -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    controls: true,
+    progress: true,
+    slideNumber: true,
+    transition: 'slide',
+    transitionSpeed: 'fast',
+    backgroundTransition: 'fade',
+    width: 1280,
+    height: 720,
+    margin: 0.04,
+    minScale: 0.2,
+    maxScale: 2.0,
+    plugins: []
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "canton": {
+      "command": "npm",
+      "args": ["run", "mcp:canton"],
+      "env": {}
+    },
+    "mono": {
+      "command": "npm",
+      "args": ["run", "mcp:mono"],
+      "env": {}
+    },
+    "youverify": {
+      "command": "npm",
+      "args": ["run", "mcp:youverify"],
+      "env": {}
+    },
+    "shariah": {
+      "command": "npm",
+      "args": ["run", "mcp:shariah"],
+      "env": {}
+    }
+  }
+}

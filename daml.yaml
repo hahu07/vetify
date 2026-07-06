@@ -1,0 +1,10 @@
+sdk-version: 3.5.1
+name: vetify
+source: daml
+version: 0.3.0
+build-options:
+  - --target=2.3
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script

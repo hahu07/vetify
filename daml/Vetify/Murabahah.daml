@@ -1,0 +1,2910 @@
+-- | Stage 7→10: Full real-world Murabahah bundle.
+--   Sequence: Wa'd → Wakala → AssetPurchaseRecord (+ Qabdh gate) →
+--             MurabahahProposal → MurabahahContract (+ optional RahnAgreement) →
+--             RepaymentRecord × N (+ LatePaymentCharity if late) →
+--             optional IbraRequest → CloseContract / DefaultContract.
+--
+--   Each contract corresponds to a distinct legal act required by AAOIFI
+--   Standard No. 8 (Murabahah), No. 23 (Wakala), No. 39 (Rahn).
+--   Leaf module — depends only on Vetify.Types.
+module Vetify.Murabahah where
+
+import Vetify.Types
+import Vetify.Governance (OfficerRole(..), requireActiveOfficer)
+
+-- State-machine enforcement: single source of truth for legal MurabahahStatus
+-- transitions, replacing the ad hoc `assertMsg (status == X)` checks that were
+-- previously scattered and duplicated across FlagDelinquent, ResumeActive,
+-- CloseContract, CloseDefaultedContract, and DefaultContract.
+isValidMurabahahTransition : MurabahahStatus -> MurabahahStatus -> Bool
+isValidMurabahahTransition Active     Delinquent = True
+isValidMurabahahTransition Delinquent Active     = True
+isValidMurabahahTransition Active     Completed  = True
+isValidMurabahahTransition Delinquent Completed  = True
+isValidMurabahahTransition Delinquent Defaulted  = True
+isValidMurabahahTransition Defaulted  Completed  = True
+isValidMurabahahTransition _          _          = False
+
+-- D-5: Named result for RecordPayment — replaces the anonymous 3-tuple.
+data RecordPaymentResult = RecordPaymentResult
+  with
+    updatedContract   : ContractId MurabahahContract
+    repaymentRecord   : ContractId RepaymentRecord
+    charityObligation : Optional (ContractId LatePaymentCharity)
+  deriving (Eq, Show)
+
+-- E-1: Extracted payment schedule — avoids embedding the full [PaymentScheduleEntry]
+-- list in every version of MurabahahContract and MurabahahProposal. Accessed via CID.
+-- No contract key: avoids key collision on retry-offer-after-decline and restructuring.
+template PaymentScheduleContract
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party
+    facilityRef          : Text
+    cacRegNumber         : Text
+    entries              : [PaymentScheduleEntry]
+  where
+    signatory financialInstitution
+    observer [borrower, vetify] ++ optional [] pure regulator
+    ensure not (null entries)
+
+-- ─── 1. Wa'd (Binding Promise to Purchase) ────────────────────────────────
+-- AAOIFI Std No. 8, §2/2: the client must make an irrevocable promise to
+-- purchase the identified asset from the FI BEFORE the FI commits capital
+-- to acquire it. Without the Wa'd there is no legitimate basis for the FI
+-- to buy on the client's behalf.
+-- Signed by: borrower  |  Observer: financialInstitution, vetify
+template MurabahahWad
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    terms                : FinancingTerms
+    assetDetails         : AssetDetails
+    financingRef         : Optional Text  -- F20: carries the financing reference from FinancingRequest for end-to-end traceability
+    offerExpiresAt       : Optional Time  -- F19: ledger time after which the Wa'd offer lapses
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+
+    ensure assetDetails.estimatedCost > 0.0
+
+    -- F19: Vetify expires a Wa'd whose offer window has passed without FI action.
+    choice ExpireWad : ()
+      controller vetify
+      do
+        now <- getTime
+        case offerExpiresAt of
+          None -> assertMsg "No offer expiry configured on this Wa'd" False
+          Some expiry -> assertMsg "Wa'd offer window has not yet elapsed" (now > expiry)
+        return ()
+
+    -- Path A: FI appoints the borrower as purchasing agent (Wakala).
+    -- Most common in digital SME financing — the borrower knows the supplier.
+    choice ProceedWithWakala : ContractId MurabahahWakala
+      controller financialInstitution
+      do
+        create MurabahahWakala with
+          borrower
+          vetify
+          financialInstitution
+          businessName
+          cacRegNumber
+          terms
+          assetDetails
+          agencyFee = None
+
+    -- Path B: FI purchases the asset directly from the supplier.
+    choice ProceedDirectly : ContractId AssetPurchaseRecord
+      with
+        actualCost            : Decimal
+        purchaseDate          : Date
+        invoiceRef            : Text
+        freightCost           : Decimal  -- C-2: 0.0 if not applicable
+        customsDuty           : Decimal  -- C-2: 0.0 if not applicable
+        insurancePremium      : Decimal  -- C-2: 0.0 if not applicable
+        otherAcquisitionCosts : Decimal  -- C-2: 0.0 if none
+      controller financialInstitution
+      do
+        assertMsg "Actual purchase cost must be positive" (actualCost > 0.0)
+        let totalAcquisitionCost = actualCost + freightCost + customsDuty + insurancePremium + otherAcquisitionCosts
+        create AssetPurchaseRecord with
+          borrower
+          vetify
+          financialInstitution
+          businessName
+          cacRegNumber
+          terms
+          assetDetails
+          actualCost
+          purchaseDate
+          invoiceRef
+          freightCost
+          customsDuty
+          insurancePremium
+          otherAcquisitionCosts
+          totalAcquisitionCost
+          purchasedViaWakala   = False
+          deliveryAcknowledged = False
+          ownershipDocuments   = []
+          supplierDetails      = None
+          additionalAssets     = []
+
+    -- M-PO: FI attaches the supplier's formal quotation before committing to the Wakala.
+    -- Nonconsuming — the Wad stays active; quotation is a side record.
+    nonconsuming choice AttachQuotation : ContractId SupplierQuotation
+      with
+        supplierName  : Text
+        quotationRef  : Text
+        quotedAmount  : Decimal
+        validUntil    : Optional Date
+      controller financialInstitution
+      do
+        assertMsg "Quotation reference must not be empty" (quotationRef /= "")
+        assertMsg "Quoted amount must be positive" (quotedAmount > 0.0)
+        assertMsg "Supplier name must not be empty" (supplierName /= "")
+        create SupplierQuotation with
+          financialInstitution; vetify; borrower
+          businessName; cacRegNumber
+          supplierName; quotationRef; quotedAmount; validUntil
+          assetDescription = assetDetails.description
+
+    -- Borrower withdraws the promise (supplier unavailable, changed circumstances).
+    -- Off-ledger consequences (cost recovery) are handled by the FI's policy.
+    choice WithdrawWad : ()
+      with reason : Text
+      controller borrower
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        t <- getTime
+        create WadWithdrawalRecord with
+          borrower; financialInstitution; vetify
+          businessName; cacRegNumber; reason
+          withdrawnAt = t
+        return ()
+
+
+-- ─── 2. Wakala (Agency Agreement) ─────────────────────────────────────────
+-- AAOIFI Std No. 23: FI appoints the borrower as its purchasing agent.
+-- Ownership of the asset vests in the FI the moment the borrower-as-agent
+-- completes the purchase — NOT in the borrower personally.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template MurabahahWakala
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    terms                : FinancingTerms
+    assetDetails         : AssetDetails
+    agencyFee            : Optional Decimal  -- None = gratuitous (standard Nigerian practice)
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+
+    -- Borrower (as agent) records the completed asset purchase.
+    -- Exercising this choice constitutes both acceptance of the agency and
+    -- delivery of the purchase evidence to the FI.
+    choice RecordAssetPurchase : ContractId AssetPurchaseRecord
+      with
+        actualCost            : Decimal
+        purchaseDate          : Date
+        invoiceRef            : Text
+        freightCost           : Decimal  -- C-2: 0.0 if not applicable
+        customsDuty           : Decimal  -- C-2: 0.0 if not applicable
+        insurancePremium      : Decimal  -- C-2: 0.0 if not applicable
+        otherAcquisitionCosts : Decimal  -- C-2: 0.0 if none
+      controller borrower
+      do
+        assertMsg "Actual purchase cost must be positive" (actualCost > 0.0)
+        let totalAcquisitionCost = actualCost + freightCost + customsDuty + insurancePremium + otherAcquisitionCosts
+        create AssetPurchaseRecord with
+          borrower
+          vetify
+          financialInstitution
+          businessName
+          cacRegNumber
+          terms
+          assetDetails
+          actualCost
+          purchaseDate
+          invoiceRef
+          freightCost
+          customsDuty
+          insurancePremium
+          otherAcquisitionCosts
+          totalAcquisitionCost
+          purchasedViaWakala   = True
+          deliveryAcknowledged = False
+          ownershipDocuments   = []
+          supplierDetails      = None
+          additionalAssets     = []
+
+    -- Borrower declines the agency appointment; FI must buy directly.
+    choice DeclineAgency : ()
+      with reason : Text
+      controller borrower
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        t <- getTime
+        create AgencyWithdrawalRecord with
+          borrower; financialInstitution; vetify
+          businessName; cacRegNumber; reason
+          declinedAt = t
+        return ()
+
+
+-- ─── 3. AssetPurchaseRecord + Qabdh gate ──────────────────────────────────
+-- Immutable evidence that the FI (directly or via Wakala) owns the asset.
+-- AAOIFI Std No. 8, §3/1: the FI cannot sell what it does not own.
+-- The two-step design enforces the Shariah sequence:
+--   (a) FI ownership is recorded first.
+--   (b) Borrower acknowledges receipt/constructive possession (Qabdh) second.
+--   (c) Only after both can the FI make the sale offer (MurabahahProposal).
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template AssetPurchaseRecord
+  with
+    borrower                : Party
+    vetify                  : Party
+    financialInstitution    : Party
+    businessName            : Text
+    cacRegNumber            : Text
+    terms                   : FinancingTerms
+    assetDetails            : AssetDetails
+    actualCost              : Decimal   -- direct purchase price paid to supplier
+    purchaseDate            : Date
+    invoiceRef              : Text
+    freightCost             : Decimal   -- C-2: 0.0 if not applicable
+    customsDuty             : Decimal   -- C-2: 0.0 if not applicable
+    insurancePremium        : Decimal   -- C-2: 0.0 if not applicable
+    otherAcquisitionCosts   : Decimal   -- C-2: 0.0 if none
+    totalAcquisitionCost    : Decimal   -- C-2: = actualCost + freight + duty + insurance + other (AAOIFI §3/3)
+    purchasedViaWakala      : Bool
+    deliveryAcknowledged    : Bool
+    ownershipDocuments      : [DocumentRef]            -- M2: title docs, bills of lading, warehouse receipts
+    supplierDetails         : Optional SupplierDetails -- M1: supplier identity and contact
+    additionalAssets        : [AssetLineItem]          -- M9: secondary assets or suppliers in the same transaction
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+
+    ensure actualCost > 0.0
+        && freightCost >= 0.0
+        && customsDuty >= 0.0
+        && insurancePremium >= 0.0
+        && otherAcquisitionCosts >= 0.0
+        && totalAcquisitionCost == actualCost + freightCost + customsDuty + insurancePremium + otherAcquisitionCosts
+
+    -- Borrower confirms constructive or actual possession of the asset (Qabdh).
+    -- Required before the FI can make the Murabahah sale offer.
+    choice AcknowledgeDelivery : ContractId AssetPurchaseRecord
+      controller borrower
+      do
+        assertMsg "Delivery already acknowledged" (not deliveryAcknowledged)
+        create this with deliveryAcknowledged = True
+
+    -- M4: Borrower rejects a defective or incorrect asset before accepting delivery.
+    -- Nonconsuming — the AssetPurchaseRecord stays live; FI must replace or the parties
+    -- must agree to cancel via RequestCancellation → ConfirmCancellation.
+    nonconsuming choice RejectDelivery : ContractId AssetRejectionRecord
+      with
+        reason            : Text
+        defectDescription : Text
+      controller borrower
+      do
+        assertMsg "Cannot reject an already-acknowledged delivery" (not deliveryAcknowledged)
+        assertMsg "Rejection reason must not be empty" (reason /= "")
+        t <- getTime
+        create AssetRejectionRecord with
+          borrower
+          vetify
+          financialInstitution
+          businessName
+          cacRegNumber
+          reason
+          defectDescription
+          rejectedAt = t
+
+    -- FI supplies a replacement asset after a borrower rejection. Consuming — archives the
+    -- old purchase record and creates a fresh one with corrected asset details.
+    -- Ancillary costs reset to 0.0; the FI may update them via the new APR's choices.
+    choice ProceedWithReplacement : ContractId AssetPurchaseRecord
+      with
+        newActualCost   : Decimal
+        newPurchaseDate : Date
+        newInvoiceRef   : Text
+        replacementNote : Text
+      controller financialInstitution
+      do
+        assertMsg "Replacement cost must be positive" (newActualCost > 0.0)
+        assertMsg "Invoice reference must not be empty" (newInvoiceRef /= "")
+        assertMsg "Replacement note must not be empty" (replacementNote /= "")
+        create this with
+          actualCost            = newActualCost
+          purchaseDate          = newPurchaseDate
+          invoiceRef            = newInvoiceRef
+          freightCost           = 0.0
+          customsDuty           = 0.0
+          insurancePremium      = 0.0
+          otherAcquisitionCosts = 0.0
+          totalAcquisitionCost  = newActualCost
+          deliveryAcknowledged  = False
+
+    -- Borrower initiates deal cancellation after a failed rejection (e.g. FI cannot source
+    -- a suitable replacement). Nonconsuming — the APR stays live until FI confirms.
+    nonconsuming choice RequestCancellation : ContractId AcquisitionCancellationRequest
+      with reason : Text
+      controller borrower
+      do
+        assertMsg "Cancellation reason must not be empty" (reason /= "")
+        create AcquisitionCancellationRequest with
+          borrower; vetify; financialInstitution; businessName; cacRegNumber; reason
+
+    -- FI accepts the cancellation — archives the request via its own choice,
+    -- then archives this purchase record.
+    choice ConfirmCancellation : ()
+      with reqCid : ContractId AcquisitionCancellationRequest
+      controller financialInstitution
+      do
+        exercise reqCid AcceptCancellation
+        return ()
+
+    -- FI formally offers the asset at cost + disclosed profit (Ijab).
+    -- Gated by Qabdh: the borrower must have acknowledged delivery first.
+    -- AAOIFI Std No. 8, §3/3: disclosed cost must equal total acquisition cost.
+    choice OfferMurabahah : ContractId MurabahahProposal
+      with
+        murabahahTerms        : MurabahahTerms
+        paymentSchedule       : [PaymentScheduleEntry]
+        regulator             : Optional Party
+        facilityRef           : Text             -- C-1: unique facility identifier for contract key
+        startDate             : Date
+        acceptanceExpiresAt   : Optional Time    -- M5: when borrower's acceptance window closes
+      controller financialInstitution
+      do
+        assertMsg "Delivery must be acknowledged (Qabdh) before making the sale offer"
+          deliveryAcknowledged
+        assertMsg "Disclosed cost must match total acquisition cost (AAOIFI §3/3)"
+          (murabahahTerms.assetCost == totalAcquisitionCost)
+        assertMsg "Disclosed profit invariant: salePrice must equal assetCost + profitAmount"
+          (murabahahTerms.salePrice == murabahahTerms.assetCost + murabahahTerms.profitAmount)
+        assertMsg "Profit must be non-negative" (murabahahTerms.profitAmount >= 0.0)
+        assertMsg "Payment schedule length must match tenure"
+          (length paymentSchedule == murabahahTerms.tenureMonths)
+        assertMsg "Facility reference must not be empty" (facilityRef /= "")
+        let fRef = facilityRef  -- bind locally to avoid field-selector ambiguity
+        -- M5: if an acceptance window is set it must be in the future
+        case acceptanceExpiresAt of
+          Some expiry -> do
+            t <- getTime
+            assertMsg "acceptanceExpiresAt must be in the future" (expiry > t)
+          None -> return ()
+        schedCid <- create PaymentScheduleContract with
+          financialInstitution = financialInstitution
+          vetify               = vetify
+          borrower             = borrower
+          regulator            = regulator
+          facilityRef          = fRef
+          cacRegNumber         = cacRegNumber
+          entries              = paymentSchedule
+        create MurabahahProposal with
+          borrower             = borrower
+          vetify               = vetify
+          financialInstitution = financialInstitution
+          regulator            = regulator
+          facilityRef          = fRef
+          businessName         = businessName
+          cacRegNumber         = cacRegNumber
+          terms                = terms
+          assetDetails         = assetDetails
+          actualCost           = totalAcquisitionCost  -- AAOIFI §3/3: proposal carries total cost
+          murabahahTerms       = murabahahTerms
+          paymentScheduleCid   = schedCid
+          startDate            = startDate
+          acceptanceExpiresAt  = acceptanceExpiresAt
+
+    -- D1: Borrower records receipt of a partial delivery milestone during the Wakala phase.
+    -- Nonconsuming — the AssetPurchaseRecord stays active until full Qabdh is acknowledged.
+    nonconsuming choice RecordDeliveryMilestone : ContractId DeliveryMilestone
+      with
+        milestoneDescription : Text
+        quantityDelivered    : Decimal
+        milestoneDate        : Date
+        evidenceRef          : Optional Text
+      controller borrower
+      do
+        assertMsg "Cannot record milestone after delivery is fully acknowledged"
+          (not deliveryAcknowledged)
+        assertMsg "Milestone description must not be empty" (milestoneDescription /= "")
+        assertMsg "Quantity delivered must be positive" (quantityDelivered > 0.0)
+        create DeliveryMilestone with
+          financialInstitution
+          vetify
+          borrower
+          businessName
+          cacRegNumber
+          milestoneDescription
+          quantityDelivered
+          milestoneDate
+          evidenceRef
+
+    -- R3: FI records that the supplier failed (cancellation, insolvency, non-delivery).
+    -- Consuming — archives the AssetPurchaseRecord; Wakala sub-flow must restart.
+    choice RecordSupplierFailure : ContractId SupplierFailureRecord
+      with
+        failureType        : Text           -- "SUPPLIER_CANCELLED", "SUPPLIER_BANKRUPT", "REFUND_ISSUED"
+        failureDescription : Text
+        refundAmount       : Optional Decimal
+      controller financialInstitution
+      do
+        assertMsg "Failure type must not be empty" (failureType /= "")
+        assertMsg "Failure description must not be empty" (failureDescription /= "")
+        t <- getTime
+        create SupplierFailureRecord with
+          financialInstitution
+          vetify
+          borrower
+          businessName
+          cacRegNumber
+          failureType
+          failureDescription
+          refundAmount
+          failedAt = t
+
+    -- M1/M3: FI records proof of payment to the supplier — separate from the
+    -- borrower-to-FI RepaymentRecord. nonconsuming: the purchase record stays active.
+    nonconsuming choice RecordSupplierPayment : ContractId SupplierPaymentRecord
+      with
+        amountPaid          : Decimal
+        paymentDate         : Date
+        paymentRef          : Text
+        bankConfirmationRef : Optional Text
+      controller financialInstitution
+      do
+        assertMsg "Payment amount must be positive" (amountPaid > 0.0)
+        assertMsg "Payment reference must not be empty" (paymentRef /= "")
+        create SupplierPaymentRecord with
+          financialInstitution
+          vetify
+          borrower
+          businessName
+          cacRegNumber
+          supplierDetails
+          amountPaid
+          paymentDate
+          paymentRef
+          bankConfirmationRef
+          purchasedViaWakala
+
+    -- M-DR: Register a document against this facility; creates an immutable
+    -- DocumentEntry for lifecycle management (verify, supersede).
+    nonconsuming choice RegisterDocument : ContractId DocumentEntry
+      with
+        documentRef  : DocumentRef
+        registeredBy : Text
+      controller financialInstitution
+      do
+        assertMsg "Registered-by name must not be empty" (registeredBy /= "")
+        t <- getTime
+        create DocumentEntry with
+          financialInstitution; vetify; borrower
+          businessName; cacRegNumber
+          documentRef; registeredBy
+          uploadedAt = t
+          verifiedAt = None
+          superseded = False
+
+
+-- ─── 4. MurabahahProposal (Ijab — formal sale offer) ─────────────────────
+-- FI's formal offer to sell the asset at cost + disclosed profit.
+-- The regulator does NOT observe the proposal — only the accepted contract.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template MurabahahProposal
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: unique facility identifier threaded to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    terms                : FinancingTerms
+    assetDetails         : AssetDetails
+    actualCost           : Decimal -- total acquisition cost (AAOIFI §3/3); passed from OfferMurabahah
+    murabahahTerms       : MurabahahTerms
+    paymentScheduleCid   : ContractId PaymentScheduleContract
+    startDate            : Date
+    acceptanceExpiresAt  : Optional Time  -- M5: when borrower's acceptance window closes; None = no expiry
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+
+    ensure murabahahTerms.salePrice == murabahahTerms.assetCost + murabahahTerms.profitAmount
+        && murabahahTerms.profitAmount >= 0.0
+        && murabahahTerms.assetCost > 0.0
+        && murabahahTerms.installmentAmount > 0.0
+        && murabahahTerms.assetCost == actualCost
+
+    -- Borrower accepts (Qabul) → bilateral binding contract.
+    choice AcceptProposal : ContractId MurabahahContract
+      controller borrower
+      do
+        create MurabahahContract with
+          borrower
+          vetify
+          financialInstitution
+          regulator
+          facilityRef
+          businessName
+          cacRegNumber
+          terms
+          assetDetails
+          murabahahTerms
+          paymentScheduleCid
+          startDate
+          outstandingBalance     = murabahahTerms.salePrice
+          installmentsPaid       = 0
+          pendingInstallmentPaid = 0.0
+          status                 = Active
+          activeMoratorium       = None
+          scheduleVersion        = 1
+          restructuringCount     = 0
+
+    -- Borrower declines the offered terms.
+    choice DeclineProposal : ()
+      with reason : Text
+      controller borrower
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        t <- getTime
+        create ProposalDeclineRecord with
+          borrower; financialInstitution; vetify
+          businessName; cacRegNumber; facilityRef; reason
+          declinedAt = t
+        return ()
+
+    -- M5: Vetify expires a proposal whose acceptance window has elapsed.
+    choice ExpireProposal : ()
+      controller vetify
+      do
+        now <- getTime
+        case acceptanceExpiresAt of
+          None -> assertMsg "No acceptance expiry configured on this proposal" False
+          Some expiry -> assertMsg "Proposal acceptance window has not yet elapsed" (now > expiry)
+        return ()
+
+    -- M5: FI withdraws its offer before the borrower responds.
+    choice WithdrawProposal : ()
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Withdrawal reason must not be empty" (reason /= "")
+        return ()
+
+
+-- ─── 5. MurabahahContract (Active bilateral contract) ─────────────────────
+-- Signed by BOTH borrower and financialInstitution.
+-- Regulator observes this contract and all RepaymentRecords.
+template MurabahahContract
+  with
+    borrower               : Party
+    vetify                 : Party
+    financialInstitution   : Party
+    regulator              : Optional Party
+    facilityRef            : Text           -- C-1: unique per (borrower, FI) for contract key
+    businessName           : Text
+    cacRegNumber           : Text
+    terms                  : FinancingTerms
+    assetDetails           : AssetDetails
+    murabahahTerms         : MurabahahTerms
+    paymentScheduleCid     : ContractId PaymentScheduleContract
+    startDate              : Date
+    outstandingBalance     : Decimal
+    installmentsPaid       : Int
+    pendingInstallmentPaid : Decimal        -- M-PI: accumulates partial payments for the current installment
+    status                 : MurabahahStatus
+    activeMoratorium       : Optional Date  -- M-GP: if Some d, payments on/before d suppress the wasLate flag
+    scheduleVersion        : Int            -- Versioning: incremented on ApproveRestructuring
+    restructuringCount     : Int            -- Business limit: checked against policy.maxRestructuringsPerFacility
+  where
+    signatory borrower, financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+
+    key (borrower, financialInstitution, facilityRef) : (Party, Party, Text)
+    maintainer key._2
+
+    ensure murabahahTerms.salePrice == murabahahTerms.assetCost + murabahahTerms.profitAmount
+        && outstandingBalance >= 0.0
+        && installmentsPaid >= 0
+        && pendingInstallmentPaid >= 0.0
+        && facilityRef /= ""
+        && scheduleVersion >= 1
+        && restructuringCount >= 0
+
+    -- FI records a repayment installment.
+    -- Guards: amount > 0, no overpayment, strict sequence.
+    -- Status is preserved — a partial payment does not auto-cure delinquency.
+    -- Creates LatePaymentCharity if paymentDate > dueDate (AAOIFI Std No. 8, §2/4/20).
+    choice RecordPayment : RecordPaymentResult
+      with
+        paymentDate       : Date
+        amountPaid        : Decimal
+        installmentNo     : Int
+        allocation        : Optional PaymentAllocation   -- M6: principal/profit/fee breakdown
+        settlementAccount : Optional SettlementAccount   -- M10: repayment bank account or wallet
+        directDebitRef    : Optional Text                -- H-5: mono.co collection ref; None = manual
+      controller financialInstitution
+      do
+        assertMsg "Can only record payment on an Active or Delinquent contract"
+          (status == Active || status == Delinquent)
+        assertMsg "Payment amount must be positive" (amountPaid > 0.0)
+        assertMsg "Payment exceeds outstanding balance" (amountPaid <= outstandingBalance)
+        assertMsg "Installment number out of sequence" (installmentNo == installmentsPaid + 1)
+        -- Idempotency: reject a replayed off-ledger payment reference
+        case directDebitRef of
+          Some ref -> do
+            mGuard <- lookupByKey @PaymentIdempotencyGuard (financialInstitution, ref)
+            assertMsg "Duplicate payment reference (directDebitRef already processed)" (mGuard == None)
+            _ <- create PaymentIdempotencyGuard with financialInstitution; directDebitRef = ref
+            return ()
+          None -> return ()
+        sched <- fetch paymentScheduleCid
+        let entry = find (\e -> e.installmentNo == installmentNo) sched.entries
+        case entry of
+          None -> assertFail "Installment not found in payment schedule"
+          Some e -> do
+            let newBalance          = outstandingBalance - amountPaid
+            let totalForInstallment = pendingInstallmentPaid + amountPaid
+            let installmentComplete = totalForInstallment >= e.dueAmount
+            -- M-GP: moratorium suppresses wasLate while still active.
+            let isLate = case activeMoratorium of
+                  Some endDate -> paymentDate > e.dueDate && paymentDate > endDate
+                  None         -> paymentDate > e.dueDate
+            -- M6: validate allocation components when provided
+            case allocation of
+              Some alloc ->
+                assertMsg "Payment allocation components must be non-negative"
+                  (alloc.principalComponent >= 0.0 && alloc.profitComponent >= 0.0
+                    && alloc.feesCharged >= 0.0 && alloc.charityProvision >= 0.0)
+              None -> return ()
+            -- M-PI: advance installmentsPaid only when the full due amount is accumulated.
+            let (newInstallmentsPaid, newPendingPaid) =
+                  if installmentComplete
+                    then (installmentsPaid + 1, 0.0)
+                    else (installmentsPaid, totalForInstallment)
+            updated <- create this with
+              outstandingBalance     = newBalance
+              installmentsPaid       = newInstallmentsPaid
+              pendingInstallmentPaid = newPendingPaid
+            record <- create RepaymentRecord with
+              borrower; vetify; financialInstitution; regulator
+              facilityRef; businessName; cacRegNumber
+              installmentNo
+              dueDate          = e.dueDate
+              paymentDate
+              amountPaid
+              remainingBalance = newBalance
+              wasLate          = isLate
+              allocation
+              settlementAccount
+              directDebitRef
+            -- Sadaqah only on the completing payment of a late installment
+            -- (AAOIFI Std No. 8, §2/4/20).
+            charityObligation <-
+              if isLate && installmentComplete
+                then do
+                  cid <- create LatePaymentCharity with
+                    borrower; vetify; financialInstitution
+                    businessName; cacRegNumber
+                    installmentNo
+                    dueDate       = e.dueDate
+                    paymentDate
+                    charityAmount = None
+                    settled       = False
+                  return (Some cid)
+                else return None
+            return RecordPaymentResult with
+              updatedContract   = updated
+              repaymentRecord   = record
+              charityObligation
+
+    -- Monitoring Agent flags when a payment is overdue. Audit trail: creates an
+    -- AuditEvent atomically (vetify already controls this choice, so vetify's
+    -- authority is available — unlike financialInstitution/borrower-controlled
+    -- choices elsewhere in this template, where vetify has no authority to sign one).
+    choice FlagDelinquent : (ContractId MurabahahContract, ContractId AuditEvent)
+      with reason : Text
+      controller vetify
+      do
+        assertMsg "Invalid status transition" (isValidMurabahahTransition status Delinquent)
+        updated <- create this with status = Delinquent
+        t <- getTime
+        evt <- create AuditEvent with
+          vetify; financialInstitution; regulator; businessName; cacRegNumber
+          eventType  = "DELINQUENCY_FLAGGED"
+          description = "MurabahahContract " <> facilityRef <> " flagged delinquent: " <> reason
+          actedBy    = "vetify"
+          occurredAt = t
+        return (updated, evt)
+
+    -- Monitoring Agent clears delinquency once arrears are fully settled.
+    choice ResumeActive : (ContractId MurabahahContract, ContractId AuditEvent)
+      with note : Text
+      controller vetify
+      do
+        assertMsg "Invalid status transition" (isValidMurabahahTransition status Active)
+        updated <- create this with status = Active
+        t <- getTime
+        evt <- create AuditEvent with
+          vetify; financialInstitution; regulator; businessName; cacRegNumber
+          eventType  = "CONTRACT_RESUMED"
+          description = "MurabahahContract " <> facilityRef <> " resumed to Active: " <> note
+          actedBy    = "vetify"
+          occurredAt = t
+        return (updated, evt)
+
+    -- Stage 10: FI closes a fully repaid contract. Note: CloseContract and
+    -- CloseDefaultedContract both target Completed but from disjoint source
+    -- statuses gated to two distinct choices (a Defaulted facility must go
+    -- through CloseDefaultedContract, not this one) — isValidMurabahahTransition
+    -- alone can't express that per-choice restriction, so the source status is
+    -- checked explicitly here in addition to being a validated edge in the graph.
+    choice CloseContract : ContractId MurabahahContract
+      with closingDate : Date
+      controller financialInstitution
+      do
+        assertMsg "Can only close an Active or Delinquent contract"
+          (status == Active || status == Delinquent)
+        assertMsg "Invalid status transition" (isValidMurabahahTransition status Completed)
+        assertMsg "Can only close a fully repaid contract" (outstandingBalance <= 0.0)
+        create this with status = Completed
+
+    -- Recovery path: FI closes a defaulted contract once full recovery brings balance to zero.
+    choice CloseDefaultedContract : ContractId MurabahahContract
+      with closingDate : Date
+      controller financialInstitution
+      do
+        assertMsg "Only usable on a Defaulted contract" (status == Defaulted)
+        assertMsg "Invalid status transition" (isValidMurabahahTransition status Completed)
+        assertMsg "Outstanding balance must be zero before closure" (outstandingBalance <= 0.0)
+        create this with status = Completed
+
+    -- FI formally defaults an unrecoverable delinquent contract.
+    -- Audit trail: creates a dedicated DefaultRecord alongside the status flip
+    -- (previously this choice produced no immutable evidence of its own, unlike
+    -- WriteOffContract/RecordRecoveryPayment). Signed by financialInstitution
+    -- (the controller) rather than the vetify-signed AuditEvent template — vetify
+    -- has no authority in this transaction (it is only an observer of
+    -- MurabahahContract, not a signatory or controller of this choice).
+    choice DefaultContract : (ContractId MurabahahContract, ContractId DefaultRecord)
+      with
+        reason      : Text
+        defaultedBy : Text  -- officer name for audit trail
+      controller financialInstitution
+      do
+        assertMsg "Invalid status transition" (isValidMurabahahTransition status Defaulted)
+        assertMsg "Reason must not be empty" (reason /= "")
+        updated <- create this with status = Defaulted
+        t <- getTime
+        record <- create DefaultRecord with
+          financialInstitution; vetify; borrower; regulator
+          facilityRef; businessName; cacRegNumber
+          reason; defaultedBy
+          defaultedAt = t
+        return (updated, record)
+
+    -- M7: Borrower requests a modification of the repayment schedule.
+    -- Nonconsuming — the contract stays active while the FI reviews the request.
+    nonconsuming choice RequestRestructuring : ContractId RestructuringRequest
+      with
+        proposedSchedule : [PaymentScheduleEntry]
+        reason           : Text
+        requestDate      : Date
+      controller borrower
+      do
+        assertMsg "Can only restructure an Active or Delinquent contract"
+          (status == Active || status == Delinquent)
+        assertMsg "Restructuring reason must not be empty" (reason /= "")
+        let totalProposed = foldl (\acc e -> acc + e.dueAmount) 0.0 proposedSchedule
+        assertMsg "New schedule total cannot exceed outstanding balance (no debt increase)"
+          (totalProposed <= outstandingBalance)
+        assertMsg "Proposed schedule must not be empty" (not (null proposedSchedule))
+        create RestructuringRequest with
+          borrower; vetify; financialInstitution; regulator
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; proposedSchedule; reason; requestDate
+
+    -- M7: FI approves the restructuring — replaces the payment schedule.
+    -- FI may adjust the proposed schedule (e.g., fewer installments) on approval.
+    choice ApproveRestructuring : ContractId MurabahahContract
+      with
+        reqCid              : ContractId RestructuringRequest
+        approvedSchedule    : [PaymentScheduleEntry]
+        restructuringDate   : Date
+        -- Business limit (Financing.UnderwritingPolicy.maxRestructuringsPerFacility,
+        -- threaded in as an argument rather than fetched — Murabahah is a leaf
+        -- module and cannot import Financing without an import cycle).
+        maxRestructurings   : Optional Int
+      controller financialInstitution
+      do
+        assertMsg "Can only restructure an Active or Delinquent contract"
+          (status == Active || status == Delinquent)
+        assertMsg "Approved schedule must not be empty" (not (null approvedSchedule))
+        let totalApproved = foldl (\acc e -> acc + e.dueAmount) 0.0 approvedSchedule
+        assertMsg "Approved schedule total cannot exceed outstanding balance"
+          (totalApproved <= outstandingBalance)
+        case maxRestructurings of
+          Some maxR -> assertMsg "Restructuring frequency limit exceeded" (restructuringCount < maxR)
+          None      -> return ()
+        archive reqCid
+        archive paymentScheduleCid
+        newSchedCid <- create PaymentScheduleContract with
+          financialInstitution = financialInstitution
+          vetify               = vetify
+          borrower             = borrower
+          regulator            = regulator
+          facilityRef          = facilityRef
+          cacRegNumber         = cacRegNumber
+          entries              = approvedSchedule
+        create this with
+          paymentScheduleCid     = newSchedCid
+          pendingInstallmentPaid = 0.0
+          scheduleVersion        = scheduleVersion + 1
+          restructuringCount     = restructuringCount + 1
+
+    -- M7: FI rejects the restructuring request.
+    choice RejectRestructuring : ContractId RestructuringRejectionRecord
+      with
+        reqCid  : ContractId RestructuringRequest
+        reason  : Text
+      controller financialInstitution
+      do
+        assertMsg "Rejection reason must not be empty" (reason /= "")
+        archive reqCid
+        t <- getTime
+        create RestructuringRejectionRecord with
+          financialInstitution; vetify; borrower
+          businessName; cacRegNumber; facilityRef; reason
+          rejectedAt = t
+
+    -- S1: FI records the actual settlement after Ibra' (full or partial) is granted.
+    -- The IbraRequest is consumed by GrantIbra/GrantPartialIbra before this is called,
+    -- so the FI passes settlementType explicitly. Consuming — archives this contract.
+    -- FullIbra: outstanding balance is zeroed and contract is Completed.
+    -- PartialIbra: balance is reduced; contract remains Active for further payments.
+    choice RecordEarlySettlement
+        : (ContractId MurabahahContract, ContractId RepaymentRecord)
+      with
+        settlementType    : IbraSettlementType
+        settlementAmount  : Decimal
+        settlementDate    : Date
+        settlementAccount : Optional SettlementAccount
+      controller financialInstitution
+      do
+        assertMsg "Contract must be Active for early settlement" (status == Active)
+        assertMsg "Settlement amount must be positive" (settlementAmount > 0.0)
+        assertMsg "Settlement amount must not exceed outstanding balance"
+          (settlementAmount <= outstandingBalance)
+        let installNo      = installmentsPaid + 1
+        let reducedBalance = outstandingBalance - settlementAmount
+        -- FullIbra zeros the balance (FI waives the remainder); PartialIbra reduces it
+        let finalBalance   = case settlementType of
+              FullIbra    -> 0.0
+              PartialIbra -> reducedBalance
+        record <- create RepaymentRecord with
+          borrower; vetify; financialInstitution; regulator
+          facilityRef; businessName; cacRegNumber
+          installmentNo    = installNo
+          dueDate          = settlementDate
+          paymentDate      = settlementDate
+          amountPaid       = settlementAmount
+          remainingBalance = finalBalance
+          wasLate          = False
+          allocation       = None
+          settlementAccount
+          directDebitRef   = None
+        updated <- case settlementType of
+          FullIbra ->
+            create this with
+              outstandingBalance = 0.0
+              installmentsPaid   = installNo
+              status             = Completed
+          PartialIbra ->
+            create this with
+              outstandingBalance = reducedBalance
+              installmentsPaid   = installNo
+        return (updated, record)
+
+    -- R4: Borrower raises a formal dispute against the FI's actions on this contract.
+    -- Nonconsuming — the contract stays active while the dispute is resolved.
+    nonconsuming choice RaiseDispute : ContractId DisputeRecord
+      with
+        disputeType : Text           -- "PAYMENT_DISPUTE", "CONTRACT_TERMS", "ASSET_DEFECT"
+        disputeDesc : Text
+        evidenceRef : Optional Text
+      controller borrower
+      do
+        assertMsg "Dispute type must not be empty" (disputeType /= "")
+        assertMsg "Dispute description must not be empty" (disputeDesc /= "")
+        t <- getTime
+        create DisputeRecord with
+          borrower; vetify; financialInstitution; regulator
+          businessName; cacRegNumber
+          disputeType
+          description = disputeDesc
+          evidenceRef
+          raisedAt    = t
+
+    -- Borrower requests early settlement (full or partial).
+    -- Nonconsuming — the request is a side contract; the main contract stays active
+    -- until the FI grants Ibra' and the borrower pays the net amount.
+    nonconsuming choice RequestIbra : ContractId IbraRequest
+      with
+        requestedSettlementDate : Date
+        settlementType          : IbraSettlementType  -- M8: FullIbra or PartialIbra
+        requestedAmount         : Optional Decimal    -- M8: target partial amount; None = full balance
+      controller borrower
+      do
+        assertMsg "Ibra' can only be requested on an Active contract" (status == Active)
+        case requestedAmount of
+          Some amt -> assertMsg "Partial settlement amount must be positive and less than outstanding balance"
+                        (amt > 0.0 && amt < outstandingBalance)
+          None -> return ()
+        create IbraRequest with
+          borrower; vetify; financialInstitution
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; requestedSettlementDate
+          settlementType; requestedAmount
+
+    -- M-RC: FI issues a formal written demand to a defaulted borrower.
+    -- Nonconsuming — the Defaulted contract stays alive for recovery tracking.
+    nonconsuming choice IssueDemandNotice : ContractId DemandNotice
+      with
+        demandDate       : Date
+        demandRef        : Text
+        responseDeadline : Date
+        gsmEligible      : Bool  -- H-5: True = valid GSM consent exists; gates GSMInvocation
+      controller financialInstitution
+      do
+        assertMsg "Can only issue demand notice on a Defaulted contract" (status == Defaulted)
+        assertMsg "Demand reference must not be empty" (demandRef /= "")
+        assertMsg "Response deadline must be after demand date" (responseDeadline > demandDate)
+        create DemandNotice with
+          financialInstitution; vetify; borrower; regulator
+          facilityRef; businessName; cacRegNumber
+          demandDate; demandRef; responseDeadline; gsmEligible
+          outstandingAmount = outstandingBalance
+
+    -- M-RC: FI records a partial recovery receipt after enforcement or negotiation.
+    choice RecordRecoveryPayment
+        : (ContractId MurabahahContract, ContractId RecoveryPaymentRecord)
+      with
+        amountRecovered : Decimal
+        recoveryDate    : Date
+        recoverySource  : Text  -- "COLLATERAL_SALE", "GUARANTOR", "COURT_JUDGMENT", "VOLUNTARY"
+      controller financialInstitution
+      do
+        assertMsg "Can only record recovery on a Defaulted contract" (status == Defaulted)
+        assertMsg "Recovery amount must be positive" (amountRecovered > 0.0)
+        assertMsg "Recovery amount must not exceed outstanding balance"
+          (amountRecovered <= outstandingBalance)
+        assertMsg "Recovery source must not be empty" (recoverySource /= "")
+        let newBalance = outstandingBalance - amountRecovered
+        updated <- create this with outstandingBalance = newBalance
+        record <- create RecoveryPaymentRecord with
+          financialInstitution; vetify; borrower; regulator
+          facilityRef; businessName; cacRegNumber
+          amountRecovered; recoveryDate; recoverySource
+          remainingBalance = newBalance
+        return (updated, record)
+
+    -- M-RC: FI formally writes off the residual balance after recovery is exhausted.
+    choice WriteOffContract
+        : (ContractId MurabahahContract, ContractId WriteOffRecord)
+      with
+        writeOffDate         : Date
+        writeOffRef          : Text
+        totalRecovered       : Decimal
+        writeOffApprovedBy   : Text  -- senior officer name for audit trail
+        proposedByOfficerId  : Text  -- RBAC: RecoveryOfficer who proposes the write-off
+        confirmedByOfficerId : Text  -- RBAC: RiskOfficer who confirms it (four-eyes)
+      controller financialInstitution
+      do
+        assertMsg "Can only write off a Defaulted contract" (status == Defaulted)
+        assertMsg "Write-off reference must not be empty" (writeOffRef /= "")
+        assertMsg "Write-off approver must be named" (writeOffApprovedBy /= "")
+        assertMsg "Total recovered must be non-negative" (totalRecovered >= 0.0)
+        -- RBAC / segregation of duties: distinct proposer and confirmer, correct roles
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId RecoveryOfficer
+        confirmer <- requireActiveOfficer financialInstitution confirmedByOfficerId RiskOfficer
+        assertMsg "Confirming officer must differ from proposing officer (four-eyes)"
+          (proposedByOfficerId /= confirmedByOfficerId)
+        assertMsg "writeOffApprovedBy must match the confirming officer's registered name"
+          (writeOffApprovedBy == confirmer.officerName)
+        let amountWrittenOff = outstandingBalance
+        updated <- create this with status = Completed; outstandingBalance = 0.0
+        record <- create WriteOffRecord with
+          financialInstitution; vetify; regulator
+          facilityRef; businessName; cacRegNumber
+          totalFinanced    = murabahahTerms.salePrice
+          totalRecovered; amountWrittenOff; writeOffDate; writeOffRef
+          writeOffApprovedBy
+        return (updated, record)
+
+    -- M-GP: FI grants a payment moratorium; future payments before moratoriumEnd
+    -- will not trigger the wasLate flag.
+    choice GrantMoratorium
+        : (ContractId MurabahahContract, ContractId MoratoriumRecord)
+      with
+        moratoriumEnd : Date
+        reason        : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only grant moratorium on Active or Delinquent contract"
+          (status == Active || status == Delinquent)
+        assertMsg "A moratorium is already active" (activeMoratorium == None)
+        assertMsg "Reason must not be empty" (reason /= "")
+        updated <- create this with activeMoratorium = Some moratoriumEnd
+        record <- create MoratoriumRecord with
+          financialInstitution; vetify; borrower
+          facilityRef; businessName; cacRegNumber; moratoriumEnd; reason
+        return (updated, record)
+
+    -- M-GP: Vetify ends an active moratorium.
+    choice EndMoratorium : ContractId MurabahahContract
+      with note : Text
+      controller vetify
+      do
+        assertMsg "No active moratorium to end" (activeMoratorium /= None)
+        assertMsg "Note must not be empty" (note /= "")
+        create this with activeMoratorium = None
+
+
+-- ─── 6. RepaymentRecord ───────────────────────────────────────────────────
+-- Immutable on-ledger record of each installment payment.
+-- wasLate drives Sadaqah obligations and Monitoring Agent delinquency scoring.
+-- Signed by: borrower, financialInstitution  |  Observer: vetify, regulator
+template RepaymentRecord
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    installmentNo        : Int
+    dueDate              : Date
+    paymentDate          : Date
+    amountPaid           : Decimal
+    remainingBalance     : Decimal
+    wasLate              : Bool
+    allocation           : Optional PaymentAllocation   -- M6: principal/profit/fee breakdown
+    settlementAccount    : Optional SettlementAccount   -- M10: account used to make this repayment
+    directDebitRef       : Optional Text                -- H-5: mono.co collection ref; None = manual FI payment
+  where
+    signatory borrower, financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+
+
+-- Idempotency guard for RecordPayment: one guard per (financialInstitution,
+-- directDebitRef) prevents a replayed payment webhook/collection event from
+-- creating a duplicate RepaymentRecord under the same external reference.
+-- Only created when directDebitRef is Some — manual/cash payments (None) are
+-- not deduplicated this way.
+template PaymentIdempotencyGuard
+  with
+    financialInstitution : Party
+    directDebitRef        : Text
+  where
+    signatory financialInstitution
+    key (financialInstitution, directDebitRef) : (Party, Text)
+    maintainer key._1
+    ensure directDebitRef /= ""
+
+
+-- ─── 7. Ibra' (Early Settlement Rebate) ──────────────────────────────────
+-- Borrower requests early full repayment. FI may voluntarily grant a rebate
+-- on the remaining profit portion. AAOIFI Std No. 8, §6/1: the rebate is at
+-- the FI's absolute discretion and cannot be contractually stipulated upfront.
+-- Signed by: borrower  |  Observer: financialInstitution, vetify
+template IbraRequest
+  with
+    borrower                : Party
+    vetify                  : Party
+    financialInstitution    : Party
+    facilityRef             : Text               -- C-1: links to MurabahahContract key
+    businessName            : Text
+    cacRegNumber            : Text
+    outstandingBalance      : Decimal
+    requestedSettlementDate : Date
+    settlementType          : IbraSettlementType  -- M8: FullIbra or PartialIbra
+    requestedAmount         : Optional Decimal    -- M8: target partial amount; None = full balance
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+
+    -- FI grants a voluntary rebate for full early settlement.
+    -- rebateAmount reduces what the borrower must pay to close the contract.
+    -- Creates an IbraGrantRecord as immutable on-ledger evidence (BD-4 / H-4).
+    choice GrantIbra : ContractId IbraGrantRecord
+      with
+        rebateAmount         : Decimal
+        proposedByOfficerId  : Text  -- RBAC: CreditOfficer who proposes the rebate
+        confirmedByOfficerId : Text  -- RBAC: RiskOfficer who confirms (four-eyes; P&L impact)
+      controller financialInstitution
+      do
+        assertMsg "GrantIbra is for full settlement; use GrantPartialIbra for partial"
+          (settlementType == FullIbra)
+        assertMsg "Rebate cannot exceed outstanding balance" (rebateAmount <= outstandingBalance)
+        assertMsg "Rebate must be non-negative" (rebateAmount >= 0.0)
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId CreditOfficer
+        _ <- requireActiveOfficer financialInstitution confirmedByOfficerId RiskOfficer
+        assertMsg "Confirming officer must differ from proposing officer (four-eyes)"
+          (proposedByOfficerId /= confirmedByOfficerId)
+        t <- getTime
+        create IbraGrantRecord with
+          financialInstitution; vetify; borrower
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; rebateAmount
+          effectiveDate = requestedSettlementDate
+          grantedAt     = t
+
+    -- M8: FI approves a partial early settlement at a reduced amount.
+    -- Creates a PartialIbraGrant as immutable on-ledger evidence.
+    choice GrantPartialIbra : ContractId PartialIbraGrant
+      with
+        rebateAmount             : Decimal
+        approvedSettlementAmount : Decimal
+        proposedByOfficerId      : Text  -- RBAC: CreditOfficer who proposes the rebate
+        confirmedByOfficerId     : Text  -- RBAC: RiskOfficer who confirms (four-eyes; P&L impact)
+      controller financialInstitution
+      do
+        assertMsg "GrantPartialIbra requires PartialIbra settlement type"
+          (settlementType == PartialIbra)
+        assertMsg "Approved settlement amount must be positive" (approvedSettlementAmount > 0.0)
+        assertMsg "Approved settlement must be less than outstanding balance"
+          (approvedSettlementAmount < outstandingBalance)
+        assertMsg "Rebate must be non-negative" (rebateAmount >= 0.0)
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId CreditOfficer
+        _ <- requireActiveOfficer financialInstitution confirmedByOfficerId RiskOfficer
+        assertMsg "Confirming officer must differ from proposing officer (four-eyes)"
+          (proposedByOfficerId /= confirmedByOfficerId)
+        t <- getTime
+        create PartialIbraGrant with
+          financialInstitution; vetify; borrower
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; rebateAmount; approvedSettlementAmount
+          effectiveDate = requestedSettlementDate
+          grantedAt     = t
+
+    -- FI declines; borrower must repay the full outstanding balance.
+    -- Fixed correctness gap: previously a bare stub with no reason and no
+    -- audit record — now creates immutable evidence like every other decline
+    -- path in this module (ProposalDeclineRecord, RestructuringRejectionRecord).
+    choice DeclineIbra : ContractId IbraDeclineRecord
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        t <- getTime
+        create IbraDeclineRecord with
+          financialInstitution; vetify; borrower
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; reason
+          declinedAt = t
+
+    -- M-IF / BD-4: FI proposes an advisory rebate amount — an internal calculation
+    -- tool for the FI's financing team (not vetify). AAOIFI Std No. 8, §6/1:
+    -- Ibra' is at FI's absolute discretion and cannot be contractually stipulated.
+    nonconsuming choice ProposeRebate : ContractId IbraRebateProposal
+      with
+        suggestedRebate : Decimal
+        rationale       : Text
+      controller financialInstitution
+      do
+        assertMsg "Suggested rebate must be non-negative" (suggestedRebate >= 0.0)
+        assertMsg "Suggested rebate cannot exceed outstanding balance"
+          (suggestedRebate <= outstandingBalance)
+        assertMsg "Rationale must not be empty" (rationale /= "")
+        create IbraRebateProposal with
+          financialInstitution; vetify; borrower
+          facilityRef; businessName; cacRegNumber
+          outstandingBalance; suggestedRebate; rationale; settlementType
+
+
+-- ─── 8. LatePaymentCharity (Sadaqah obligation) ───────────────────────────
+-- AAOIFI Std No. 8, §2/4/20: any penalty charged for late payment must be
+-- donated to charity. The FI cannot retain it as income. This contract
+-- records the obligation and the borrower's settlement of it.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template LatePaymentCharity
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    installmentNo        : Int
+    dueDate              : Date
+    paymentDate          : Date
+    charityAmount        : Optional Decimal  -- None until set by FI's Shariah committee formula
+    settled              : Bool
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+
+    -- FI applies their Shariah committee's approved formula to set the amount.
+    choice SetCharityAmount : ContractId LatePaymentCharity
+      with amount : Decimal
+      controller financialInstitution
+      do
+        assertMsg "Charity amount must be positive" (amount > 0.0)
+        assertMsg "Amount already settled" (not settled)
+        create this with charityAmount = Some amount
+
+    -- C1: Borrower confirms the charity donation was made; creates an immutable
+    -- CharityPaymentRecord with beneficiary and receipt for regulatory audit.
+    choice ConfirmCharityPayment : ContractId CharityPaymentRecord
+      with
+        charityRef          : Text  -- charity receipt or bank transfer reference
+        charityOrganization : Text  -- beneficiary organization name
+      controller borrower
+      do
+        case charityAmount of
+          None -> assertFail "Charity amount must be set before settlement"
+          Some amt -> do
+            assertMsg "Charity organization must not be empty" (charityOrganization /= "")
+            t <- getTime
+            create CharityPaymentRecord with
+              borrower; vetify; financialInstitution
+              businessName; cacRegNumber
+              installmentNo
+              charityAmount = amt
+              charityRef
+              charityOrganization
+              confirmedAt = t
+
+    -- F-5: Co-signed path — FI validates charityOrganization against their
+    -- CharityOrganizationRegistry; borrower co-signs to authorize the
+    -- CharityPaymentRecord (bilateral signatory). The FI fetches the registry
+    -- (borrower has no visibility); both parties sign the resulting record.
+    -- Submit with actAs [borrower, financialInstitution].
+    choice ConfirmCharityPaymentValidated : ContractId CharityPaymentRecord
+      with
+        charityRef          : Text
+        charityOrganization : Text
+        registryCid         : ContractId CharityOrganizationRegistry
+      controller borrower, financialInstitution
+      do
+        case charityAmount of
+          None -> assertFail "Charity amount must be set before settlement"
+          Some amt -> do
+            assertMsg "Charity organization must not be empty" (charityOrganization /= "")
+            registry <- fetch registryCid
+            assertMsg "Registry belongs to a different FI"
+              (registry.financialInstitution == financialInstitution)
+            let approved = any (\(name, _) -> name == charityOrganization)
+                               registry.approvedOrganizations
+            assertMsg "Organization not in FI's approved charity registry" approved
+            t <- getTime
+            create CharityPaymentRecord with
+              borrower; vetify; financialInstitution
+              businessName; cacRegNumber
+              installmentNo
+              charityAmount = amt
+              charityRef
+              charityOrganization
+              confirmedAt = t
+
+
+-- ─── 9. RahnAgreement (Collateral) ────────────────────────────────────────
+-- AAOIFI Std No. 39: borrower pledges an asset as security for the financing.
+-- Created alongside or just after MurabahahContract. Released on full
+-- repayment; enforced on default.
+-- Signed by: borrower, financialInstitution  |  Observer: vetify
+template RahnAgreement
+  with
+    borrower              : Party
+    vetify                : Party
+    financialInstitution  : Party
+    regulator             : Optional Party          -- C-5: CBN oversight of collateral records
+    facilityRef           : Text           -- C-1: links to MurabahahContract key
+    businessName          : Text
+    cacRegNumber          : Text
+    collateralDescription : Text           -- e.g. "Plot 14, Lekki Phase 1, Lagos — C of O No. LG12345"
+    collateralValue       : Decimal        -- estimated market value in NGN
+    collateralStatus      : CollateralStatus
+    releaseEvidence       : Optional Text  -- R1: discharge document ref set on ReleaseCollateral
+  where
+    signatory borrower, financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+
+    ensure collateralValue > 0.0
+
+    -- FI releases the pledge on full repayment / contract closure.
+    -- RBAC / segregation of duties: distinct OperationsOfficer (proposer) and
+    -- RiskOfficer (confirmer) required — mirrors EnforceCollateral below.
+    choice ReleaseCollateral : ContractId RahnAgreement
+      with
+        note                 : Text
+        releaseDocumentRef   : Optional Text  -- R1: discharge letter or title deed ref
+        proposedByOfficerId  : Text
+        confirmedByOfficerId : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only release Active collateral" (collateralStatus == CollateralActive)
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId OperationsOfficer
+        _ <- requireActiveOfficer financialInstitution confirmedByOfficerId RiskOfficer
+        assertMsg "Confirming officer must differ from proposing officer (four-eyes)"
+          (proposedByOfficerId /= confirmedByOfficerId)
+        create this with collateralStatus = CollateralReleased; releaseEvidence = releaseDocumentRef
+
+    -- FI enforces the pledge on default.
+    -- RBAC / segregation of duties: distinct RecoveryOfficer (proposer) and
+    -- RiskOfficer (confirmer) required, whether called directly or via
+    -- ProposeEnforceCollateral -> ConfirmEnforce.
+    choice EnforceCollateral : ContractId RahnAgreement
+      with
+        reason               : Text
+        proposedByOfficerId  : Text
+        confirmedByOfficerId : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only enforce Active collateral" (collateralStatus == CollateralActive)
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId RecoveryOfficer
+        _ <- requireActiveOfficer financialInstitution confirmedByOfficerId RiskOfficer
+        assertMsg "Confirming officer must differ from proposing officer (four-eyes)"
+          (proposedByOfficerId /= confirmedByOfficerId)
+        create this with collateralStatus = CollateralEnforced
+
+    -- R1: FI records a formal collateral revaluation; archives old record and creates
+    -- a new RahnAgreement with the updated value plus a CollateralValuationRecord.
+    choice Revalue : (ContractId RahnAgreement, ContractId CollateralValuationRecord)
+      with
+        newValue      : Decimal
+        valuationDate : Date
+        valuatorRef   : Text      -- appraiser name or reference
+        notes         : Optional Text
+      controller financialInstitution
+      do
+        assertMsg "Collateral must be Active to revalue" (collateralStatus == CollateralActive)
+        assertMsg "New collateral value must be positive" (newValue > 0.0)
+        assertMsg "Valuator reference must not be empty" (valuatorRef /= "")
+        let reg = regulator
+        newRahn <- create this with collateralValue = newValue
+        valRecord <- create CollateralValuationRecord with
+          financialInstitution
+          vetify
+          borrower
+          regulator = reg
+          businessName
+          cacRegNumber
+          previousValue   = collateralValue
+          valuationAmount = newValue
+          valuationDate
+          valuatorRef
+          notes
+        return (newRahn, valRecord)
+
+    -- M-CI: FI records a periodic physical inspection of the pledged asset.
+    nonconsuming choice RecordInspection : ContractId CollateralInspectionRecord
+      with
+        inspectionDate          : Date
+        inspectedBy             : Text
+        condition               : Text            -- "SATISFACTORY", "REQUIRES_ATTENTION", "IMPAIRED"
+        inspectionNotes         : Optional Text
+        nextInspectionDate      : Optional Date
+        mandateStatus           : Optional Text    -- H-5: mono.co mandate status at inspection time
+        estimatedGsmRecoverable : Optional Decimal -- H-5: estimated liquid balance recoverable via GSM
+      controller financialInstitution
+      do
+        assertMsg "Inspected-by must not be empty" (inspectedBy /= "")
+        assertMsg "Condition must not be empty" (condition /= "")
+        assertMsg "Can only inspect Active collateral" (collateralStatus == CollateralActive)
+        let reg = regulator
+        create CollateralInspectionRecord with
+          financialInstitution; vetify; borrower
+          regulator = reg
+          businessName; cacRegNumber
+          inspectionDate; inspectedBy; condition; inspectionNotes; nextInspectionDate
+          mandateStatus; estimatedGsmRecoverable
+
+    -- M-MK: FI proposes collateral enforcement; vetify must confirm.
+    nonconsuming choice ProposeEnforceCollateral : ContractId PendingCollateralEnforcement
+      with
+        reason              : Text
+        gsmExhausted        : Bool          -- H-5: True = GSM was attempted before escalating to Rahn
+        gsmRef              : Optional Text -- H-5: mono.co / NIBSS GSM reference if attempted
+        proposedByOfficerId : Text          -- RBAC: RecoveryOfficer, carried through to EnforceCollateral
+      controller financialInstitution
+      do
+        assertMsg "Can only propose enforcement on Active collateral"
+          (collateralStatus == CollateralActive)
+        assertMsg "Reason must not be empty" (reason /= "")
+        _ <- requireActiveOfficer financialInstitution proposedByOfficerId RecoveryOfficer
+        create PendingCollateralEnforcement with
+          financialInstitution; vetify; borrower
+          businessName; cacRegNumber; reason; gsmExhausted; gsmRef; proposedByOfficerId
+
+
+-- ─── M4: Asset Rejection Record ──────────────────────────────────────────
+-- On-ledger evidence of a pre-Qabdh rejection. The FI must either replace
+-- the asset (new AssetPurchaseRecord) or cancel the transaction.
+-- Signed by: borrower  |  Observer: financialInstitution, vetify
+template AssetRejectionRecord
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    reason               : Text
+    defectDescription    : Text
+    rejectedAt           : Time
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+
+
+-- ─── B-1: Acquisition Cancellation Request ────────────────────────────────────
+-- Borrower formally requests deal cancellation after a defect rejection when the
+-- FI cannot supply a suitable replacement. FI either confirms (ConfirmCancellation
+-- on AssetPurchaseRecord) or rejects (RejectCancellation here).
+-- Signed by: borrower  |  Observer: financialInstitution, vetify
+template AcquisitionCancellationRequest
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    reason               : Text
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+    ensure reason /= ""
+
+    -- FI accepts the cancellation — consuming, archives this request.
+    choice AcceptCancellation : ()
+      controller financialInstitution
+      do return ()
+
+    -- FI rejects the cancellation; the AssetPurchaseRecord remains live.
+    choice RejectCancellation : ()
+      controller financialInstitution
+      do return ()
+
+
+-- ─── M1/M3: Supplier Payment Record ─────────────────────────────────────
+-- Formal proof that the FI (directly or via borrower-as-Wakil) paid the
+-- supplier. AAOIFI Std No. 8, §3/1: FI ownership requires prior payment.
+-- Created via nonconsuming RecordSupplierPayment on AssetPurchaseRecord.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template SupplierPaymentRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    supplierDetails      : Optional SupplierDetails
+    amountPaid           : Decimal
+    paymentDate          : Date
+    paymentRef           : Text
+    bankConfirmationRef  : Optional Text
+    purchasedViaWakala   : Bool
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure amountPaid > 0.0
+
+
+-- ─── M7: Restructuring Request ────────────────────────────────────────────
+-- Borrower's on-ledger request to modify the repayment schedule post-origination.
+-- The FI responds via ApproveRestructuring or RejectRestructuring on MurabahahContract.
+-- AAOIFI note: restructuring must not increase the total outstanding debt.
+-- Signed by: borrower  |  Observer: financialInstitution, vetify
+template RestructuringRequest
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    outstandingBalance   : Decimal
+    proposedSchedule     : [PaymentScheduleEntry]
+    reason               : Text
+    requestDate          : Date
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+
+
+-- ─── M11: Shariah Audit Record ───────────────────────────────────────────
+-- Periodic on-ledger Shariah review of a Murabahah facility.
+-- Created by vetify after each audit cycle; observable by FI and regulator.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template ShariahAuditRecord
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Optional Text  -- H-7: soft link to a specific MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    auditDate            : Date
+    auditPeriod          : Text          -- e.g. "2026-H1", "2026-Q2"
+    auditorRef           : Text          -- auditing body or officer name
+    findings             : [Text]        -- individual audit findings
+    overallCompliant     : Bool
+    recommendations      : [Text]
+    nextAuditDate        : Optional Date
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+
+
+-- ─── M12: Shariah Exception ──────────────────────────────────────────────
+-- On-ledger record of a Shariah non-compliance incident.
+-- Open until vetify exercises ResolveException.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template ShariahException
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Optional Text  -- H-7: soft link to a specific MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    exceptionType        : Text
+    description          : Text
+    severity             : ShariahExceptionSeverity
+    detectedAt           : Time
+    resolutionNote       : Optional Text
+    resolvedAt           : Optional Time
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+
+    -- Vetify records the resolution; archives and creates a resolved version.
+    choice ResolveException : ContractId ShariahException
+      with
+        note      : Text
+        resolveAt : Time
+      controller vetify
+      do
+        assertMsg "Exception is already resolved" (resolutionNote == None)
+        assertMsg "Resolution note must not be empty" (note /= "")
+        create this with resolutionNote = Some note; resolvedAt = Some resolveAt
+
+
+-- ─── M13: Murabahah Statement (Regulatory Reporting) ─────────────────────
+-- Per-contract periodic statement visible to regulator, FI, and borrower.
+-- Created by vetify from PQS aggregations; the regulator can query this directly
+-- without access to individual RepaymentRecord internals.
+-- Signed by: vetify  |  Observer: borrower, financialInstitution, regulator
+template MurabahahStatement
+  with
+    vetify               : Party
+    borrower             : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    statementDate        : Date
+    statementPeriod      : Text          -- e.g. "2026-Q2"
+    totalFinanced        : Decimal
+    totalRepaid          : Decimal
+    outstandingBalance   : Decimal
+    installmentsPaid     : Int
+    totalInstallments    : Int
+    contractStatus       : MurabahahStatus
+    shariahAuditRef      : Optional Text -- reference to the most recent ShariahAuditRecord
+  where
+    signatory vetify
+    observer [borrower, financialInstitution] ++ optional [] pure regulator
+    ensure totalFinanced > 0.0 && totalRepaid >= 0.0 && outstandingBalance >= 0.0
+
+
+-- ─── R1: Collateral Valuation Record ─────────────────────────────────────────
+-- Immutable evidence of each formal revaluation event on a pledged asset.
+-- Created via the Revalue consuming choice on RahnAgreement.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template CollateralValuationRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party     -- C-5: CBN oversight of collateral valuation
+    businessName         : Text
+    cacRegNumber         : Text
+    previousValue        : Decimal
+    valuationAmount      : Decimal
+    valuationDate        : Date
+    valuatorRef          : Text      -- appraiser name or certification reference
+    notes                : Optional Text
+  where
+    signatory financialInstitution
+    observer [borrower, vetify] ++ optional [] pure regulator
+    ensure valuationAmount > 0.0
+
+
+-- ─── R2: Takaful Policy ───────────────────────────────────────────────────────
+-- Islamic insurance policy linked to a Murabahah financing facility.
+-- AAOIFI Takaful Standard: FI typically procures asset or credit Takaful.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify, regulator
+template TakafulPolicy
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    policyNumber         : Text
+    takafulOperator      : Text     -- e.g. "Cornerstone Takaful Nigeria"
+    coverageType         : Text     -- "ASSET_TAKAFUL" or "CREDIT_TAKAFUL"
+    coverageAmount       : Decimal  -- maximum indemnity amount in NGN
+    premiumAmount        : Decimal  -- contribution (Tabarru') paid
+    startDate            : Date
+    expiryDate           : Date
+    assetRef             : Optional Text  -- reference to the specific asset covered
+  where
+    signatory financialInstitution
+    observer [borrower, vetify] ++ optional [] pure regulator
+    ensure premiumAmount > 0.0 && coverageAmount > 0.0 && expiryDate > startDate
+
+
+-- ─── R3: Supplier Failure Record ─────────────────────────────────────────────
+-- Documents a supplier cancellation, insolvency, or non-delivery event.
+-- Created by the consuming RecordSupplierFailure choice on AssetPurchaseRecord.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template SupplierFailureRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    failureType          : Text           -- "SUPPLIER_CANCELLED", "SUPPLIER_BANKRUPT", "REFUND_ISSUED"
+    failureDescription   : Text
+    refundAmount         : Optional Decimal
+    failedAt             : Time
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure failureDescription /= ""
+
+
+-- ─── R4: Dispute Record ───────────────────────────────────────────────────────
+-- On-ledger dispute raised by the borrower against an FI action on a contract.
+-- Created via nonconsuming RaiseDispute on MurabahahContract.
+-- Open until vetify escalates to arbitration or the parties resolve bilaterally.
+-- Signed by: borrower  |  Observer: financialInstitution, vetify, regulator
+template DisputeRecord
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    disputeType          : Text           -- "PAYMENT_DISPUTE", "CONTRACT_TERMS", "ASSET_DEFECT"
+    description          : Text
+    evidenceRef          : Optional Text  -- off-ledger evidence reference
+    raisedAt             : Time
+  where
+    signatory borrower
+    observer [financialInstitution, vetify] ++ optional [] pure regulator
+    ensure description /= ""
+
+    -- Vetify escalates an unresolved dispute to a third-party arbitrator.
+    choice EscalateToArbitration : ContractId ArbitrationRequest
+      with
+        arbitrator : Party
+      controller vetify
+      do
+        assertMsg "Arbitrator must differ from the parties" (arbitrator /= borrower && arbitrator /= financialInstitution)
+        t <- getTime
+        create ArbitrationRequest with
+          vetify; borrower; financialInstitution; regulator
+          arbitrator; businessName; cacRegNumber
+          disputeDescription = description
+          escalatedAt        = t
+          outcome            = None
+          resolution         = None
+
+
+-- ─── R4: Arbitration Request ─────────────────────────────────────────────────
+-- Formal arbitration proceeding arising from an unresolved DisputeRecord.
+-- Signed by: vetify  |  Observer: borrower, financialInstitution, arbitrator, regulator
+template ArbitrationRequest
+  with
+    vetify               : Party
+    borrower             : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    arbitrator           : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    disputeDescription   : Text
+    escalatedAt          : Time
+    outcome              : Optional Text  -- "BORROWER_PREVAILS", "FI_PREVAILS", "SETTLEMENT_AGREED"
+    resolution           : Optional Text  -- narrative resolution summary
+  where
+    signatory vetify
+    observer [borrower, financialInstitution, arbitrator] ++ optional [] pure regulator
+    ensure disputeDescription /= ""
+
+    -- Vetify records the arbitrator's finding and closes the proceeding.
+    choice RecordArbitrationOutcome : ContractId ArbitrationRequest
+      with
+        arbOutcome    : Text
+        arbResolution : Text
+      controller vetify
+      do
+        assertMsg "Arbitration is already concluded" (outcome == None)
+        assertMsg "Outcome must not be empty" (arbOutcome /= "")
+        assertMsg "Resolution must not be empty" (arbResolution /= "")
+        create this with outcome = Some arbOutcome; resolution = Some arbResolution
+
+
+-- ─── R6: Monitoring Alert ─────────────────────────────────────────────────────
+-- AI Monitoring Agent raises an alert for a specific risk event on a facility.
+-- Dismissed by vetify after human review.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template MonitoringAlert
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    facilityRef          : Optional Text  -- H-7: soft link to a specific MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    alertType            : MonitoringAlertType
+    alertSeverity        : Text           -- "LOW", "MEDIUM", "HIGH", "CRITICAL"
+    alertDescription     : Text
+    detectedAt           : Time
+    dismissed            : Bool
+    dismissalNote        : Optional Text
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure alertDescription /= ""
+
+    -- Vetify dismisses the alert after review or remediation.
+    choice DismissAlert : ContractId MonitoringAlert
+      with dismissNote : Text
+      controller vetify
+      do
+        assertMsg "Alert is already dismissed" (not dismissed)
+        assertMsg "Dismissal note must not be empty" (dismissNote /= "")
+        create this with dismissed = True; dismissalNote = Some dismissNote
+
+
+-- ─── R5: Portfolio Risk Report ────────────────────────────────────────────────
+-- Portfolio-level risk metrics (PD, LGD, EL, concentration) produced by the
+-- Reporting Agent. Observable by the FI and the regulator for supervisory use.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template PortfolioRiskReport
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    reportDate           : Date
+    reportPeriod         : Text   -- e.g. "2026-Q3"
+    metrics              : PortfolioRiskMetrics
+    generatedByAgent     : Text   -- e.g. "vetify-reporting"
+    modelVersion         : Text
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure metrics.activeContractCount >= 0
+        && metrics.exposureAtDefault >= 0.0
+        && metrics.expectedLoss >= 0.0
+
+
+-- ─── C1: Charity Payment Record ──────────────────────────────────────────────
+-- Immutable confirmation that the borrower discharged the Sadaqah obligation
+-- arising from a late payment. Created by ConfirmCharityPayment on LatePaymentCharity.
+-- AAOIFI Std No. 8, §2/4/20: documentation of charity disbursement is required.
+-- Signed by: borrower, financialInstitution  |  Observer: vetify
+template CharityPaymentRecord
+  with
+    borrower             : Party
+    vetify               : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    installmentNo        : Int
+    charityAmount        : Decimal
+    charityRef           : Text   -- charity receipt or bank transfer reference
+    charityOrganization  : Text   -- beneficiary organization name
+    confirmedAt          : Time
+  where
+    signatory borrower, financialInstitution
+    observer vetify
+    ensure charityAmount > 0.0 && charityRef /= "" && charityOrganization /= ""
+
+
+-- ─── D1: Delivery Milestone ───────────────────────────────────────────────────
+-- Records receipt of a partial delivery during the Wakala acquisition phase.
+-- Created via nonconsuming RecordDeliveryMilestone on AssetPurchaseRecord.
+-- The final full AcknowledgeDelivery still gates OfferMurabahah.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template DeliveryMilestone
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    milestoneDescription : Text
+    quantityDelivered    : Decimal
+    milestoneDate        : Date
+    evidenceRef          : Optional Text  -- delivery note, bill of lading reference
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure quantityDelivered > 0.0 && milestoneDescription /= ""
+
+
+-- ─── R1: Suspicious Activity Report ──────────────────────────────────────────
+-- On-ledger SAR filed with the regulator (NFIU/CBN) for a suspicious transaction
+-- or behavioural pattern. Confidential — borrower does NOT observe this contract.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template SARReport
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    sarRef               : Text    -- NFIU / EFCC submission reference
+    suspiciousActivity   : Text    -- description of the suspicious pattern
+    reportDate           : Date
+    reportedByParty      : Text    -- officer name or role who filed the SAR
+    confidential         : Bool    -- True = restricted visibility; borrower excluded
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure suspiciousActivity /= "" && sarRef /= ""
+
+
+-- ─── M-PO: Supplier Quotation ─────────────────────────────────────────────────
+-- Formal supplier quotation attached to a MurabahahWad via AttachQuotation.
+-- Provides an immutable anchor linking estimatedCost to a named supplier offer.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template SupplierQuotation
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    supplierName         : Text
+    quotationRef         : Text
+    quotedAmount         : Decimal
+    assetDescription     : Text
+    validUntil           : Optional Date
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure quotedAmount > 0.0 && quotationRef /= ""
+
+
+-- ─── M-DR: Document Entry ─────────────────────────────────────────────────────
+-- Managed lifecycle record for a single document attached to a facility.
+-- Created via RegisterDocument on AssetPurchaseRecord; verified by vetify.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template DocumentEntry
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    documentRef          : DocumentRef
+    registeredBy         : Text
+    uploadedAt           : Time
+    verifiedAt           : Optional Time
+    superseded           : Bool
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+
+    choice VerifyDocument : ContractId DocumentEntry
+      with verifyNote : Optional Text
+      controller vetify
+      do
+        assertMsg "Document already verified" (verifiedAt == None)
+        assertMsg "Document is superseded" (not superseded)
+        t <- getTime
+        create this with verifiedAt = Some t
+
+    choice SupersedeDocument : ContractId DocumentEntry
+      with
+        newDocumentRef : DocumentRef
+        reason         : Text
+      controller financialInstitution
+      do
+        assertMsg "Document is already superseded" (not superseded)
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with documentRef = newDocumentRef; verifiedAt = None; superseded = False
+
+
+-- ─── M-CI: Collateral Inspection Record ──────────────────────────────────────
+-- Records a periodic physical inspection of pledged collateral.
+-- Distinct from revaluation — verifies existence and condition without repricing.
+-- Created via nonconsuming RecordInspection on RahnAgreement.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template CollateralInspectionRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party     -- C-5: CBN oversight of collateral inspections
+    businessName         : Text
+    cacRegNumber         : Text
+    inspectionDate              : Date
+    inspectedBy                 : Text
+    condition                   : Text            -- "SATISFACTORY", "REQUIRES_ATTENTION", "IMPAIRED"
+    inspectionNotes             : Optional Text
+    nextInspectionDate          : Optional Date
+    mandateStatus               : Optional Text    -- H-5: mono.co mandate status at inspection time
+    estimatedGsmRecoverable     : Optional Decimal -- H-5: estimated liquid balance recoverable via GSM
+  where
+    signatory financialInstitution
+    observer [vetify, borrower] ++ optional [] pure regulator
+    ensure inspectedBy /= "" && condition /= ""
+
+
+-- ─── M-CV: Credit Covenant ────────────────────────────────────────────────────
+-- Records a financial covenant (DSCR, leverage ratio, etc.) that the borrower
+-- must satisfy during the active contract. Measurements are recorded via
+-- nonconsuming RecordCovenantMeasurement; breaches create a CovenantMeasurementRecord.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template CreditCovenant
+  with
+    financialInstitution    : Party
+    vetify                  : Party
+    borrower                : Party
+    regulator               : Optional Party   -- C-5: CBN oversight of covenant measurements
+    businessName            : Text
+    cacRegNumber            : Text
+    covenantType            : Text    -- "DSCR_MINIMUM", "LEVERAGE_RATIO", "CURRENT_RATIO"
+    threshold               : Decimal
+    measurementFrequency    : Text    -- "MONTHLY", "QUARTERLY", "ANNUALLY"
+  where
+    signatory financialInstitution
+    observer [vetify, borrower] ++ optional [] pure regulator
+    ensure threshold > 0.0
+
+    nonconsuming choice RecordCovenantMeasurement : ContractId CovenantMeasurementRecord
+      with
+        measuredValue : Decimal
+        measureDate   : Date
+        measuredBy    : Text
+      controller vetify
+      do
+        assertMsg "Measured-by must not be empty" (measuredBy /= "")
+        let reg = regulator
+        create CovenantMeasurementRecord with
+          financialInstitution; vetify; borrower
+          regulator = reg
+          businessName; cacRegNumber
+          covenantType; threshold; measuredValue
+          measureDate; measuredBy
+          breached = measuredValue < threshold
+
+
+-- ─── M-CV: Covenant Measurement Record ───────────────────────────────────────
+-- Immutable snapshot of a single covenant measurement.
+-- breached = True triggers off-ledger Monitoring Agent alert.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower, regulator
+template CovenantMeasurementRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party   -- C-5: CBN oversight of covenant measurements
+    businessName         : Text
+    cacRegNumber         : Text
+    covenantType         : Text
+    threshold            : Decimal
+    measuredValue        : Decimal
+    measureDate          : Date
+    measuredBy           : Text
+    breached             : Bool
+  where
+    signatory financialInstitution
+    observer [vetify, borrower] ++ optional [] pure regulator
+    ensure measuredBy /= ""
+
+
+-- ─── M-RC: Demand Notice ──────────────────────────────────────────────────────
+-- Formal written demand issued to a defaulted borrower. First step of the
+-- post-default recovery chain. Created via IssueDemandNotice on MurabahahContract.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower, regulator
+template DemandNotice
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    demandDate           : Date
+    outstandingAmount    : Decimal
+    demandRef            : Text
+    responseDeadline     : Date
+    gsmEligible          : Bool   -- H-5: FI attests that GSM consent exists at demand time
+  where
+    signatory financialInstitution
+    observer [vetify, borrower] ++ optional [] pure regulator
+    ensure demandRef /= ""
+
+    choice EscalateToLegal : ContractId LegalEscalation
+      with
+        escalationDate : Date
+        solicitorRef   : Text
+        legalAction    : Text
+      controller financialInstitution
+      do
+        assertMsg "Solicitor reference must not be empty" (solicitorRef /= "")
+        assertMsg "Legal action description must not be empty" (legalAction /= "")
+        create LegalEscalation with
+          financialInstitution; vetify; regulator
+          businessName; cacRegNumber
+          escalationDate; solicitorRef; legalAction
+          outstandingAmount
+          courtRef   = None
+          resolvedAt = None
+
+    choice WithdrawDemand : ()
+      with note : Text
+      controller financialInstitution
+      do
+        assertMsg "Note must not be empty" (note /= "")
+        return ()
+
+
+-- ─── M-RC: Legal Escalation ───────────────────────────────────────────────────
+-- Formal instruction to solicitors to commence recovery proceedings.
+-- Created via EscalateToLegal on DemandNotice.
+-- Signed by: financialInstitution  |  Observer: vetify, regulator
+template LegalEscalation
+  with
+    financialInstitution : Party
+    vetify               : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    escalationDate       : Date
+    solicitorRef         : Text
+    legalAction          : Text
+    outstandingAmount    : Decimal
+    courtRef             : Optional Text
+    resolvedAt           : Optional Time
+  where
+    signatory financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+    ensure solicitorRef /= ""
+
+    choice RecordCourtOrder : ContractId LegalEscalation
+      with courtOrderRef : Text
+      controller financialInstitution
+      do
+        assertMsg "Court order reference must not be empty" (courtOrderRef /= "")
+        create this with courtRef = Some courtOrderRef
+
+    choice ResolveLegal : ContractId LegalEscalation
+      with note : Text
+      controller financialInstitution
+      do
+        assertMsg "Resolution note must not be empty" (note /= "")
+        assertMsg "Already resolved" (resolvedAt == None)
+        t <- getTime
+        create this with resolvedAt = Some t
+
+
+-- ─── M-RC: Recovery Payment Record ───────────────────────────────────────────
+-- Immutable receipt of a partial recovery payment after default.
+-- Created via RecordRecoveryPayment on MurabahahContract (status = Defaulted).
+-- Signed by: financialInstitution  |  Observer: vetify, borrower, regulator
+template RecoveryPaymentRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    amountRecovered      : Decimal
+    recoveryDate         : Date
+    recoverySource       : Text
+    remainingBalance     : Decimal
+  where
+    signatory financialInstitution
+    observer [vetify, borrower] ++ optional [] pure regulator
+    ensure amountRecovered > 0.0
+
+
+-- ─── Audit trail: Default Record ───────────────────────────────────────────────
+-- Immutable evidence that a contract was formally defaulted. Created via
+-- DefaultContract on MurabahahContract (status = Delinquent -> Defaulted).
+-- Signed by: financialInstitution  |  Observer: borrower, vetify, regulator
+template DefaultRecord
+  with
+    financialInstitution : Party
+    vetify                : Party
+    borrower              : Party
+    regulator             : Optional Party
+    facilityRef           : Text
+    businessName          : Text
+    cacRegNumber          : Text
+    reason                : Text
+    defaultedBy           : Text
+    defaultedAt           : Time
+  where
+    signatory financialInstitution
+    observer [borrower, vetify] ++ optional [] pure regulator
+    ensure reason /= "" && defaultedBy /= ""
+
+
+-- ─── M-RC: Write-Off Record ───────────────────────────────────────────────────
+-- Final write-off of residual balance after all recovery is exhausted.
+-- Created via WriteOffContract on MurabahahContract (status = Defaulted).
+-- Signed by: financialInstitution  |  Observer: vetify, regulator
+template WriteOffRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    regulator            : Optional Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    totalFinanced        : Decimal
+    totalRecovered       : Decimal
+    amountWrittenOff     : Decimal
+    writeOffDate         : Date
+    writeOffRef          : Text
+    writeOffApprovedBy   : Text  -- senior officer name for audit trail
+  where
+    signatory financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+    ensure amountWrittenOff >= 0.0 && writeOffRef /= "" && writeOffApprovedBy /= ""
+
+
+-- ─── M-RI: Regulatory Inspection Request ─────────────────────────────────────
+-- Vetify creates this when the CBN/NFIU issues an inspection notice.
+-- FI responds within the deadline; vetify closes via CloseInspection.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template RegulatoryInspectionRequest
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    inspectionRef        : Text
+    inspectionScope      : Text
+    responseDeadline     : Date
+    requestedAt          : Time
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure inspectionRef /= "" && regulator /= None
+
+    choice RespondToInspection : ContractId InspectionResponse
+      with
+        responseRef     : Text
+        documents       : [Text]
+        respondedByName : Text
+        responseDate    : Date
+      controller financialInstitution
+      do
+        assertMsg "Response reference must not be empty" (responseRef /= "")
+        assertMsg "Responded-by name must not be empty" (respondedByName /= "")
+        create InspectionResponse with
+          vetify; financialInstitution; regulator
+          businessName; cacRegNumber
+          inspectionRef; responseRef; documents
+          respondedByName; responseDate
+
+    choice ExtendDeadline : ContractId RegulatoryInspectionRequest
+      with newDeadline : Date
+      controller vetify
+      do
+        assertMsg "New deadline must be later than current" (newDeadline > responseDeadline)
+        create this with responseDeadline = newDeadline
+
+
+-- ─── M-RI: Inspection Response ────────────────────────────────────────────────
+-- FI's formal response to a regulatory inspection request.
+-- Vetify closes it via CloseInspection once the regulator is satisfied.
+-- Signed by: financialInstitution  |  Observer: vetify, regulator
+template InspectionResponse
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    inspectionRef        : Text
+    responseRef          : Text
+    documents            : [Text]
+    respondedByName      : Text
+    responseDate         : Date
+  where
+    signatory financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+
+    choice CloseInspection : ContractId InspectionRecord
+      with
+        findings       : [Text]
+        passed         : Bool
+        followUpNeeded : Bool
+        closingNote    : Text
+      controller vetify
+      do
+        assertMsg "Closing note must not be empty" (closingNote /= "")
+        create InspectionRecord with
+          vetify; financialInstitution; regulator
+          businessName; cacRegNumber
+          inspectionRef; findings; passed; followUpNeeded; closingNote
+
+
+-- ─── M-RI: Inspection Record ──────────────────────────────────────────────────
+-- Immutable outcome of a completed regulatory inspection.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template InspectionRecord
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    inspectionRef        : Text
+    findings             : [Text]
+    passed               : Bool
+    followUpNeeded       : Bool
+    closingNote          : Text
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure closingNote /= ""
+
+
+-- ─── M-MK: Pending Collateral Enforcement ─────────────────────────────────────
+-- Maker-checker gate for EnforceCollateral. FI proposes via ProposeEnforceCollateral;
+-- vetify confirms (ConfirmEnforce) or rejects (RejectEnforce).
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template PendingCollateralEnforcement
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    reason               : Text
+    gsmExhausted         : Bool          -- H-5: FI attests GSM was attempted before Rahn enforcement
+    gsmRef               : Optional Text -- H-5: GSM reference for audit trail
+    proposedByOfficerId  : Text          -- RBAC: RecoveryOfficer who proposed enforcement
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure reason /= ""
+
+    choice ConfirmEnforce : ContractId RahnAgreement
+      with
+        rahnCid              : ContractId RahnAgreement
+        confirmedByOfficerId : Text  -- RBAC: RiskOfficer confirming, must differ from proposer
+      controller vetify
+      do
+        exercise rahnCid EnforceCollateral with
+          reason
+          proposedByOfficerId
+          confirmedByOfficerId
+
+    choice RejectEnforce : ()
+      controller vetify
+      do return ()
+
+
+-- ─── M-AT: Audit Event ────────────────────────────────────────────────────────
+-- Chronological on-ledger audit log entry for significant lifecycle events.
+-- Created by vetify or agents; supplements PQS event history for regulatory review.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template AuditEvent
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    eventType            : Text   -- "PAYMENT_RECORDED", "CONTRACT_DEFAULTED", "COLLATERAL_ENFORCED", etc.
+    description          : Text
+    actedBy              : Text
+    occurredAt           : Time
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure description /= "" && eventType /= "" && actedBy /= ""
+
+
+-- ─── M-GP: Moratorium Record ──────────────────────────────────────────────────
+-- Immutable evidence of a granted payment moratorium.
+-- Created via GrantMoratorium on MurabahahContract.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template MoratoriumRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    moratoriumEnd        : Date
+    reason               : Text
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure reason /= ""
+
+
+-- ─── M-IF / BD-4: Ibra' Rebate Proposal ─────────────────────────────────────
+-- Advisory rebate calculation produced by the FI's financing team (BD-4: not vetify).
+-- Created via ProposeRebate on IbraRequest. FI is NOT obligated to follow.
+-- AAOIFI Std No. 8, §6/1: rebate is at FI's absolute discretion; cannot be pre-agreed.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template IbraRebateProposal
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    outstandingBalance   : Decimal
+    suggestedRebate      : Decimal
+    rationale            : Text
+    settlementType       : IbraSettlementType
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure suggestedRebate >= 0.0 && outstandingBalance > 0.0 && rationale /= ""
+
+
+-- ─── B-4: Ibra' Grant Records ─────────────────────────────────────────────────
+-- Immutable on-ledger evidence of the FI's decision to grant an Ibra' rebate.
+-- AAOIFI Std No. 8, §6/1: Ibra' is at FI's absolute discretion; cannot be pre-agreed.
+
+-- Full Ibra' grant: FI waives part of the remaining profit for early full settlement.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template IbraGrantRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    facilityRef          : Text    -- C-1: links to MurabahahContract key
+    businessName         : Text
+    cacRegNumber         : Text
+    outstandingBalance   : Decimal
+    rebateAmount         : Decimal
+    effectiveDate        : Date
+    grantedAt            : Time
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure rebateAmount >= 0.0 && rebateAmount <= outstandingBalance
+
+
+-- Partial Ibra' grant: FI approves a reduced settlement amount with a stated rebate.
+-- Signed by: financialInstitution  |  Observer: vetify, borrower
+template PartialIbraGrant
+  with
+    financialInstitution     : Party
+    vetify                   : Party
+    borrower                 : Party
+    facilityRef              : Text    -- C-1: links to MurabahahContract key
+    businessName             : Text
+    cacRegNumber             : Text
+    outstandingBalance       : Decimal
+    rebateAmount             : Decimal
+    approvedSettlementAmount : Decimal
+    effectiveDate            : Date
+    grantedAt                : Time
+  where
+    signatory financialInstitution
+    observer vetify, borrower
+    ensure approvedSettlementAmount > 0.0
+        && approvedSettlementAmount < outstandingBalance
+        && rebateAmount >= 0.0
+
+
+-- Immutable evidence that the FI declined a borrower's Ibra' (early settlement
+-- rebate) request. Previously DeclineIbra was a bare stub with no reason and
+-- no record; this closes that correctness gap the same way every other
+-- decline path in this module does (ProposalDeclineRecord, RestructuringRejectionRecord).
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template IbraDeclineRecord
+  with
+    financialInstitution : Party
+    vetify                : Party
+    borrower              : Party
+    facilityRef           : Text
+    businessName          : Text
+    cacRegNumber          : Text
+    outstandingBalance    : Decimal
+    reason                : Text
+    declinedAt            : Time
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure reason /= ""
+
+
+-- ─── B-2: Guarantee Agreement ─────────────────────────────────────────────────
+-- Personal or corporate guarantee from a business director or third party.
+-- Universal in SME Murabahah: covers shortfalls when collateral is insufficient.
+-- Signed by: guarantor, financialInstitution  |  Observer: vetify
+template GuaranteeAgreement
+  with
+    guarantor            : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    guaranteeType        : Text     -- "PERSONAL", "CORPORATE", "THIRD_PARTY"
+    guaranteedAmount     : Decimal
+    guarantorName        : Text     -- legal name (guarantor is the ledger party; name for docs)
+    guarantorId          : Text     -- NIN, passport number, or company reg
+    effectiveDate        : Date
+    expiryDate           : Optional Date
+    guaranteeStatus      : GuaranteeStatus
+  where
+    signatory guarantor, financialInstitution
+    observer vetify
+    ensure guaranteedAmount > 0.0
+        && guaranteeType /= ""
+        && guarantorName /= ""
+        && guarantorId /= ""
+
+    -- FI enforces the guarantee after default — triggers the guarantor's obligation.
+    choice EnforceGuarantee : ContractId GuaranteeAgreement
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only enforce an Active guarantee" (guaranteeStatus == GuaranteeActive)
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with guaranteeStatus = GuaranteeEnforced
+
+    -- FI releases the guarantee on full repayment or write-off closure.
+    choice ReleaseGuarantee : ContractId GuaranteeAgreement
+      with note : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only release an Active guarantee" (guaranteeStatus == GuaranteeActive)
+        assertMsg "Release note must not be empty" (note /= "")
+        create this with guaranteeStatus = GuaranteeReleased
+
+-- ─── D-1: Wa'd Withdrawal Record ──────────────────────────────────────────────
+-- Immutable audit record created when a borrower withdraws a MurabahahWad.
+template WadWithdrawalRecord
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    reason               : Text
+    withdrawnAt          : Time
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+    ensure reason /= ""
+
+-- ─── D-2: Proposal Decline Record ─────────────────────────────────────────────
+-- Immutable audit record created when a borrower declines a MurabahahProposal.
+template ProposalDeclineRecord
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    reason               : Text
+    declinedAt           : Time
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+    ensure reason /= ""
+
+-- ─── D-3: Agency Withdrawal Record ────────────────────────────────────────────
+-- Immutable audit record created when a borrower declines the Wakala appointment.
+template AgencyWithdrawalRecord
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    reason               : Text
+    declinedAt           : Time
+  where
+    signatory borrower
+    observer financialInstitution, vetify
+    ensure reason /= ""
+
+-- ─── D-4: Restructuring Rejection Record ──────────────────────────────────────
+-- Immutable audit record created when a FI rejects a RestructuringRequest.
+template RestructuringRejectionRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    reason               : Text
+    rejectedAt           : Time
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure reason /= ""
+
+
+-- ─── H-2: Direct Debit Mandate ───────────────────────────────────────────────
+-- Bilateral bilateral record of borrower's authorisation for automated installment
+-- collection via mono.co Direct Debit AND their GSM consent in a single instrument.
+-- Created at Stage 8 alongside or after AcceptProposal.
+-- Signed by: borrower, financialInstitution  |  Observer: vetify
+template DirectDebitMandate
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    monoMandateRef       : Text           -- mono.co mandate ID from create_direct_debit_mandate
+    accountRef           : Text           -- borrower's NUBAN (repayment account)
+    bankName             : Text
+    maxCollectionAmount  : Decimal        -- per-installment cap (>= installmentAmount)
+    frequency            : Text           -- "MONTHLY"
+    mandateStartDate     : Date
+    mandateEndDate       : Optional Date  -- mirrors facility tenure end date
+    gsmConsentGiven      : Bool           -- True = borrower consents to cross-bank CBN/NIBSS sweep
+    gsmConsentDate       : Optional Date  -- date GSM consent was recorded with CBN/NIBSS
+    status               : DirectDebitStatus
+  where
+    signatory borrower, financialInstitution
+    observer vetify
+    ensure monoMandateRef /= "" && maxCollectionAmount > 0.0 && accountRef /= ""
+
+    choice SuspendMandate : ContractId DirectDebitMandate
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only suspend an Active mandate" (status == MandateActive)
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with status = MandateSuspended
+
+    choice ReinstateMandate : ContractId DirectDebitMandate
+      controller financialInstitution
+      do
+        assertMsg "Can only reinstate a Suspended mandate" (status == MandateSuspended)
+        create this with status = MandateActive
+
+    choice CancelMandate : ContractId DirectDebitMandate
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with status = MandateCancelled
+
+
+-- ─── H-3: GSM Invocation ─────────────────────────────────────────────────────
+-- Audit and coordination record created by FI after DefaultContract +
+-- IssueDemandNotice deadline has passed and gsmConsentGiven = True.
+-- Does NOT hold an independent balance — all balance changes route through
+-- RecordRecoveryPayment on MurabahahContract.
+-- Signed by: financialInstitution  |  Observer: vetify (+ optional regulator)
+template GSMInvocation
+  with
+    financialInstitution : Party
+    vetify               : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    borrowerBvn          : Text           -- BVN submitted to CBN/NIBSS via mono.co
+    invokedAmount        : Decimal        -- outstanding balance at time of invocation
+    monoGsmRef           : Text           -- mono.co / NIBSS reference
+    invokedAt            : Time
+    status               : GSMStatus
+    lastSweepRef         : Optional Text  -- NIBSS reference of the most recent sweep
+  where
+    signatory financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+    ensure monoGsmRef /= "" && invokedAmount > 0.0 && borrowerBvn /= ""
+
+    -- Each NIBSS sweep routes recovery through MurabahahContract (single source of truth).
+    -- contractCid passed explicitly — Daml choices cannot reference self CID.
+    choice RecordGSMSweep
+        : (ContractId GSMInvocation, ContractId MurabahahContract, ContractId RecoveryPaymentRecord)
+      with
+        contractCid   : ContractId MurabahahContract
+        sweepAmount   : Decimal
+        sweepDate     : Date
+        nibssSweepRef : Text
+      controller financialInstitution
+      do
+        assertMsg "NIBSS reference must not be empty" (nibssSweepRef /= "")
+        assertMsg "Sweep amount must be positive" (sweepAmount > 0.0)
+        (updatedContract, recoveryRecord) <-
+          exercise contractCid RecordRecoveryPayment with
+            amountRecovered = sweepAmount
+            recoveryDate    = sweepDate
+            recoverySource  = "GSM_NIBSS"
+        updatedGsm <- create this with
+          lastSweepRef = Some nibssSweepRef
+          status       = GSMActive
+        return (updatedGsm, updatedContract, recoveryRecord)
+
+    choice CancelGSM : ContractId GSMInvocation
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with status = GSMCancelled
+
+
+-- ─── H-4: Direct Debit Collection Attempt ────────────────────────────────────
+-- Immutable record of each mono.co collection attempt. Provides the Monitoring
+-- Agent with retry history and an audit trail for failed collections.
+-- Signed by: financialInstitution  |  Observer: vetify
+template DirectDebitCollectionAttempt
+  with
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    monoCollectionRef    : Text     -- mono.co collection reference
+    installmentNo        : Int
+    attemptedAmount      : Decimal
+    attemptDate          : Date
+    succeeded            : Bool
+    failureReason        : Optional Text   -- mono.co failure code, e.g. "INSUFFICIENT_FUNDS"
+    retryCount           : Int
+  where
+    signatory financialInstitution
+    observer vetify
+    ensure attemptedAmount > 0.0 && monoCollectionRef /= ""
+
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BATCH F — OPTIONAL PRODUCT FEATURES
+-- All templates below are conditional lifecycle additions. None are required
+-- steps in the standard Murabahah flow. FIs opt in per their product policy.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ─── F-1: HamishJiddiyyah (Security Deposit) ─────────────────────────────
+-- AAOIFI Std No. 8, §2/3: FI *may* require a deposit before executing the
+-- Wa'd to cover actual losses if the borrower withdraws. BD-3: this is
+-- FI-discretionary and never a required lifecycle step.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template HamishJiddiyyah
+  with
+    borrower             : Party
+    financialInstitution : Party
+    vetify               : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text          -- links to the associated MurabahahContract key
+    depositAmount        : Decimal
+    depositRef           : Text          -- bank transfer or receipt reference
+    depositDate          : Date
+    returnDeadline       : Date          -- if Wa'd proceeds, FI must return deposit by this date
+    actualLossDeducted   : Optional Decimal  -- set on forfeiture — must be <= depositAmount
+    status               : HamishStatus
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure depositAmount > 0.0 && depositRef /= ""
+
+    -- FI returns the full deposit after the Wa'd proceeds and the asset is delivered.
+    choice ReturnDeposit : ContractId HamishJiddiyyah
+      with transferRef : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only return a Held deposit" (status == HamishHeld)
+        assertMsg "Transfer reference must not be empty" (transferRef /= "")
+        create this with status = HamishReturned
+
+    -- FI forfeits the deposit (partially or fully) when the borrower withdraws the Wa'd
+    -- causing the FI actual losses. AAOIFI §2/3: only actual losses may be retained.
+    choice ForfeitDeposit : ContractId HamishJiddiyyah
+      with
+        actualLoss : Decimal
+        reason     : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only forfeit a Held deposit" (status == HamishHeld)
+        assertMsg "Forfeited amount cannot exceed deposit" (actualLoss <= depositAmount)
+        assertMsg "Forfeited amount must be non-negative" (actualLoss >= 0.0)
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with
+          status             = HamishForfeited
+          actualLossDeducted = Some actualLoss
+
+
+-- ─── F-2: PurchaseOrder ───────────────────────────────────────────────────
+-- FI's formal binding instruction to the supplier. Issued after the FI
+-- decides to proceed (either via Wakala or direct purchase path).
+-- Provides an on-ledger audit record of the FI → supplier transaction.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify
+template PurchaseOrder
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    supplierName         : Text
+    supplierDetails      : SupplierDetails
+    orderedItems         : [AssetLineItem]
+    totalOrderValue      : Decimal
+    deliveryDeadline     : Date
+    poRef                : Text
+    issuedAt             : Time
+    status               : POStatus
+  where
+    signatory financialInstitution
+    observer borrower, vetify
+    ensure totalOrderValue > 0.0 && poRef /= "" && not (null orderedItems)
+
+    choice ConfirmPO : ContractId PurchaseOrder
+      with confirmationRef : Text
+      controller financialInstitution
+      do
+        assertMsg "Confirmation reference must not be empty" (confirmationRef /= "")
+        create this with status = POConfirmed
+
+    choice MarkPartiallyFulfilled : ContractId PurchaseOrder
+      with deliveryRef : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only mark Confirmed or Issued PO as partially fulfilled"
+          (status == POConfirmed || status == POIssued)
+        assertMsg "Delivery reference must not be empty" (deliveryRef /= "")
+        create this with status = POPartiallyFulfilled
+
+    choice MarkFulfilled : ContractId PurchaseOrder
+      with deliveryRef : Text
+      controller financialInstitution
+      do
+        assertMsg "PO must be Confirmed or PartiallyFulfilled to mark as Fulfilled"
+          (status == POConfirmed || status == POPartiallyFulfilled)
+        create this with status = POFulfilled
+
+    choice CancelPO : ContractId PurchaseOrder
+      with reason : Text
+      controller financialInstitution
+      do
+        assertMsg "Can only cancel an Issued or Confirmed PO"
+          (status == POIssued || status == POConfirmed)
+        assertMsg "Reason must not be empty" (reason /= "")
+        create this with status = POCancelled
+
+
+-- ─── F-3: CapitalCallRecord (Tranche Disbursement) ───────────────────────
+-- Immutable record of a single disbursement tranche for multi-draw facilities.
+-- Each tranche represents a partial release of the approved financing limit.
+-- Signed by: financialInstitution  |  Observer: borrower, vetify, regulator
+template CapitalCallRecord
+  with
+    financialInstitution : Party
+    vetify               : Party
+    borrower             : Party
+    regulator            : Optional Party
+    businessName         : Text
+    cacRegNumber         : Text
+    facilityRef          : Text
+    trancheNumber        : Int
+    trancheAmount        : Decimal
+    disbursementDate     : Date
+    purposeOfTranche     : Text
+    disbursementRef      : Text        -- FI's internal payment reference
+    cumulativeDisbursed  : Decimal     -- total disbursed including this tranche
+    remainingFacility    : Decimal     -- facility limit minus cumulativeDisbursed
+  where
+    signatory financialInstitution
+    observer [borrower, vetify] ++ optional [] pure regulator
+    ensure trancheAmount > 0.0 && disbursementRef /= "" && purposeOfTranche /= ""
+        && cumulativeDisbursed >= trancheAmount
+        && remainingFacility >= 0.0
+
+
+-- ─── F-4: ForceMajeureDeclaration ────────────────────────────────────────
+-- Portfolio-wide payment suspension for systemic events (pandemic, flood,
+-- regulatory directive). Allows vetify to declare a moratorium covering all
+-- active contracts in an affected region without amending each contract.
+-- FIs and (optionally) the regulator observe for compliance.
+-- Signed by: vetify  |  Observer: financialInstitution, regulator
+template ForceMajeureDeclaration
+  with
+    vetify               : Party
+    financialInstitution : Party
+    regulator            : Optional Party
+    declarationRef       : Text   -- internal vetify reference, e.g. "FMD-2026-CBN-001"
+    eventDescription     : Text   -- human-readable summary of the event
+    affectedRegion       : Text   -- e.g. "North-East Nigeria", "Nationwide"
+    suspensionStart      : Date
+    suspensionEnd        : Date
+    regulatoryBasis      : Text   -- e.g. "CBN Circular FPR/DIR/GEN/CIR/07/004"
+    isActive             : Bool
+  where
+    signatory vetify
+    observer [financialInstitution] ++ optional [] pure regulator
+    ensure suspensionEnd > suspensionStart && declarationRef /= "" && eventDescription /= ""
+
+    -- Vetify lifts the declaration once the force majeure event has passed.
+    choice LiftDeclaration : ContractId ForceMajeureDeclaration
+      with note : Text
+      controller vetify
+      do
+        assertMsg "Declaration has already been lifted" isActive
+        assertMsg "Lifting note must not be empty" (note /= "")
+        create this with isActive = False
+
+
+-- ─── F-5: CharityOrganizationRegistry (BD-6) ─────────────────────────────
+-- Each FI maintains its own Shariah board-approved Sadaqah beneficiary list.
+-- Vetify does NOT centralize this list — it is a credit governance decision.
+-- Used by ConfirmCharityPayment (optional) for on-ledger registry validation.
+-- Signed by: financialInstitution  |  Observer: vetify, regulator
+template CharityOrganizationRegistry
+  with
+    financialInstitution  : Party
+    vetify                : Party
+    regulator             : Optional Party
+    approvedOrganizations : [(Text, Text)]  -- (orgName, registrationRef)
+    shariahBoardRef       : Text            -- Shariah board resolution approving this list
+    effectiveDate         : Date
+    version               : Text
+  where
+    signatory financialInstitution
+    observer [vetify] ++ optional [] pure regulator
+    ensure not (null approvedOrganizations) && shariahBoardRef /= "" && version /= ""
+
+    -- FI updates the approved list when the Shariah board amends its resolution.
+    choice UpdateRegistry : ContractId CharityOrganizationRegistry
+      with
+        newOrganizations : [(Text, Text)]
+        newVersion       : Text
+        updatedBoardRef  : Text
+      controller financialInstitution
+      do
+        assertMsg "Updated list must not be empty" (not (null newOrganizations))
+        assertMsg "New version must not be empty" (newVersion /= "")
+        assertMsg "Updated board reference must not be empty" (updatedBoardRef /= "")
+        create this with
+          approvedOrganizations = newOrganizations
+          version               = newVersion
+          shariahBoardRef       = updatedBoardRef

@@ -1,0 +1,157 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #FAFAF9;
+    color: #111827;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+}
+
+@layer components {
+  /* Islamic geometric lattice sidebar pattern */
+  .sidebar-pattern {
+    background-color: #0A4A34;
+    background-image:
+      repeating-linear-gradient(45deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 1px, transparent 0, transparent 50%),
+      repeating-linear-gradient(-45deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 1px, transparent 0, transparent 50%);
+    background-size: 20px 20px;
+  }
+
+  /* Skeleton shimmer animation */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      #f0f0f0 25%,
+      #e0e0e0 37%,
+      #f0f0f0 63%
+    );
+    background-size: 400% 100%;
+    animation: shimmer 1.5s infinite;
+  }
+
+  /* Card styles */
+  .card {
+    @apply bg-white rounded-xl border border-gray-200;
+    box-shadow: 0 1px 4px 0 rgba(0,0,0,0.09), 0 1px 2px -1px rgba(0,0,0,0.06);
+  }
+
+  /* Input styles */
+  .input {
+    @apply w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900
+           placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary/20
+           focus:border-primary transition-colors duration-150;
+  }
+
+  .input-error {
+    @apply border-red-400 focus:ring-red-200 focus:border-red-400;
+  }
+
+  /* Button styles */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg
+           text-sm font-medium transition-all duration-150 focus:outline-none
+           focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+
+  .btn-primary {
+    @apply btn bg-primary text-white hover:bg-primary-600 focus:ring-primary/30
+           active:bg-primary-700;
+  }
+
+  .btn-secondary {
+    @apply btn bg-white text-gray-700 border border-gray-300 hover:bg-gray-50
+           focus:ring-gray-200 active:bg-gray-100;
+  }
+
+  .btn-danger {
+    @apply btn bg-red-600 text-white hover:bg-red-700 focus:ring-red-300
+           active:bg-red-800;
+  }
+
+  .btn-ghost {
+    @apply btn text-gray-600 hover:bg-gray-100 focus:ring-gray-200;
+  }
+
+  /* Table styles */
+  .table {
+    @apply w-full text-sm text-left;
+  }
+
+  .table thead {
+    @apply bg-gray-50 border-b border-gray-200;
+  }
+
+  .table th {
+    @apply px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider;
+  }
+
+  .table td {
+    @apply px-4 py-3 text-gray-700 border-b border-gray-100;
+  }
+
+  .table tbody tr {
+    @apply hover:bg-primary-50/50 transition-colors duration-100;
+  }
+
+  /* Progress bar */
+  .progress-bar {
+    @apply h-2 rounded-full bg-gray-200 overflow-hidden;
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full bg-primary transition-all duration-500;
+  }
+}
+
+@layer utilities {
+  .text-mono {
+    font-family: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  }
+
+  /* animation-fill-mode: forwards ensures opacity ends at 1, even in headless renderers */
+  .animate-fade-in {
+    animation: fadeIn 0.25s ease-out forwards;
+    opacity: 1; /* explicit fallback so element is visible if animation doesn't run */
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}

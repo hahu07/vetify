@@ -1,0 +1,67 @@
+# Vetify local development stack
+# Canton sandbox is started separately via: dpm sandbox --dar <dar> --json-api-port 7575
+# (runs on host ports 7575/6865)
+# This file adds PostgreSQL + PQS (Scribe) for read queries
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:14
+    container_name: vetify-postgres
+    environment:
+      POSTGRES_USER: vetify
+      POSTGRES_PASSWORD: vetify
+      POSTGRES_DB: vetify
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vetify"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── PQS (Scribe) ────────────────────────────────────────────────────────────
+  # Subscribes to Canton ledger transaction stream and mirrors contract data
+  # into PostgreSQL via the active() SQL function.
+  pqs:
+    image: europe-docker.pkg.dev/da-images/public/docker/scribe:3.5.1
+    container_name: vetify-pqs
+    command:
+      - "pipeline"
+      - "ledger"
+      - "postgres-document"
+    environment:
+      # Canton sandbox gRPC Ledger API — running on the host via `dpm sandbox`.
+      # Verified against a real sandbox: `dpm sandbox`'s Ledger API has no
+      # bind-address flag and listens on 127.0.0.1 only (confirmed via
+      # `ss -tlnp`), not 0.0.0.0 — host.docker.internal/extra_hosts cannot
+      # reach a host-only-bound port from a container on the bridge network
+      # (connection times out). Using `network_mode: host` below instead, so
+      # this container shares the host's network namespace directly.
+      SCRIBE_SOURCE_LEDGER_HOST: localhost
+      SCRIBE_SOURCE_LEDGER_PORT: "6865"
+      # No auth for local sandbox (dpm sandbox runs without auth by default).
+      # Verified against a real Scribe 0.6.11 container: only "NoAuth" or
+      # "OAuth" are accepted — "Unsafe" is rejected at startup with a format
+      # error ("--source-ledger-auth ... constant string 'NoAuth'/'OAuth'").
+      SCRIBE_SOURCE_LEDGER_AUTH: NoAuth
+      # PostgreSQL target — reached via the host-published port (below)
+      # rather than the "postgres" service name, since network_mode: host
+      # takes this container out of the compose bridge network entirely.
+      SCRIBE_TARGET_POSTGRES_HOST: localhost
+      SCRIBE_TARGET_POSTGRES_PORT: "5432"
+      SCRIBE_TARGET_POSTGRES_USERNAME: vetify
+      SCRIBE_TARGET_POSTGRES_PASSWORD: vetify
+      SCRIBE_TARGET_POSTGRES_DATABASE: vetify-pqs
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  postgres-data:

@@ -1,0 +1,353 @@
+-- | Shared test fixtures (sample records) for the Vetify test suites.
+module Vetify.Tests.Fixtures where
+
+import Daml.Script
+import DA.Date
+
+import Vetify.Types
+import Vetify.FinancingProvider
+
+sampleDirector : BusinessDirector
+sampleDirector = BusinessDirector with
+  name        = "Adebayo Okonkwo"
+  address     = "12 Ahmadu Bello Way, Victoria Island"
+  phoneNumber = "08012345678"
+  ninNumber   = "12345678901"   -- 11 digits (NIMC standard)
+  bvn         = "22345678901"   -- 11 digits (CBN standard)
+  email       = "adebayo@okonkwotrading.com"
+
+-- Second director used for multi-director tests and sole proprietorship with partner
+sampleDirector2 : BusinessDirector
+sampleDirector2 = BusinessDirector with
+  name        = "Chidinma Okonkwo"
+  address     = "12 Ahmadu Bello Way, Victoria Island"
+  phoneNumber = "08098765432"
+  ninNumber   = "98765432109"   -- 11 digits
+  bvn         = "33456789012"   -- 11 digits
+  email       = "chidinma@okonkwotrading.com"
+
+-- LimitedCompany: CAC prefix RC; CAMA 2020 s271(1) requires >= 1 director
+sampleProfile : BusinessProfile
+sampleProfile = BusinessProfile with
+  name              = "Okonkwo Trading Ltd"
+  address           = "12 Ahmadu Bello Way, Victoria Island"
+  state             = "Lagos"
+  phoneNumber       = "01-2345678"
+  email             = "info@okonkwotrading.com"
+  website           = Some "https://okonkwotrading.com"
+  businessType      = LimitedCompany
+  incorporationDate = date 2015 Mar 20
+  directors         = [sampleDirector]
+  businessActivity  = "Wholesale and retail trade in food products and general merchandise"
+  businessSector    = "Retail Trade"
+
+-- SoleProprietorship: CAC prefix BN; can have multiple proprietors listed
+sampleSoleProfile : BusinessProfile
+sampleSoleProfile = BusinessProfile with
+  name              = "Okonkwo General Supplies"
+  address           = "12 Ahmadu Bello Way, Victoria Island"
+  state             = "Lagos"
+  phoneNumber       = "08012345678"
+  email             = "info@okonkwosupplies.com"
+  website           = None
+  businessType      = SoleProprietorship
+  incorporationDate = date 2018 Jun 1
+  directors         = [sampleDirector, sampleDirector2]  -- partnership scenario
+  businessActivity  = "General merchandise trading and distribution"
+  businessSector    = "Retail Trade"
+
+-- SoleProprietorship KYC: BN prefix
+sampleSoleKyc : BusinessKyc
+sampleSoleKyc = BusinessKyc with
+  cacRegNumber = "BN123456"
+  taxId        = "TIN123456789"
+
+sampleCheckScores : VerificationCheckScores
+sampleCheckScores = VerificationCheckScores with
+  identityScore    = 91
+  cacScore         = 95
+  documentScore    = 88
+  consistencyScore = 85
+
+-- Matches the defaults baked into agents/src/scoring/verification.ts (SCORING_POLICY_VERSION).
+sampleVerificationScoringWeights : VerificationScoringWeights
+sampleVerificationScoringWeights = VerificationScoringWeights with
+  identityPerfect            = 40
+  identityDobMissing         = 30
+  identityDobMismatch        = 20
+  identityBvnNotFound        = 15
+  identityNinNotFound        = 0
+  cacActiveExactMatch        = 35
+  cacActiveCloseMatch        = 28
+  cacActiveNameMismatch      = 10
+  cacPending                 = 20
+  cacInactiveOrStruckOff     = 10
+  cacNotFound                = 0
+  tinVerifiedMatchesCac      = 25
+  tinVerifiedDifferentEntity = 10
+  tinNotFound                = 5
+  tinApiError                = 10
+
+-- Matches the defaults baked into agents/src/scoring/compliance.ts (SCORING_POLICY_VERSION).
+sampleComplianceScoringWeights : ComplianceScoringWeights
+sampleComplianceScoringWeights = ComplianceScoringWeights with
+  amlBothClear                      = 35
+  amlOneReviewRequired              = 15
+  kybActiveFullMatch                 = 30
+  kybActiveMinorDiscrepancy          = 20
+  kybInactiveOrMismatch              = 10
+  kybNotFound                        = 0
+  creditClean                        = 10
+  creditMinorResolved                = 7
+  creditDelinquentOrDefault          = 0
+  businessAgeEstablishedBonus        = 5
+  businessAgeNewlyRegisteredPenalty  = -5
+
+sampleUnderwritingScoringWeights : UnderwritingScoringWeights
+sampleUnderwritingScoringWeights = UnderwritingScoringWeights with
+  -- Cashflow Risk engine (max 100)
+  dscrHigh                = 40
+  dscrMedium              = 22
+  dscrLow                 = 0
+  debtObligationsLow      = 25
+  debtObligationsModerate = 12
+  debtObligationsHigh     = 0
+  cashReserveStrong       = 20
+  cashReserveAdequate     = 10
+  cashReserveWeak         = 0
+  stressTestPassAll       = 15
+  stressTestPassPartial   = 7
+  stressTestFail          = 0
+  -- Cashflow Risk band boundaries
+  dscrHighThreshold                = 1.5
+  dscrMediumThreshold              = 1.0
+  debtObligationsLowThreshold      = 0.15
+  debtObligationsModerateThreshold = 0.30
+  cashReserveStrongMonths          = 2.0
+  cashReserveAdequateMonths        = 1.0
+  stressTestHaircutMild            = 0.10
+  stressTestHaircutModerate        = 0.25
+  stressTestHaircutSevere          = 0.40
+  -- Financial Behaviour engine (max 100)
+  revenueConsistent       = 30
+  revenueModerate         = 15
+  revenueVolatile         = 0
+  businessAgeEstablished  = 25
+  businessAgeModerate     = 12
+  businessAgeNew          = 0
+  expenseDisciplineStrong   = 25
+  expenseDisciplineModerate = 12
+  expenseDisciplinePoor     = 0
+  liquidityStrong         = 20
+  liquidityAdequate       = 10
+  liquidityWeak           = 0
+  -- Financial Behaviour band boundaries
+  revenueConsistentThreshold         = 0.20
+  revenueModerateThreshold           = 0.40
+  businessAgeEstablishedMonths       = 24.0
+  businessAgeModerateMonths          = 12.0
+  expenseDisciplineStrongThreshold   = 0.70
+  expenseDisciplineModerateThreshold = 0.90
+  liquidityStrongMonths              = 2.0
+  liquidityAdequateMonths            = 1.0
+  -- Creditworthiness engine (max 100)
+  creditScoreExcellent    = 100
+  creditScoreGood         = 70
+  creditScoreFair         = 40
+  creditScorePoor         = 0
+  -- Creditworthiness band boundaries
+  creditScoreExcellentThreshold = 700
+  creditScoreGoodThreshold      = 650
+  creditScoreFairThreshold      = 550
+  -- Fraud Detection engine (deduction points from a 100 baseline)
+  fraudStructuringPenalty     = 40
+  fraudRoundTrippingPenalty   = 30
+  fraudIncomeSpikePenalty     = 20
+  fraudVelocityAnomalyPenalty = 20
+  -- Final Decision engine — must sum to 100
+  financialBehaviourEngineWeight = 30
+  cashflowRiskEngineWeight        = 35
+  creditworthinessEngineWeight    = 20
+  fraudDetectionEngineWeight      = 15
+  fraudReviewThreshold            = 30
+
+sampleKyc : BusinessKyc
+sampleKyc = BusinessKyc with
+  cacRegNumber = "RC123456"
+  taxId        = "TIN987654321"
+
+passingVerification : VerificationChecks
+passingVerification = VerificationChecks with
+  identityVerified = True
+  cacRegistered    = True
+  documentsValid   = True
+  dataConsistent   = True
+
+passingCompliance : ComplianceCheck
+passingCompliance = ComplianceCheck with
+  shariahCompliant = True
+  amlCleared       = True
+  kycValidated     = True
+  cddCompleted     = True
+
+sampleFinancingTerms : FinancingTerms
+sampleFinancingTerms = FinancingTerms with
+  amount       = 2_000_000.0
+  purpose      = "Purchase of bakery inventory"
+  tenureMonths = 12
+
+sampleAssessment : RiskAssessment
+sampleAssessment = RiskAssessment with
+  score            = 82
+  riskCategory     = Low
+  recommendedLimit = 2_500_000.0
+  recommendation   = "DSCR 1.8 — within policy. Recommend approval."
+  probabilityOfDefault = Some 0.05
+  lossGivenDefault      = Some 0.35
+  exposureAtDefault     = Some 2_500_000.0
+  behaviouralScore      = Some 78
+  cashflowRiskScore     = Some 85
+  creditworthinessScore = Some 72
+  fraudScore            = Some 5
+
+-- assetCost 2,000,000 + profit 300,000 = salePrice 2,300,000
+-- profit rate 15% p.a.; effectiveRate omitted (None) until ancillary costs are factored
+sampleMurabahahTerms : MurabahahTerms
+sampleMurabahahTerms = MurabahahTerms with
+  assetCost         = 2_000_000.0
+  profitAmount      = 300_000.0
+  salePrice         = 2_300_000.0
+  installmentAmount = 191_666.67
+  tenureMonths      = 12
+  profitRate        = Some 0.15
+  effectiveRate     = None
+
+sampleAssetDetails : AssetDetails
+sampleAssetDetails = AssetDetails with
+  description   = "Industrial flour mill — 50MT capacity, Bühler AG Model MDDP"
+  supplier      = "Lagos Mill Supplies Ltd"
+  supplierRef   = "LMS-INV-2026-00441"
+  estimatedCost = 2_000_000.0
+
+sampleDocRef : DocumentRef
+sampleDocRef = DocumentRef with
+  docType            = "CAC_CERTIFICATE"
+  contentHash        = "sha256:a3f2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+  storageRef         = "s3://vetify-docs/RC123456/cac-cert.pdf"
+  mimeType           = Some "application/pdf"
+  malwareScanStatus  = Some "CLEAN"
+  fileSize           = Some 204800        -- 200 KB
+  checksumAlgorithm  = Some "sha256"
+  malwareScanAt      = None
+  digitalSignature   = None  -- M14
+  signatureAlgorithm = None  -- M14
+  signatoryRef       = None  -- M14
+  signedAt           = None  -- M14
+
+sampleAIMetadata : AIDecisionMetadata
+sampleAIMetadata = AIDecisionMetadata with
+  agentName    = "vetify-verification"
+  modelVersion = "vetify-verification-v1.0"
+  executionId  = "trace-2026-0001-abc123"
+  reasonCode   = "LOW_RISK_AUTO_APPROVE"
+  confidence   = 0.92
+  explanation  = Some "NIN/BVN identity match 91%; CAC registry confirmed; all documents authenticated; data cross-source consistent"
+  inputFeatures = ["nin_bvn_match_score", "cac_registry_status", "document_authenticity_score", "cross_source_consistency"]
+
+sampleComplianceAIMetadata : AIDecisionMetadata
+sampleComplianceAIMetadata = AIDecisionMetadata with
+  agentName    = "vetify-compliance"
+  modelVersion = "vetify-compliance-v1.0"
+  executionId  = "trace-2026-comp-0001-abc123"
+  reasonCode   = "LOW_RISK_AUTO_APPROVE"
+  confidence   = 0.89
+  explanation  = Some "AML cleared; KYB verified; CDD completed; Shariah compliant business activity"
+  inputFeatures = ["aml_screening_result", "kyb_verification_status", "cdd_score", "shariah_verdict"]
+
+sampleAmlEvidence : AmlEvidenceRefs
+sampleAmlEvidence = AmlEvidenceRefs with
+  amlScreeningRef      = Some "YOUVERIFY-AML-2026-000001"
+  sanctionsCheckRef    = Some "SANCTIONS-2026-000001"
+  pepCheckRef          = Some "PEP-2026-000001"
+  adverseMediaRef      = Some "MEDIA-2026-000001"
+  shariahScreeningRef  = Some "SHARIAH-TRACE-2026-000001"
+  sanctionsListVersion = Some "OFAC-SDN-20260601"
+  sanctionsListDate    = Some (date 2026 Jun 1)
+  apiResponseHash      = Some "sha256:b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3"  -- Gap 29
+  beneficialOwnershipRef = Some "UBO-2026-000001"
+  sourceOfFundsRef        = Some "SOF-2026-000001"
+  amlRiskScore             = Some 12
+
+-- Gap 27: sample Shariah Agent output for compliance tests.
+sampleShariahAssessment : ShariahAssessment
+sampleShariahAssessment = ShariahAssessment with
+  verdict              = "COMPLIANT"
+  activitiesScreened   = ["Wholesale and retail trade in food products", "General merchandise"]
+  prohibitedRevenuePct = None
+  aaoifiStandards      = ["Std No. 8", "Std No. 28"]
+  scholarDecision      = None
+  rationale            = "Business activity is wholesale trade in permissible food commodities. No prohibited revenue streams identified. Murabahah structure is applicable."
+  screenedAt           = None   -- set to Some t in tests where time is available
+  agentRef             = Some "SHARIAH-TRACE-2026-000001"
+
+-- 12-month schedule starting Jul 2026; last installment adjusted for rounding.
+-- 11 × 191,666.67 + 191,666.63 = 2,300,000.00 exactly.
+-- principalComponent / profitComponent are None here; set explicitly when required by tests.
+samplePaymentSchedule : [PaymentScheduleEntry]
+samplePaymentSchedule =
+  [ PaymentScheduleEntry with installmentNo = 1,  dueDate = date 2026 Jul 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 2,  dueDate = date 2026 Aug 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 3,  dueDate = date 2026 Sep 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 4,  dueDate = date 2026 Oct 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 5,  dueDate = date 2026 Nov 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 6,  dueDate = date 2026 Dec 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 7,  dueDate = date 2027 Jan 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 8,  dueDate = date 2027 Feb 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 9,  dueDate = date 2027 Mar 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 10, dueDate = date 2027 Apr 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 11, dueDate = date 2027 May 1,  dueAmount = 191_666.67; principalComponent = None; profitComponent = None
+  , PaymentScheduleEntry with installmentNo = 12, dueDate = date 2027 Jun 1,  dueAmount = 191_666.63; principalComponent = None; profitComponent = None
+  ]
+
+-- ─── Financing Provider Fixtures ─────────────────────────────────────────────
+
+sampleGoverningDocRef : DocumentRef
+sampleGoverningDocRef = DocumentRef with
+  docType            = "CBN_NIFI_LICENSE"
+  contentHash        = "sha256:c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2"
+  storageRef         = "s3://vetify-docs/providers/NIFI-2024-001/cbn-license.pdf"
+  mimeType           = Some "application/pdf"
+  malwareScanStatus  = Some "CLEAN"
+  fileSize           = Some 512000
+  checksumAlgorithm  = Some "sha256"
+  malwareScanAt      = None
+  digitalSignature   = None
+  signatureAlgorithm = None
+  signatoryRef       = None
+  signedAt           = None
+
+-- Script helper: creates a FinancingProviderOnboarding, submits it, and has
+-- Vetify approve it with Murabahah + Ijarah instruments. Returns the
+-- ContractId ApprovedProvider for use in ApproveFunding calls.
+setupApprovedProvider : Party -> Party -> Script (ContractId ApprovedProvider)
+setupApprovedProvider fi vetifyP = do
+  onbCid <- submit fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = fi
+      vetify               = vetifyP
+      providerName         = "Wema Islamic Finance Ltd"
+      address              = "22 Marina, Lagos Island, Lagos"
+      providerType         = CBNLicensedNIFI
+      regulatoryBody       = Some CBN
+      licenseNumber        = Some "NIFI-2024-001"
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = [Murabahah, Ijarah, QardHasan]
+      status               = Draft
+      submittedAt          = None
+      amendmentCount       = 0
+  submitted <- submit fi do
+    exerciseCmd onbCid SubmitProviderForReview
+  submit vetifyP do
+    exerciseCmd submitted ApproveProvider with
+      approvedInstruments = [Murabahah, Ijarah]
+      regulator           = None

@@ -1,0 +1,74 @@
+-- | One-time / re-runnable seed script: registers the Risk & Credit
+-- Governance Committee members named in docs/risk-governance-charter.md §3
+-- as PolicyApprover entries, so ApprovePolicyChange's Layer 1 registry gate
+-- (docs/deferred-gaps.md "Policy-Approval Security Roadmap") has real
+-- registrants to check against — the registry does nothing until populated.
+--
+-- The names below are the illustrative placeholders currently in the
+-- charter. Replace them with real Committee members before running this
+-- against anything beyond a local dev sandbox.
+--
+-- Run against a live ledger with:
+--   dpm script --dar .daml/dist/vetify-0.3.0.dar \
+--     --script-name Vetify.Scripts.SeedPolicyApprovers:seedPolicyApprovers \
+--     --ledger-host <host> --ledger-port <port>
+module Vetify.Scripts.SeedPolicyApprovers where
+
+import Daml.Script
+import Vetify.Governance
+import qualified DA.Text
+
+-- Reusable entry point: pass the real `vetify` party for your target ledger.
+seedPolicyApprovers : Party -> Script [ContractId PolicyApprover]
+seedPolicyApprovers vetify = do
+  t <- getTime
+  chair <- submit vetify do
+    createCmd PolicyApprover with
+      vetify
+      approverName = "Bob Adeyemi"
+      role         = "Chair — Head of Risk"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  independent <- submit vetify do
+    createCmd PolicyApprover with
+      vetify
+      approverName = "Aisha Bello"
+      role         = "Independent Committee Member"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  shariahRep <- submit vetify do
+    createCmd PolicyApprover with
+      vetify
+      approverName = "Imam Yusuf Abdullahi"
+      role         = "Shariah Advisory Representative"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pure [chair, independent, shariahRep]
+
+-- Convenience wrapper for a *fresh local dev sandbox only* — allocates a new
+-- "Vetify" party and seeds under it. A real deployment already has a stable
+-- vetify Party; call seedPolicyApprovers directly with that Party instead of
+-- using this wrapper (it will not do the right thing against a ledger where
+-- vetify already exists — allocating a second party isn't the same one).
+main : Script ()
+main = do
+  vetify <- allocatePartyByHint (PartyIdHint "Vetify")
+  _ <- seedPolicyApprovers vetify
+  pure ()
+
+-- Ops utility: list currently-registered PolicyApprover entries for whichever
+-- party was allocated with hint "Vetify" by `main` above (dev-sandbox
+-- convenience only — against a real ledger, query using the actual vetify
+-- Party directly instead of hint-matching).
+verify : Script ()
+verify = do
+  parties <- listKnownParties
+  let matches = filter (\d -> DA.Text.isPrefixOf "Vetify::" (partyToText d.party)) parties
+  case matches of
+    [] -> debug "No party matching \"Vetify::*\" found on this ledger."
+    (d :: _) -> do
+      approvers <- query @PolicyApprover d.party
+      debug approvers
