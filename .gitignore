@@ -1,6 +1,10 @@
 # ─── Daml build artefacts ────────────────────────────────────────────────────
 .daml/
 *.dar
+# Exception: archived baseline DARs the SCU upgrade-check gate (ci.yml,
+# docs/daml-upgrade-lineage.md) diffs each new version against — these are
+# deliberately committed, not build output to discard.
+!docs/dar-archive/*.dar
 
 # ─── Node.js ─────────────────────────────────────────────────────────────────
 node_modules/
@@ -50,6 +54,21 @@ coverage/
 
 # ─── Docker volumes / postgres data ──────────────────────────────────────────
 infra/postgres/data/
+
+# ─── Locally-stored KYC/onboarding document uploads (routes/documents.ts) ────
+backend/uploads/
+
+# ─── Local backup output (infra/scripts/backup-*.sh) ─────────────────────────
+# Dumps contain password hashes and the full audit log — never commit them.
+infra/backups/*
+!infra/backups/.gitkeep
+
+# ─── Docs (working notes, not shipped) ───────────────────────────────────────
+# `docs/*` (not `docs/`) so the dar-archive re-include below actually works —
+# once a parent directory itself is excluded, Git won't descend into it to
+# apply nested negations, even to re-include the directory itself.
+docs/*
+!docs/dar-archive
 
 # ─── Misc ────────────────────────────────────────────────────────────────────
 *.pem

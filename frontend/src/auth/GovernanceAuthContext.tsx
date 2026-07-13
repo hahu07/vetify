@@ -1,6 +1,10 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from 'react'
 import axios from 'axios'
 
+// See ../auth/AuthContext.tsx's identical comment: this file's
+// useGovernanceAuth() hook lives alongside its Provider deliberately.
+/* eslint-disable react-refresh/only-export-components */
+
 /**
  * Layer 3 of the Policy-Approval Security Roadmap: a real human login for
  * governance-critical actions (endorse/approve/reject a scoring-policy

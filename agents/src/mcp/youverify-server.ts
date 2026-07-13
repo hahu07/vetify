@@ -20,18 +20,21 @@ const API_KEY = process.env.YOUVERIFY_API_KEY ?? "";
 
 const HEADERS = { token: API_KEY, "Content-Type": "application/json" };
 
+const FETCH_TIMEOUT_MS = 30_000; // G9: a hung provider call must not hang the tool/agent
+
 async function yvPost(path: string, body: unknown): Promise<unknown> {
   const res = await fetch(`${BASE_URL}${path}`, {
     method: "POST",
     headers: HEADERS,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`Youverify error: ${res.status} ${await res.text()}`);
   return res.json();
 }
 
 async function yvGet(path: string): Promise<unknown> {
-  const res = await fetch(`${BASE_URL}${path}`, { headers: HEADERS });
+  const res = await fetch(`${BASE_URL}${path}`, { headers: HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`Youverify error: ${res.status} ${await res.text()}`);
   return res.json();
 }

@@ -1,0 +1,7 @@
+# Daml multi-package workspace (created with the vetify/vetify-tests split,
+# review gap G10a): lets the Daml IDE and `dpm build --all` see both packages
+# and their build-order dependency (vetify-tests data-depends on the main
+# vetify DAR).
+packages:
+  - .
+  - daml-tests

@@ -1,46 +1,35 @@
 import "dotenv/config";
-import express from "express";
-import cors from "cors";
-import onboardingRoutes from "./routes/onboarding.js";
-import financingRoutes from "./routes/financing.js";
-import contractRoutes from "./routes/contracts.js";
-import policyRoutes from "./routes/policy.js";
-import providerRoutes from "./routes/providers.js";
-import authRoutes from "./routes/auth.js";
-import webhookRoutes from "./routes/webhooks.js";
-import { errorHandler } from "./middleware/errorHandler.js";
+import { buildApp } from "./app.js";
+import { validateBackendConfig } from "./config.js";
+import { logger } from "./logger.js";
+import { listFinancerPartyRegistrations } from "./appdb.js";
+import { registerDynamicParty, fiPartyKey } from "./canton.js";
+import { startNotificationPoller } from "./notifications.js";
 
-const app  = express();
+// Fail fast in production, warn loudly in dev (review gap G7).
+validateBackendConfig();
+
 const PORT = parseInt(process.env.PORT ?? "3000", 10);
 
-app.use(cors({ origin: process.env.CORS_ORIGIN ?? "http://localhost:5173" }));
-app.use(express.json());
+// Replay every self-serve-signed-up financer's dynamically-allocated Canton
+// party into canton.ts's in-memory registry — that registry isn't persisted
+// anywhere else, so without this a restart would strand every previously
+// signed-up FI with no resolvable party until they re-signed up.
+async function restoreDynamicParties(): Promise<void> {
+  const registrations = await listFinancerPartyRegistrations();
+  for (const { id, cantonPartyId, cantonPartyJwt } of registrations) {
+    registerDynamicParty(fiPartyKey(id), cantonPartyId, cantonPartyJwt ?? "");
+  }
+  if (registrations.length > 0) {
+    logger.info({ count: registrations.length }, "Restored dynamically-allocated financer Canton parties");
+  }
+}
 
-app.get("/health", (_req, res) => res.json({ status: "ok" }));
-
-// Stages 1–4: Onboarding → Verification → Compliance → Approved Borrower
-app.use("/api/onboarding", onboardingRoutes);
-
-// Stages 5–7: Financing Request → Underwriting → FI Approval
-app.use("/api/financing", financingRoutes);
-
-// Stages 8–10: Murabahah Contract → Repayments → Closure + Portfolio Reports
-app.use("/api/contracts", contractRoutes);
-
-// Cross-cutting: scoring-policy propose/approve/reject + PolicyApprover registry
-app.use("/api/policy", policyRoutes);
-
-// Stage 0: Financing Provider onboarding + AuthorizedOfficer registry (gates ApproveFunding)
-app.use("/api/providers", providerRoutes);
-
-// Layer 3 of the Policy-Approval Security Roadmap: human login, session tokens
-app.use("/api/auth", authRoutes);
-
-// Inbound third-party webhooks (mono.co creditworthiness — see webhooks.ts)
-app.use("/api/webhooks", webhookRoutes);
-
-app.use(errorHandler);
-
-app.listen(PORT, () => {
-  console.log(`[Vetify API] Listening on http://localhost:${PORT}`);
-});
+restoreDynamicParties()
+  .catch((err) => logger.error({ err }, "Failed to restore dynamic financer parties — signed-up FIs may be unable to act until they re-signup"))
+  .finally(() => {
+    buildApp().listen(PORT, () => {
+      logger.info({ port: PORT }, `Vetify API listening on http://localhost:${PORT}`);
+    });
+    startNotificationPoller();
+  });

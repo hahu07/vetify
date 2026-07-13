@@ -9,43 +9,140 @@
  *   ComplianceReview   (Pending, shariahVerdict=None)      → Shariah Agent, then RecordShariahPreCheck
  *   ComplianceReview   (Pending, shariahVerdict=Some(...)) → Verifier Agent (Stage 3)
  *   FinancingRequest   (Submitted)                         → Underwriting Agent (Stage 6)
- *   MurabahahContract  (Active)                            → Monitoring Agent (Stage 9)
- *   Monthly schedule                                       → Reporting Agent (Ongoing)
+ *   MurabahahContract  (Active/Delinquent), daily          → Delinquency Monitor + Collections Agent (Stage 9)
+ *   ApprovedBusiness   (Active, stale), daily              → RequestRecertification (G14 rescreen scheduler)
+ *   Monthly (cursor = latest on-ledger PortfolioReport)    → Reporting Agent (Ongoing)
+ *
+ * Orchestration fixes from docs/platform-review-2026-07.md Phase 0 (G5a):
+ * - Every dispatch is individually try/caught — one contract's failure no
+ *   longer aborts every subsequent dispatch in the same tick.
+ * - Stage 9 runs as a DAILY sweep, not per-10s-tick: delinquency evidence
+ *   (bank transactions vs. installment schedule) changes on a daily cadence
+ *   at most, and the per-tick version was one full LLM evidence pass per
+ *   Active contract every 10 seconds — a pure cost/latency bug. The sweep
+ *   marker is in-memory; a restart re-runs at most one extra sweep that day,
+ *   which is harmless (every resulting decision is guarded by on-ledger
+ *   status transitions and scoreDelinquency no-ops when nothing changed).
+ * - The monthly report cursor is derived from the LEDGER (latest
+ *   PortfolioReport.reportDate), not from in-memory state — the previous
+ *   `lastReportTime = 0` module variable regenerated a report on every
+ *   process restart, minting duplicate regulatory reports.
  */
 import "dotenv/config";
-import { runVerifierVerificationStage, runVerifierComplianceStage } from "./verifier.js";
+import { runVerifierVerificationStage, runVerifierComplianceStage, runVerifierProviderStage } from "./verifier.js";
 import { runShariahAgent } from "./shariah.js";
 import { runUnderwritingAgent } from "./underwriting.js";
-import { runMonitoringAgent } from "./monitoring.js";
+import { runDelinquencyMonitor, runCollectionsAgent } from "./monitoring.js";
 import { runReportingAgent } from "./reporting.js";
-import { queryActiveContracts, exerciseLedgerChoice } from "../mcp/canton-client.js";
+import { queryActiveContracts, exerciseLedgerChoice, partyId } from "../mcp/canton-client.js";
+import { validateAgentsConfig } from "../config.js";
+import { logger } from "../logger.js";
 
-const FI_PARTY            = process.env.CANTON_FI_PARTY       ?? "financialInstitution";
-const REGULATOR_PARTY     = process.env.CANTON_REGULATOR_PARTY ?? "regulator";
+// Fail fast with the full list of missing/placeholder env values (G7) —
+// previously CANTON_FI_PARTY silently defaulted to the role name
+// "financialInstitution" and flowed into PortfolioReport's party-typed field.
+const config = validateAgentsConfig();
+
 const T_COMPLIANCE_REVIEW = "Vetify.Compliance:ComplianceReview";
+const T_PORTFOLIO_REPORT  = "Vetify.Reporting:PortfolioReport";
+const T_APPROVED_BUSINESS = "Vetify.Compliance:ApprovedBusiness";
 const POLL_INTERVAL_MS    = 10_000;
-const REPORT_INTERVAL_MS  = 30 * 24 * 60 * 60 * 1000; // 30 days
 
-let lastReportTime = 0;
+// G14 rescreen scheduler (Gaps 24/M-RS): no periodic AML/KYB rescreening of
+// already-approved businesses existed — a business could clear Stage 3 once,
+// years ago, and never be looked at again. Interval is deliberately generous
+// (CBN NIFI periodic-review norms, not a specific published number this
+// project can cite) — policy-configurable via env rather than hardcoded, same
+// treatment as RISK_THRESHOLD_AUTO_APPROVE/_REJECT.
+const RESCREEN_INTERVAL_DAYS = parseInt(process.env.RESCREEN_INTERVAL_DAYS ?? "180", 10);
+
+/** YYYY-MM-DD of the last completed Stage 9 sweep (in-memory by design — see header). */
+let lastMonitoringSweepDate = "";
+/** YYYY-MM-DD of the last completed rescreen sweep (in-memory — see header; a
+ * restart re-checks the same day at most once more, harmless since a business
+ * already past due for recertification stays past due). */
+let lastRescreenSweepDate = "";
 
 async function queryContracts(templateId: string): Promise<Array<{ contractId: string; payload: unknown }>> {
   return queryActiveContracts(templateId, "vetify");
 }
 
-// RecordShariahPreCheck is controller vetify, and ComplianceReview's signatory is already
-// vetify, so this is a plain vetify-authorized exercise — no other party's JWT is needed.
+// RecordShariahPreCheck is dual-controller [advisor, vetify]: advisor
+// (a genuinely independent party, like riskCommittee — not "vetify's own team")
+// makes the real call; vetify co-signs so `create this` is authorized
+// (ComplianceReview's own signatory is vetify alone). Gated by
+// requireActiveAdvisor on the Daml side.
+//
+// No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2, so RecordShariahPreCheck can no
+// longer resolve the AuthorizedAdvisor registry entry itself via lookupByKey — this
+// resolves it off-ledger first and passes the ContractId in explicitly.
 async function recordShariahPreCheck(contractId: string, verdict: unknown): Promise<void> {
-  await exerciseLedgerChoice(T_COMPLIANCE_REVIEW, contractId, "RecordShariahPreCheck", { verdict }, "vetify");
+  const advisors = await queryActiveContracts("Vetify.Governance:AuthorizedAdvisor", "vetify");
+  const advisorParty = partyId("advisor");
+  const advisorCid = advisors.find((a) => (a.payload as { advisor?: string }).advisor === advisorParty)?.contractId;
+  if (!advisorCid) throw new Error("advisor is not a registered AuthorizedAdvisor");
+  await exerciseLedgerChoice(T_COMPLIANCE_REVIEW, contractId, "RecordShariahPreCheck", { verdict, advisorCid }, ["advisor", "vetify"]);
+}
+
+/** Isolates one dispatch: a failure is logged with its contract ID and the
+ * tick moves on to the next contract instead of aborting the whole cycle. */
+async function dispatch(label: string, contractId: string, run: () => Promise<void>): Promise<void> {
+  try {
+    logger.info({ label, contractId }, `Dispatching ${label} for ${contractId}`);
+    await run();
+  } catch (err) {
+    logger.error({ label, contractId, err: err instanceof Error ? err.message : err }, `${label} failed for ${contractId}`);
+  }
+}
+
+/** G14: RequestRecertification archives the current ApprovedBusiness and opens
+ * a fresh ComplianceReview, restarting the full Stage 3 AML/KYB/CDD cycle —
+ * naturally idempotent per contract instance, since a recertified business no
+ * longer appears in the ApprovedBusiness ACS as BusinessActive until the new
+ * cycle completes and produces a new one (with a fresh approvedAt). */
+async function requestRecertification(contractId: string, cacRegNumber: string): Promise<void> {
+  const today = new Date().toISOString().split("T")[0];
+  await exerciseLedgerChoice(T_APPROVED_BUSINESS, contractId, "RequestRecertification", {
+    verifier: config.verifierPartyId,
+    advisor: config.advisorPartyId,
+    newComplianceRef: `RESCREEN-${cacRegNumber}-${today}`,
+    reason: `Periodic AML/KYB rescreening — ${RESCREEN_INTERVAL_DAYS}-day interval elapsed since last approval`,
+  }, "vetify");
+}
+
+/** True when the ledger already holds a PortfolioReport dated in the current
+ * calendar month (UTC). The ledger is the cursor — survives restarts. */
+async function monthlyReportAlreadyExists(): Promise<boolean> {
+  const reports = await queryContracts(T_PORTFOLIO_REPORT);
+  const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
+  return reports.some((r) => {
+    const reportDate = (r.payload as Record<string, unknown>).reportDate;
+    return typeof reportDate === "string" && reportDate.startsWith(currentMonth);
+  });
 }
 
 async function tick() {
+  // Stage 0: route submitted provider registrations to the same Verifier Agent
+  // module's provider-evidence function — the CAC check is genuinely the same
+  // as Stage 2's, just against a different entity (see verifier.ts's doc
+  // comment on runVerifierProviderStage for why this doesn't need its own
+  // Canton party or a separate agent module).
+  const providerContracts = await queryContracts("Vetify.FinancingProvider:FinancingProviderOnboarding");
+  for (const contract of providerContracts) {
+    const payload = contract.payload as Record<string, unknown>;
+    if (payload["status"] === "UnderReview" && payload["agentScore"] == null) {
+      await dispatch("Verifier Agent (provider stage)", contract.contractId, () =>
+        runVerifierProviderStage(contract.contractId, payload));
+    }
+  }
+
   // Stage 2: route submitted onboarding applications to the Verifier Agent
   const onboardingContracts = await queryContracts("Vetify.Onboarding:BusinessOnboarding");
   for (const contract of onboardingContracts) {
     const payload = contract.payload as Record<string, unknown>;
     if (payload["status"] === "UnderReview") {
-      console.log(`[Supervisor] Dispatching Verifier Agent (verification stage) for ${contract.contractId}`);
-      await runVerifierVerificationStage(contract.contractId, payload);
+      await dispatch("Verifier Agent (verification stage)", contract.contractId, () =>
+        runVerifierVerificationStage(contract.contractId, payload));
     }
   }
 
@@ -57,23 +154,23 @@ async function tick() {
     if (payload["status"] !== "Pending") continue;
 
     if (payload["shariahVerdict"] == null) {
-      console.log(`[Supervisor] Dispatching Shariah Agent for ${contract.contractId}`);
-      // ComplianceReview now carries businessSector/businessActivity directly
-      // (carried over from BusinessOnboarding.business at creation time — see
-      // verifier.ts's post-Approve ComplianceReview creation), closing what
-      // was previously a data-completeness gap requiring a businessName proxy.
-      const businessSector = (payload["businessSector"] as string) ?? "Unknown";
-      const businessActivity = (payload["businessActivity"] as string) ?? "Unknown";
-      // financingPurpose isn't available on ComplianceReview or FinancingRequest at this
-      // point in the lifecycle (Stage 3 runs before Stage 5's financing request exists) —
-      // still a genuine gap, unrelated to the sector/activity fix above.
-      const financingPurpose = "general business financing";
-      const verdict = await runShariahAgent(businessSector, businessActivity, financingPurpose);
-      console.log(`[Supervisor] Shariah verdict for ${contract.contractId}: ${verdict.verdict}`);
-      await recordShariahPreCheck(contract.contractId, verdict);
+      await dispatch("Shariah Agent", contract.contractId, async () => {
+        // ComplianceReview carries businessSector/businessActivity directly
+        // (carried over from BusinessOnboarding.profile at creation time).
+        const businessSector = (payload["businessSector"] as string) ?? "Unknown";
+        const businessActivity = (payload["businessActivity"] as string) ?? "Unknown";
+        // financingPurpose doesn't exist yet at Stage 3 (the financing request
+        // is Stage 5) — the real purpose is screened later, in the Underwriting
+        // Agent's Stage 6 pipeline (screenFinancingPurpose, review gap G4).
+        // This placeholder only feeds the sector-level pre-check.
+        const financingPurpose = "general business financing";
+        const verdict = await runShariahAgent(businessSector, businessActivity, financingPurpose);
+        logger.info({ contractId: contract.contractId, verdict: verdict.verdict }, `Shariah verdict for ${contract.contractId}: ${verdict.verdict}`);
+        await recordShariahPreCheck(contract.contractId, verdict);
+      });
     } else {
-      console.log(`[Supervisor] Dispatching Verifier Agent (compliance stage) for ${contract.contractId}`);
-      await runVerifierComplianceStage(contract.contractId, payload);
+      await dispatch("Verifier Agent (compliance stage)", contract.contractId, () =>
+        runVerifierComplianceStage(contract.contractId, payload));
     }
   }
 
@@ -82,37 +179,71 @@ async function tick() {
   for (const contract of financingContracts) {
     const payload = contract.payload as Record<string, unknown>;
     if (payload["status"] === "Submitted") {
-      console.log(`[Supervisor] Dispatching Underwriting Agent for ${contract.contractId}`);
-      await runUnderwritingAgent(contract.contractId, payload);
+      await dispatch("Underwriting Agent", contract.contractId, () =>
+        runUnderwritingAgent(contract.contractId, payload));
     }
   }
 
-  // Stage 9: monitor active Murabahah contracts for delinquency
-  const murabahahContracts = await queryContracts("Vetify.Murabahah:MurabahahContract");
-  for (const contract of murabahahContracts) {
-    const payload = contract.payload as Record<string, unknown>;
-    if (payload["status"] === "Active" || payload["status"] === "Delinquent") {
-      console.log(`[Supervisor] Dispatching Monitoring Agent for ${contract.contractId}`);
-      await runMonitoringAgent(contract.contractId, payload);
+  // Stage 9: DAILY sweep over active/delinquent Murabahah contracts (see header
+  // for why not per-tick). DelinquencyManualReview is deliberately NOT swept —
+  // once escalated to a human, only the ACP skills/monitoring-review path (a
+  // real sentinel) resolves it, not the automated loop.
+  const today = new Date().toISOString().split("T")[0];
+  if (lastMonitoringSweepDate !== today) {
+    const murabahahContracts = await queryContracts("Vetify.Murabahah:MurabahahContract");
+    for (const contract of murabahahContracts) {
+      const payload = contract.payload as Record<string, unknown>;
+      if (payload["status"] === "Active" || payload["status"] === "Delinquent") {
+        await dispatch("Delinquency Monitor", contract.contractId, () =>
+          runDelinquencyMonitor(contract.contractId, payload));
+        await dispatch("Collections Agent", contract.contractId, () =>
+          runCollectionsAgent(contract.contractId, payload));
+      }
     }
+    lastMonitoringSweepDate = today;
   }
 
-  // Ongoing: generate PortfolioReport once per month
-  const now = Date.now();
-  if (now - lastReportTime >= REPORT_INTERVAL_MS) {
-    console.log("[Supervisor] Dispatching Reporting Agent (monthly portfolio report)");
-    await runReportingAgent(FI_PARTY, REGULATOR_PARTY);
-    lastReportTime = now;
+  // G14: DAILY rescreen sweep over Active ApprovedBusiness contracts whose
+  // approvedAt is older than RESCREEN_INTERVAL_DAYS — closes the "screen once,
+  // never again" gap (Gaps 24/M-RS). Pre-ApproveFunding sanctions refresh
+  // (Gap F38) is deliberately NOT built as a hard Daml gate on ApproveFunding
+  // itself — doing so would need threading fresh AML evidence through
+  // FinancingRequest/UnderwritingResult all the way to a FI-controlled choice,
+  // a much larger ripple for uncertain benefit given this sweep already keeps
+  // ApprovedBusiness continuously fresh rather than gating one specific action.
+  if (lastRescreenSweepDate !== today) {
+    const approvedBusinesses = await queryContracts(T_APPROVED_BUSINESS);
+    const rescreenCutoffMs = RESCREEN_INTERVAL_DAYS * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    for (const contract of approvedBusinesses) {
+      const payload = contract.payload as Record<string, unknown>;
+      if (payload["status"] !== "BusinessActive") continue;
+      const approvedAt = payload["approvedAt"];
+      if (typeof approvedAt !== "string") continue;
+      const ageMs = now - new Date(approvedAt).getTime();
+      if (ageMs >= rescreenCutoffMs) {
+        await dispatch("Rescreen scheduler (RequestRecertification)", contract.contractId, () =>
+          requestRecertification(contract.contractId, payload["cacRegNumber"] as string));
+      }
+    }
+    lastRescreenSweepDate = today;
+  }
+
+  // Ongoing: one PortfolioReport per calendar month, cursor derived from the
+  // ledger itself (survives restarts; regulator sees no duplicates).
+  if (!(await monthlyReportAlreadyExists())) {
+    await dispatch("Reporting Agent", "(monthly portfolio report)", () =>
+      runReportingAgent(config.fiPartyId, config.regulatorPartyId));
   }
 }
 
 async function run() {
-  console.log("[Supervisor] Started — polling Canton ledger every", POLL_INTERVAL_MS / 1000, "s");
+  logger.info({ pollIntervalSeconds: POLL_INTERVAL_MS / 1000 }, `Supervisor started — polling Canton ledger every ${POLL_INTERVAL_MS / 1000}s`);
   while (true) {
     try {
       await tick();
     } catch (err) {
-      console.error("[Supervisor] Error in tick:", err);
+      logger.error({ err: err instanceof Error ? err.message : err }, "Error in Supervisor tick");
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }

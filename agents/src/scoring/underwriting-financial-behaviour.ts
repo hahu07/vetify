@@ -1,7 +1,7 @@
 /**
  * Financial Behaviour engine (Stage 6, one of five independent scoring engines — see
  * underwriting.ts for the orchestrator). Analyses income stability, expense discipline,
- * liquidity, and revenue consistency from the borrower's verified transaction history.
+ * liquidity, and revenue consistency from the business's verified transaction history.
  * Populates RiskAssessment.behaviouralScore. Pure function, no LLM involvement.
  *
  * All band boundaries (revenue variance/business age/burn rate/liquidity cutoffs) are

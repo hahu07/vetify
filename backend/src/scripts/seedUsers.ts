@@ -22,6 +22,16 @@ const SEED_USERS: SeedUser[] = [
   { username: "bob.adeyemi", password: "changeme123", displayName: "Bob Adeyemi", partyRole: "vetify" },
   { username: "yusuf.ibrahim", password: "changeme123", displayName: "Yusuf Ibrahim", partyRole: "vetify" },
   { username: "imam.yusuf", password: "changeme123", displayName: "Imam Yusuf Abdullahi", partyRole: "riskCommittee" },
+  // Portal demo accounts (review gap G1): the frontend's login page is no
+  // longer a mock with credentials baked into the bundle — these accounts
+  // back the demo credentials it displays. partyRole maps 1:1 to the portal
+  // roles and to the backend's per-route requireAuth gates
+  // (business/financer/vetify/riskCommittee). Dev-only passwords, same
+  // caveat as the rest of this script.
+  { username: "business@vetify.ng", password: "password123", displayName: "Adekunle Bello", partyRole: "business" },
+  { username: "fi@vetify.ng", password: "password123", displayName: "Fatima Musa", partyRole: "financer" },
+  { username: "admin@vetify.ng", password: "password123", displayName: "Yusuf Ibrahim", partyRole: "vetify" },
+  { username: "risk@vetify.ng", password: "password123", displayName: "Imam Yusuf Abdullahi", partyRole: "riskCommittee" },
 ];
 
 async function main() {

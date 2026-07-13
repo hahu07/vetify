@@ -1,18 +1,44 @@
--- | Financial-institution officer registry and role-based approval gating.
---   Leaf module (depends only on Vetify.Types) so Compliance, Financing, and
---   Murabahah can all import it without creating an import cycle.
+-- | Role-based registries gating who may act as each off-ledger authority in
+-- the Vetify workflow: FI staff officers, the vetify-side scoring-policy
+-- approvers, assessors, sentinels, and Shariah advisors.
 --
---   Design boundary: officers are Text-identified registry entries, not
---   separate Canton parties (mirrors the already-deferred decision in
---   docs/deferred-gaps.md Gap F31/F37/F9 — making every FI officer a distinct
---   Canton party is a much larger identity/provisioning change). This means
---   role checks here are ledger-recorded and asserted, not cryptographically
---   tied to an individual human — the backend/JWT layer is responsible for
---   ensuring the right person asserts the right officerId. Mirrors the
---   AuthorizedReviewer / lookupByKey pattern already used for verifier
---   gating in Vetify.Compliance (Gap 15).
+-- Leaf module (depends only on Vetify.Types), so Compliance, Financing, and
+-- Murabahah can each import it without an import cycle.
+--
+-- Design boundary: every registry entry identifies a person by a plain Text
+-- field (`officerId`, `approverName`, or a Canton `Party`), not by a
+-- dedicated per-person Canton identity distinct from the platform-level
+-- party they act through. Role checks here are therefore ledger-recorded and
+-- asserted, not cryptographically tied to an individual human — the
+-- backend/JWT layer is responsible for ensuring the right person asserts the
+-- right identifier. Making every individual a distinct Canton party would
+-- close that gap but is a much larger identity/provisioning change; see
+-- docs/deferred-gaps.md for the full discussion.
 module Vetify.Governance where
 
+-- | Shared guard for every registry's Deactivate* choice below (asserts a
+-- non-empty reason/performedBy and that the entry isn't already inactive).
+-- `entityLabel` (e.g. "Officer", "Assessor") keeps the assertion messages
+-- specific per-registry despite the logic being shared.
+requireCanDeactivate : Text -> Bool -> Text -> Text -> Update ()
+requireCanDeactivate entityLabel active reason performedBy = do
+  assertMsg "Reason must not be empty" (reason /= "")
+  assertMsg "performedBy must not be empty" (performedBy /= "")
+  assertMsg (entityLabel <> " is already inactive") active
+
+-- | Shared guard for every registry's Reactivate* choice below — the mirror
+-- image of requireCanDeactivate.
+requireCanReactivate : Text -> Bool -> Text -> Text -> Update ()
+requireCanReactivate entityLabel active reason performedBy = do
+  assertMsg "Reason must not be empty" (reason /= "")
+  assertMsg "performedBy must not be empty" (performedBy /= "")
+  assertMsg (entityLabel <> " is already active") (not active)
+
+-- | Functional roles an FI officer may hold. Peer roles with no natural
+-- seniority ordering — inventing a rank/inheritance hierarchy without a real
+-- business rule for which role outranks which would be speculative, so none
+-- is modeled. An officer may hold several of these at once via
+-- `AuthorizedOfficer.roles`.
 data OfficerRole
   = CreditOfficer
   | RiskOfficer
@@ -21,53 +47,62 @@ data OfficerRole
   | UnderwritingOfficer
   deriving (Eq, Show)
 
--- Registry entry mapping one FI staff member to a role. FI signs (it governs
--- its own staff); vetify observes for platform-wide audit visibility.
---
--- Gap 10 (role hierarchy) is deliberately NOT modeled here: OfficerRole's five
--- constructors (CreditOfficer, RiskOfficer, RecoveryOfficer, OperationsOfficer,
--- UnderwritingOfficer) are peer functional roles with no natural seniority
--- ordering in this codebase today — inventing a rank/inheritance model without
--- a real business rule for which role outranks which would be speculative.
--- `roles : [OfficerRole]` (Gap 4) already covers the common case of one officer
--- holding several functional responsibilities.
+-- | Registry entry mapping one FI staff member to a role (or roles) and an
+-- approval limit. The financial institution signs — it governs its own
+-- staff; vetify observes for platform-wide audit visibility.
 template AuthorizedOfficer
   with
     financialInstitution : Party
     vetify                : Party
-    officerId             : Text   -- stable internal identifier, not a Canton party
+    -- | Stable internal identifier, not a Canton party.
+    officerId             : Text
     officerName           : Text
-    roles                 : [OfficerRole]     -- Gap 4: an officer may hold multiple functional roles
-    authorizedBy          : Text   -- name of the FI manager who granted this
+    -- | An officer may hold multiple functional roles at once.
+    roles                 : [OfficerRole]
+    -- | Name of the FI manager who granted this authorization.
+    authorizedBy          : Text
     authorizedAt          : Time
     active                : Bool
-    approvalLimit         : Optional Decimal  -- Gap F37: max financing amount this officer may approve; None = unlimited within their role
-    validUntil            : Optional Time     -- Gap 5: authorization expiry; None = no expiry
-    lastUpdatedBy         : Optional Text      -- Gap 3: who performed the last status change
-    lastUpdatedAt         : Optional Time      -- Gap 3: when the last status change occurred
-    statusReason          : Optional Text      -- Gap 3: reason given for the last status change
-    department            : Optional Text      -- Gap 6: organizational metadata, for reporting only
-    branch                : Optional Text      -- Gap 6
-    employeeId            : Optional Text      -- Gap 8: enterprise identity integration
-    email                 : Optional Text      -- Gap 8
+    -- | Maximum financing amount this officer may approve; `None` = unlimited
+    -- within their role.
+    approvalLimit         : Optional Decimal
+    -- | Authorization expiry; `None` = no expiry.
+    validUntil            : Optional Time
+    -- | Who performed the last status change (activate/deactivate).
+    lastUpdatedBy         : Optional Text
+    -- | When the last status change occurred.
+    lastUpdatedAt         : Optional Time
+    -- | Reason given for the last status change.
+    statusReason          : Optional Text
+    -- | Organizational metadata, for reporting only.
+    department            : Optional Text
+    branch                : Optional Text
+    -- | Enterprise identity-system integration fields.
+    employeeId            : Optional Text
+    email                 : Optional Text
   where
     signatory financialInstitution
     observer vetify
-    key (financialInstitution, officerId) : (Party, Text)
-    maintainer key._1
+    -- No contract key (Daml LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys — see requireActiveOfficer below): ledger-enforced
+    -- uniqueness of (financialInstitution, officerId) is no longer
+    -- guaranteed. If a caller creates two AuthorizedOfficer entries with the
+    -- same officerId, requireActiveOfficer resolves whichever ContractId it
+    -- was given, not "the" unique entry — the backend is responsible for
+    -- checking PQS for an existing active row before creating one.
     ensure officerId /= "" && officerName /= "" && authorizedBy /= "" && not (null roles)
         && (case approvalLimit of Some l -> l > 0.0; None -> True)
 
-    -- Gap 9: guards against deactivating an already-inactive officer.
+    -- | Deactivates the officer. Guards against deactivating an
+    -- already-inactive entry, so the audit trail (`lastUpdatedBy`/At/
+    -- `statusReason`) always reflects a genuine state transition.
     choice DeactivateOfficer : ContractId AuthorizedOfficer
       with
         reason      : Text
-        performedBy : Text  -- Gap 3: name of the person who performed this action
+        performedBy : Text
       controller financialInstitution
       do
-        assertMsg "Reason must not be empty" (reason /= "")
-        assertMsg "performedBy must not be empty" (performedBy /= "")
-        assertMsg "Officer is already inactive" active
+        requireCanDeactivate "Officer" active reason performedBy
         t <- getTime
         create this with
           active        = False
@@ -75,16 +110,15 @@ template AuthorizedOfficer
           lastUpdatedAt = Some t
           statusReason  = Some reason
 
-    -- Gap 9: guards against reactivating an already-active officer.
+    -- | Reactivates the officer. Guards against reactivating an
+    -- already-active entry, for the same reason as DeactivateOfficer.
     choice ReactivateOfficer : ContractId AuthorizedOfficer
       with
         reason      : Text
-        performedBy : Text  -- Gap 3: name of the person who performed this action
+        performedBy : Text
       controller financialInstitution
       do
-        assertMsg "Reason must not be empty" (reason /= "")
-        assertMsg "performedBy must not be empty" (performedBy /= "")
-        assertMsg "Officer is already active" (not active)
+        requireCanReactivate "Officer" active reason performedBy
         t <- getTime
         create this with
           active        = True
@@ -92,28 +126,28 @@ template AuthorizedOfficer
           lastUpdatedAt = Some t
           statusReason  = Some reason
 
--- Layer 1 of the Policy-Approval Security Roadmap (docs/deferred-gaps.md).
--- Gates ApprovePolicyChange on PendingVerificationPolicy/PendingCompliancePolicy
--- so an approval must name a real, currently-active registrant — not just any
--- Text differing from proposedBy. Signed by vetify: this is vetify's own
--- risk-governance registry (the Risk & Credit Governance Committee named in
--- docs/risk-governance-charter.md), distinct in scope from AuthorizedOfficer's
--- FI-side registry above, but the same design boundary applies: approverName
--- is a Text-identified registry entry, not a separate Canton party, so this
--- is ledger-recorded and asserted, not cryptographically tied to an
--- individual human (Layer 2+ of the roadmap, not this layer).
+-- | Registry gating who may exercise `ApprovePolicyChange` on a
+-- PendingVerificationPolicy/PendingCompliancePolicy. An approval must name a
+-- real, currently-active registrant here — not just any Text differing from
+-- the proposer. Signed by vetify: this is vetify's own risk-governance
+-- registry (the Risk & Credit Governance Committee described in
+-- docs/risk-governance-charter.md), distinct in scope from
+-- AuthorizedOfficer's FI-side registry above.
 template PolicyApprover
   with
     vetify       : Party
-    approverName : Text   -- must match the approvedBy value used in ApprovePolicyChange
-    role         : Text   -- e.g. "Head of Risk", "Independent Committee Member"
-    authorizedBy : Text   -- name of whoever registered this approver
+    -- | Must match the `approvedBy` value used in ApprovePolicyChange.
+    approverName : Text
+    -- | E.g. "Head of Risk", "Independent Committee Member".
+    role         : Text
+    -- | Name of whoever registered this approver.
+    authorizedBy : Text
     authorizedAt : Time
     active       : Bool
   where
     signatory vetify
-    key (vetify, approverName) : (Party, Text)
-    maintainer key._1
+    -- No contract key — see AuthorizedOfficer's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, approverName).
     ensure approverName /= "" && role /= "" && authorizedBy /= ""
 
     choice DeactivatePolicyApprover : ContractId PolicyApprover
@@ -122,9 +156,7 @@ template PolicyApprover
         performedBy : Text
       controller vetify
       do
-        assertMsg "Reason must not be empty" (reason /= "")
-        assertMsg "performedBy must not be empty" (performedBy /= "")
-        assertMsg "Approver is already inactive" active
+        requireCanDeactivate "Approver" active reason performedBy
         create this with active = False
 
     choice ReactivatePolicyApprover : ContractId PolicyApprover
@@ -133,36 +165,197 @@ template PolicyApprover
         performedBy : Text
       controller vetify
       do
-        assertMsg "Reason must not be empty" (reason /= "")
-        assertMsg "performedBy must not be empty" (performedBy /= "")
-        assertMsg "Approver is already active" (not active)
+        requireCanReactivate "Approver" active reason performedBy
         create this with active = True
 
--- Asserts (vetify, approverName) is a currently-active registered
--- PolicyApprover. Fails closed: an unregistered or deactivated name cannot
--- approve a policy change, regardless of what it's called.
-requireActivePolicyApprover : Party -> Text -> Update ()
-requireActivePolicyApprover vetify approverName = do
-  mCid <- lookupByKey @PolicyApprover (vetify, approverName)
-  cid <- case mCid of
-    Some c -> pure c
-    None -> assertFail ("Approver " <> approverName <> " is not a registered PolicyApprover")
-  approver <- fetch cid
+-- | Asserts `approverCid` is a currently-active PolicyApprover belonging to
+-- `vetify` and named `approverName`. Fails closed: a wrong-party,
+-- wrong-name, or deactivated entry cannot approve a policy change. Takes an
+-- explicit ContractId (rather than doing its own `lookupByKey`) because
+-- SDK 3.4.11 / Daml-LF 2.1/2.2 does not support contract keys — the caller
+-- (backend) resolves the ContractId itself, e.g. via a PQS query for the
+-- active PolicyApprover matching `approverName`.
+requireActivePolicyApprover : Party -> Text -> ContractId PolicyApprover -> Update ()
+requireActivePolicyApprover vetify approverName approverCid = do
+  approver <- fetch approverCid
+  assertMsg "Approver ContractId does not belong to this vetify party" (approver.vetify == vetify)
+  assertMsg ("Approver ContractId does not match approverName " <> approverName)
+    (approver.approverName == approverName)
   assertMsg ("Approver " <> approverName <> " is not active") approver.active
 
--- Fetches the registry entry for (financialInstitution, officerId), asserting
--- it is active, not expired, and holds the required role. Returns the matched
--- officer record so callers can additionally cross-check a supplied
--- officerName/decisionFactor text field against officer.officerName where one
--- exists.
+-- | Registry gating who may exercise Stage 6's `BeginUnderwriting`/
+-- `RejectUnderwriting` as `assessor`. vetify signs (it governs its own
+-- underwriting-team registry, the same trust boundary as PolicyApprover
+-- above); the assessor party observes so it can see its own entry.
+template AuthorizedAssessor
+  with
+    vetify       : Party
+    assessor  : Party
+    -- | E.g. "Senior Assessor".
+    role         : Text
+    -- | Name of whoever registered this assessor.
+    authorizedBy : Text
+    authorizedAt : Time
+    active       : Bool
+  where
+    signatory vetify
+    observer assessor
+    -- No contract key — see AuthorizedOfficer's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, assessor).
+    ensure role /= "" && authorizedBy /= ""
+
+    choice DeactivateAssessor : ContractId AuthorizedAssessor
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanDeactivate "Assessor" active reason performedBy
+        create this with active = False
+
+    choice ReactivateAssessor : ContractId AuthorizedAssessor
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanReactivate "Assessor" active reason performedBy
+        create this with active = True
+
+-- | Asserts `assessorCid` is a currently-active AuthorizedAssessor belonging
+-- to `vetify` for the party `assessor`. Fails closed: a wrong-party or
+-- deactivated entry cannot qualify or reject a business, regardless of its
+-- Canton identity. Takes an explicit ContractId — see
+-- requireActivePolicyApprover's comment for why (no contract keys on
+-- SDK 3.4.11 / Daml-LF 2.1/2.2).
+requireActiveAssessor : Party -> Party -> ContractId AuthorizedAssessor -> Update ()
+requireActiveAssessor vetify assessor assessorCid = do
+  entry <- fetch assessorCid
+  assertMsg "Assessor ContractId does not belong to this vetify party" (entry.vetify == vetify)
+  assertMsg ("Assessor ContractId does not match party " <> partyToText assessor)
+    (entry.assessor == assessor)
+  assertMsg ("Assessor " <> partyToText assessor <> " is not active") entry.active
+
+-- | Registry gating who may exercise Stage 9's `FlagDelinquent`/
+-- `ResumeActive` as `sentinel`. Same shape and trust boundary as
+-- AuthorizedAssessor above: vetify signs (its own portfolio-monitoring
+-- registry); the sentinel party observes so it can see its own entry.
+template AuthorizedSentinel
+  with
+    vetify       : Party
+    sentinel     : Party
+    -- | E.g. "Senior Portfolio Analyst".
+    role         : Text
+    authorizedBy : Text
+    authorizedAt : Time
+    active       : Bool
+  where
+    signatory vetify
+    observer sentinel
+    -- No contract key — see AuthorizedOfficer's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, sentinel).
+    ensure role /= "" && authorizedBy /= ""
+
+    choice DeactivateSentinel : ContractId AuthorizedSentinel
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanDeactivate "Sentinel" active reason performedBy
+        create this with active = False
+
+    choice ReactivateSentinel : ContractId AuthorizedSentinel
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanReactivate "Sentinel" active reason performedBy
+        create this with active = True
+
+-- | Asserts `sentinelCid` is a currently-active AuthorizedSentinel belonging
+-- to `vetify` for the party `sentinel`. Fails closed: a wrong-party or
+-- deactivated entry cannot flag or resume a facility, regardless of its
+-- Canton identity. Takes an explicit ContractId — see
+-- requireActivePolicyApprover's comment for why.
+requireActiveSentinel : Party -> Party -> ContractId AuthorizedSentinel -> Update ()
+requireActiveSentinel vetify sentinel sentinelCid = do
+  entry <- fetch sentinelCid
+  assertMsg "Sentinel ContractId does not belong to this vetify party" (entry.vetify == vetify)
+  assertMsg ("Sentinel ContractId does not match party " <> partyToText sentinel)
+    (entry.sentinel == sentinel)
+  assertMsg ("Sentinel " <> partyToText sentinel <> " is not active") entry.active
+
+-- | Registry gating who may exercise Stage 3's `RecordShariahPreCheck` as
+-- `advisor`. Same register/deactivate/reactivate shape as AuthorizedSentinel/
+-- AuthorizedAssessor, but for a genuinely independent party: AAOIFI
+-- governance standards require the Shari'a Supervisory Board to be
+-- independent of management, so `advisor` carries the same trust model as
+-- `riskCommittee` rather than being framed as one of vetify's own teams.
+template AuthorizedAdvisor
+  with
+    vetify       : Party
+    advisor      : Party
+    -- | E.g. "Shari'a Supervisory Board — Fiqh Scholar".
+    role         : Text
+    authorizedBy : Text
+    authorizedAt : Time
+    active       : Bool
+  where
+    signatory vetify
+    observer advisor
+    -- No contract key — see AuthorizedOfficer's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, advisor).
+    ensure role /= "" && authorizedBy /= ""
+
+    choice DeactivateAdvisor : ContractId AuthorizedAdvisor
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanDeactivate "Advisor" active reason performedBy
+        create this with active = False
+
+    choice ReactivateAdvisor : ContractId AuthorizedAdvisor
+      with
+        reason      : Text
+        performedBy : Text
+      controller vetify
+      do
+        requireCanReactivate "Advisor" active reason performedBy
+        create this with active = True
+
+-- | Asserts `advisorCid` is a currently-active AuthorizedAdvisor belonging
+-- to `vetify` for the party `advisor`. Fails closed: a wrong-party or
+-- deactivated entry cannot record a Shariah pre-check verdict, regardless
+-- of its Canton identity. Takes an explicit ContractId — see
+-- requireActivePolicyApprover's comment for why.
+requireActiveAdvisor : Party -> Party -> ContractId AuthorizedAdvisor -> Update ()
+requireActiveAdvisor vetify advisor advisorCid = do
+  entry <- fetch advisorCid
+  assertMsg "Advisor ContractId does not belong to this vetify party" (entry.vetify == vetify)
+  assertMsg ("Advisor ContractId does not match party " <> partyToText advisor)
+    (entry.advisor == advisor)
+  assertMsg ("Advisor " <> partyToText advisor <> " is not active") entry.active
+
+-- | Fetches `officerCid`, asserting it belongs to `financialInstitution`,
+-- matches `officerId`, is active, not expired, and holds the required role.
+-- Returns the matched officer record so callers can additionally
+-- cross-check a supplied name/decision-factor text field against
+-- `officer.officerName` where one exists. Takes an explicit ContractId
+-- (rather than doing its own `lookupByKey`) — see
+-- requireActivePolicyApprover's comment for why (no contract keys on
+-- SDK 3.4.11 / Daml-LF 2.1/2.2).
 requireActiveOfficer
-  : Party -> Text -> OfficerRole -> Update AuthorizedOfficer
-requireActiveOfficer financialInstitution officerId expectedRole = do
-  mOfficerCid <- lookupByKey @AuthorizedOfficer (financialInstitution, officerId)
-  officerCid <- case mOfficerCid of
-    Some cid -> pure cid
-    None -> assertFail ("Officer " <> officerId <> " is not registered for this financial institution")
+  : Party -> Text -> OfficerRole -> ContractId AuthorizedOfficer -> Update AuthorizedOfficer
+requireActiveOfficer financialInstitution officerId expectedRole officerCid = do
   officer <- fetch officerCid
+  assertMsg "Officer ContractId does not belong to this financial institution"
+    (officer.financialInstitution == financialInstitution)
+  assertMsg ("Officer ContractId does not match officerId " <> officerId)
+    (officer.officerId == officerId)
   assertMsg ("Officer " <> officerId <> " is not active") officer.active
   assertMsg ("Officer " <> officerId <> " does not hold the required role") (expectedRole `elem` officer.roles)
   t <- getTime

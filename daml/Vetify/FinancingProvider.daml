@@ -1,49 +1,91 @@
--- | Stage 0: Financing provider self-registration and Vetify approval.
---   Every party that wishes to offer financing on the platform must complete
---   this onboarding before they can exercise ApproveFunding on a FinancingRequest.
+-- | Stage 0: financing-provider self-registration and vetify approval. Every
+-- party that wishes to offer financing on the platform must complete this
+-- onboarding before it can exercise `ApproveFunding` on a FinancingRequest
+-- (see Vetify.Financing).
 --
---   Lighter-weight than borrower onboarding: no AI agent, no compliance review.
---   Vetify performs off-ledger due diligence and approves a specific set of
---   financing instruments permitted for that provider, based on their governing
---   documents (CBN license, deed of Waqf, cooperative constitution, fund prospectus).
+-- Follows the same off-ledger-deterministic-scoring shape as business
+-- onboarding, not a lighter-weight variant: on submission, the Verifier
+-- Agent's provider-evidence function (agents/src/agents/verifier.ts's
+-- `runVerifierProviderStage` — reuses the same mono.co `lookup_cac` tool and
+-- evidence-gathering pattern as Stage 2, since a provider's own CAC
+-- registration is genuinely the same check against a different entity, not a
+-- new agent/party) gathers a CAC lookup on the provider's own
+-- `cacRegNumber`, and a deterministic scorer
+-- (agents/src/scoring/provider-verification.ts, weights carried on
+-- ProviderVerificationPolicy below) decides between `RecordProviderScore`,
+-- `FlagProviderForManualReview`, and `RejectProvider` — never vetify's
+-- private off-ledger judgment alone. `ApproveProvider`'s
+-- `approvedInstruments` selection is still always a manual vetify decision,
+-- though: it's a governing-document read (CBN license, deed of Waqf,
+-- cooperative constitution, fund prospectus) no automated check can make, so
+-- even a Low-risk score only records the score (`RecordProviderScore`)
+-- rather than auto-approving.
 --
---   Supports all provider types: CBN-licensed NIFIs, SEC fund managers, pension funds,
---   cooperative societies, investment clubs, Waqf funds, Zakat funds, and philanthropies.
---   Unlicensed providers set licenseNumber = None and regulatoryBody = None.
+-- Supports every provider type: CBN-licensed NIFIs, SEC fund managers,
+-- pension funds, cooperative societies, investment clubs, Waqf funds, Zakat
+-- funds, and philanthropies. Unlicensed providers set `licenseNumber = None`
+-- and `regulatoryBody = None` — the scorer's regulatory-completeness check is
+-- conditional on `providerType`, so this is only a red flag for the three
+-- provider types that genuinely require a regulator (CBNLicensedNIFI /
+-- SECFundManager / PenComPensionManager).
 --
---   Contract key: financialInstitution (Party) — one active onboarding per provider party.
---   Leaf module — depends only on Vetify.Types.
+-- Leaf module — depends only on Vetify.Types.
 module Vetify.FinancingProvider where
 
 import Vetify.Types
 
 -- ─── Stage 0: Provider Onboarding ─────────────────────────────────────────────
--- Self-registered by the financing provider; reviewed and approved by Vetify.
--- Key: financialInstitution Party — enforces one active onboarding record per party.
+
+-- | Self-registered by the financing provider; reviewed and approved by
+-- vetify. Keyed on `(financialInstitution, vetify)`, so a provider party has
+-- at most one active onboarding record at a time.
 template FinancingProviderOnboarding
   with
     financialInstitution : Party
     vetify               : Party
     providerName         : Text
     address              : Text
+    -- | The provider's own CAC registration number — looked up the same way
+    -- BusinessOnboarding's `BusinessKyc.cacRegNumber` is (Stage 2 parity).
+    cacRegNumber         : Text
     providerType         : ProviderType
-    regulatoryBody       : Optional RegulatoryBody  -- None for unregulated providers
-    licenseNumber        : Optional Text             -- None if no external license
-    governingDocRef      : DocumentRef               -- CBN license, deed of Waqf, constitution, etc.
-    declaredInstruments  : [FinancingInstrument]     -- instruments the provider wishes to offer
+    -- | `None` for unregulated providers.
+    regulatoryBody       : Optional RegulatoryBody
+    -- | `None` if the provider holds no external license.
+    licenseNumber        : Optional Text
+    -- | CBN license, deed of Waqf, cooperative constitution, etc.
+    governingDocRef      : DocumentRef
+    -- | Instruments the provider wishes to offer.
+    declaredInstruments  : [FinancingInstrument]
     status               : ReviewStatus
     submittedAt          : Optional Time
-    amendmentCount       : Int                       -- max 5; immutable after each approval cycle
+    -- | Capped at 5; see AmendProvider.
+    amendmentCount       : Int
+    -- | Off-ledger deterministic scoring output
+    -- (agents/src/scoring/provider-verification.ts), mirroring
+    -- BusinessOnboarding's agent-score fields. Populated by
+    -- RecordProviderScore/FlagProviderForManualReview/RejectProvider;
+    -- cleared on AmendProvider since a resubmission needs a fresh
+    -- evaluation against the updated fields.
+    agentScore           : Optional Int
+    agentRisk            : Optional RiskLevel
+    agentNote            : Optional Text
+    agentVersion         : Optional Text
   where
     signatory financialInstitution
     observer vetify
     ensure providerName /= ""
+        && cacRegNumber /= ""
         && not (null declaredInstruments)
         && amendmentCount >= 0
-    key (financialInstitution, vetify) : (Party, Party)
-    maintainer key._1
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of
+    -- (financialInstitution, vetify) is no longer guaranteed.
 
-    -- Provider submits the registration for Vetify review.
+    -- | Provider submits the registration for vetify review. Scoring happens
+    -- after submission via RecordProviderScore/FlagProviderForManualReview/
+    -- RejectProvider below (evidence-gathering needs a real CAC lookup, so it
+    -- cannot happen as part of this choice).
     choice SubmitProviderForReview : ContractId FinancingProviderOnboarding
       controller financialInstitution
       do
@@ -53,13 +95,50 @@ template FinancingProviderOnboarding
           status      = UnderReview
           submittedAt = Some t
 
-    -- Vetify approves the provider and records which instruments they may offer.
-    -- approvedInstruments may be a subset of declaredInstruments — Vetify gates
-    -- based on governing documents (e.g. a Waqf Khairi gets only QardHasan).
+    -- | Records the deterministic scorer's outcome without a status
+    -- transition. The score alone can never fully auto-approve a provider
+    -- (approvedInstruments is a governing-document judgment call no
+    -- automated check can make), so even a Low-risk, no-flags outcome
+    -- leaves the record at UnderReview — for vetify to review with a real
+    -- computed score visible, rather than just the raw submitted fields.
+    choice RecordProviderScore : ContractId FinancingProviderOnboarding
+      with
+        score   : Int
+        risk    : RiskLevel
+        note    : Optional Text
+        version : Text
+        -- | The active ProviderVerificationPolicy's ContractId, if one
+        -- exists. Caller-supplied (e.g. via a PQS query) — no contract keys
+        -- on SDK 3.4.11 / Daml-LF 2.1/2.2, so this choice can no longer
+        -- resolve it itself via `lookupByKey`.
+        policyCid : Optional (ContractId ProviderVerificationPolicy)
+      controller vetify
+      do
+        assertMsg "Can only record a score while UnderReview" (status == UnderReview)
+        -- Self-consistency guard, mirrors FlagUnderwritingForManualReview's
+        -- band check: a score being recorded (not auto-rejected) must
+        -- genuinely be above the active policy's reject threshold.
+        case policyCid of
+          None -> return ()
+          Some policyCid -> do
+            policy <- fetch policyCid
+            assertMsg "Score is at or below the active policy's auto-reject threshold"
+              (score > policy.autoRejectMax)
+        create this with
+          agentScore   = Some score
+          agentRisk    = Some risk
+          agentNote    = note
+          agentVersion = Some version
+
+    -- | vetify approves the provider and records which instruments it may
+    -- offer. `approvedInstruments` may be a subset of `declaredInstruments`
+    -- — vetify gates based on governing documents (e.g. a Waqf Khairi gets
+    -- only QardHasan).
     choice ApproveProvider : ContractId ApprovedProvider
       with
         approvedInstruments : [FinancingInstrument]
-        regulator           : Optional Party  -- supervisory observer (e.g. CBN for NIFIs)
+        -- | Supervisory observer, e.g. CBN for NIFIs.
+        regulator           : Optional Party
       controller vetify
       do
         assertMsg "Can only approve from UnderReview or ManualReview"
@@ -78,19 +157,40 @@ template FinancingProviderOnboarding
           approvedAt = t
           regulator
 
-    -- Vetify rejects the registration with a reason recorded off-ledger.
-    -- The onboarding contract is archived; the provider may re-register.
+    -- | vetify rejects the registration, optionally carrying the scorer's
+    -- own reasoning when this was an automated rejection (e.g. CAC
+    -- registration not found) — a human rejection from ManualReview simply
+    -- omits the agent fields. The onboarding contract is archived; the
+    -- provider may re-register from scratch.
     choice RejectProvider : ()
       with
-        reason : Text
+        reason       : Text
+        agentScore   : Optional Int
+        agentRisk    : Optional RiskLevel
+        agentVersion : Optional Text
+        -- | The active ProviderVerificationPolicy's ContractId, if one
+        -- exists. Caller-supplied — see RecordProviderScore's `policyCid`
+        -- comment. Only consulted when `agentScore` is `Some`.
+        policyCid    : Optional (ContractId ProviderVerificationPolicy)
       controller vetify
       do
         assertMsg "Can only reject from UnderReview or ManualReview"
           (status == UnderReview || status == ManualReview)
         assertMsg "Rejection reason must not be empty" (reason /= "")
+        -- Self-consistency guard for an automated rejection only — a human
+        -- rejection from ManualReview carries no agentScore to check.
+        case agentScore of
+          None -> return ()
+          Some s -> do
+            case policyCid of
+              None -> return ()
+              Some cid -> do
+                policy <- fetch cid
+                assertMsg "Auto-rejected score is above the active policy's auto-reject threshold"
+                  (s <= policy.autoRejectMax)
         return ()
 
-    -- Vetify requests corrections before approval.
+    -- | vetify requests corrections before approval.
     choice RequestProviderAmendment : ContractId FinancingProviderOnboarding
       with
         note : Text
@@ -99,11 +199,34 @@ template FinancingProviderOnboarding
         assertMsg "Can only request amendment from UnderReview" (status == UnderReview)
         create this with status = PendingAmendment
 
-    -- Provider responds to amendment request; clears submission and increments count.
+    -- | The deterministic scorer escalates to a human — Medium risk, or a
+    -- serious-but-recoverable issue like a CAC name mismatch or a
+    -- claimed-regulated provider missing its license. Mirrors
+    -- BusinessOnboarding's FlagForManualReview.
+    choice FlagProviderForManualReview : ContractId FinancingProviderOnboarding
+      with
+        score   : Int
+        risk    : RiskLevel
+        note    : Text
+        version : Text
+      controller vetify
+      do
+        assertMsg "Can only flag from UnderReview" (status == UnderReview)
+        create this with
+          status       = ManualReview
+          agentScore   = Some score
+          agentRisk    = Some risk
+          agentNote    = Some note
+          agentVersion = Some version
+
+    -- | Provider responds to an amendment request: updates the submitted
+    -- fields, clears the (now-stale) agent score, resets to Draft, and
+    -- increments the amendment counter.
     choice AmendProvider : ContractId FinancingProviderOnboarding
       with
         updatedProviderName        : Text
         updatedAddress             : Text
+        updatedCacRegNumber        : Text
         updatedLicenseNumber       : Optional Text
         updatedGoverningDocRef     : DocumentRef
         updatedDeclaredInstruments : [FinancingInstrument]
@@ -112,22 +235,33 @@ template FinancingProviderOnboarding
         assertMsg "Can only amend from PendingAmendment" (status == PendingAmendment)
         assertMsg "Amendment limit reached" (amendmentCount < 5)
         assertMsg "Updated provider name must not be empty" (updatedProviderName /= "")
+        assertMsg "Updated CAC registration number must not be empty" (updatedCacRegNumber /= "")
         assertMsg "Must declare at least one instrument" (not (null updatedDeclaredInstruments))
         create this with
           providerName        = updatedProviderName
           address             = updatedAddress
+          cacRegNumber        = updatedCacRegNumber
           licenseNumber       = updatedLicenseNumber
           governingDocRef     = updatedGoverningDocRef
           declaredInstruments = updatedDeclaredInstruments
           status              = Draft
           amendmentCount      = amendmentCount + 1
+          -- Fresh evaluation needed — the previous CAC lookup was against
+          -- the old registration number. Same "clear agent scoring on
+          -- resubmission" principle as BusinessOnboarding.Amend.
+          agentScore          = None
+          agentRisk           = None
+          agentNote           = None
+          agentVersion        = None
 
 
--- ─── Approved Provider Status Record ──────────────────────────────────────────
--- Created by ApproveProvider; acts as the ledger credential that gates
--- ApproveFunding in Vetify.Financing.  Vetify is signatory; the provider
--- and regulator are observers.
--- Key: financialInstitution Party — fetched by ApproveFunding using CID.
+-- ─── Approved Provider Credential ─────────────────────────────────────────────
+
+-- | Created by ApproveProvider; the ledger credential that gates
+-- `ApproveFunding` in Vetify.Financing (which takes an `ApprovedProvider`
+-- ContractId directly, rather than looking it up by key). vetify is
+-- signatory; the provider and, when regulated, the regulator observe.
+-- Keyed on `(vetify, financialInstitution)`.
 template ApprovedProvider
   with
     financialInstitution : Party
@@ -136,12 +270,82 @@ template ApprovedProvider
     providerType         : ProviderType
     regulatoryBody       : Optional RegulatoryBody
     licenseNumber        : Optional Text
-    approvedInstruments  : [FinancingInstrument]  -- ledger-enforced instrument permissions
+    -- | Ledger-enforced instrument permissions.
+    approvedInstruments  : [FinancingInstrument]
     approvedAt           : Time
-    regulator            : Optional Party          -- supervisory observer (None if unregulated)
+    -- | Supervisory observer; `None` if the provider is unregulated.
+    regulator            : Optional Party
   where
     signatory vetify
     observer [financialInstitution] ++ optional [] pure regulator
     ensure not (null approvedInstruments)
-    key (vetify, financialInstitution) : (Party, Party)
-    maintainer key._1
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of
+    -- (vetify, financialInstitution) is no longer guaranteed. Financing.
+    -- ApproveFunding already takes an ApprovedProvider ContractId directly
+    -- (see this template's doc comment above), so that call path is
+    -- unaffected — only a hypothetical duplicate-create is no longer
+    -- ledger-blocked.
+
+
+-- ─── Stage 0 Scoring Policy ────────────────────────────────────────────────────
+
+-- | vetify-wide singleton (not per-FI: this is vetify's own vetting rubric
+-- for any provider registering, not something an individual FI has its own
+-- variant of). Mirrors VerificationPolicy's shape; `UpdatePolicy` is a plain
+-- vetify-controlled choice like UnderwritingPolicy's, not
+-- VerificationPolicy's full maker-checker/Risk-Committee chain — provider
+-- registration is a much lower-frequency, lower-volume process than Stage
+-- 2/3's borrower risk decisions, and vetify staff still manually review
+-- governing documents and pick `approvedInstruments` on every registration
+-- regardless of the score, so a single vetify signature retuning these
+-- weights is an acceptable risk here.
+template ProviderVerificationPolicy
+  with
+    vetify         : Party
+    policyVersion  : Text
+    -- | Score at/below which the scorer auto-rejects (inclusive).
+    autoRejectMax  : Int
+    effectiveFrom  : Time
+    scoringWeights : ProviderVerificationScoringWeights
+  where
+    signatory vetify
+
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): callers can no longer `lookupByKey
+    -- @ProviderVerificationPolicy vetify` to find the active policy — they
+    -- must query PQS for the active row and pass its ContractId into
+    -- RecordProviderScore/RejectProvider (see those choices' `policyCid`
+    -- comments).
+
+    ensure
+      policyVersion /= "" &&
+      autoRejectMax >= 0 &&
+      scoringWeights.cacActiveExactMatch     >= 0 &&
+      scoringWeights.cacActiveCloseMatch     >= 0 &&
+      scoringWeights.cacActiveNameMismatch   >= 0 &&
+      scoringWeights.cacPending              >= 0 &&
+      scoringWeights.cacInactiveOrStruckOff  >= 0 &&
+      scoringWeights.cacNotFound             >= 0 &&
+      scoringWeights.regulatedWithLicense    >= 0 &&
+      scoringWeights.regulatedMissingLicense >= 0 &&
+      scoringWeights.unregulatedDeclared     >= 0 &&
+      -- Best-case combination should not exceed 100 — same convention as
+      -- VerificationScoringWeights/UnderwritingScoringWeights.
+      (scoringWeights.cacActiveExactMatch + scoringWeights.regulatedWithLicense) <= 100
+
+    choice UpdatePolicy : ContractId ProviderVerificationPolicy
+      with
+        newPolicyVersion  : Text
+        newAutoRejectMax  : Int
+        newEffectiveFrom  : Time
+        newScoringWeights : ProviderVerificationScoringWeights
+      controller vetify
+      do
+        assertMsg "New policy version must not be empty" (newPolicyVersion /= "")
+        assertMsg "autoRejectMax must not be negative" (newAutoRejectMax >= 0)
+        create this with
+          policyVersion  = newPolicyVersion
+          autoRejectMax  = newAutoRejectMax
+          effectiveFrom  = newEffectiveFrom
+          scoringWeights = newScoringWeights

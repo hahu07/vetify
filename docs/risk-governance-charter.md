@@ -1,6 +1,7 @@
 # Vetify Risk & Credit Governance Charter
 
-**Status**: Draft — pending committee sign-off
+**Status**: Draft — pending ratification (see §8: all three Committee members plus one delegating
+signature from Vetify's corporate authority — not the §4 two-member policy-approval quorum)
 **Version**: 0.1
 **Owner**: Bob Adeyemi (Head of Risk)
 **Last reviewed**: 2026-07-05
@@ -12,7 +13,7 @@
 Vetify is a technology platform connecting Nigerian SME borrowers with licensed non-interest financial institutions (NIFIs). Vetify itself is not directly licensed by CBN or SEC — but its AI-driven verification, compliance, and scoring engine produces the risk assessments that licensed FI partners rely on to make their own regulated credit decisions. This charter establishes independent oversight of that engine, proportionate to Vetify's stage, so:
 
 - No single individual can unilaterally change the rules that decide who gets financed.
-- Vetify can demonstrate to FI partners' vendor-risk/compliance teams (and, indirectly, their CBN examiners) that the platform they depend on has real governance behind it.
+- Vetify can demonstrate to FI partners' vendor-risk/compliance teams — and, indirectly, whichever regulator actually licenses that partner — that the platform they depend on has real governance behind it. "NIFI" does not mean "bank" specifically: a non-interest bank answers to CBN, but a non-interest capital-market operator (Sukuk issuers, Islamic funds) answers to SEC, a non-interest pension fund administrator answers to PenCom, and a Takaful (Islamic insurance) operator answers to NAICOM. Each has its own supervisory framework and its own expectations of a technology vendor — this charter is written to satisfy that pattern generally, not one specific regulator's checklist.
 - The organization is positioned to scale this structure formally as transaction volume and regulatory scrutiny grow.
 
 ## 2. Scope of Authority
@@ -56,6 +57,37 @@ Any `ComplianceReview` where the Shariah pre-check returns `REQUIRES_REVIEW` (se
 ## 7. Amending This Charter
 
 This charter is itself subject to Committee approval to amend, requiring the same distinct-proposer/approver discipline as §4. Version and date every revision.
+
+## 8. Ratification & Authorizing Signatures
+
+This charter takes effect only once ratified by **all three** Committee members named in §3 —
+not the two-member quorum that governs routine policy-change approvals under §4. Ratification is
+a different act from a policy approval: it is each individual formally accepting the role, its
+scope of authority (§2), and its obligations (§6), not signing off on a single scoring-policy
+change. A member who has not signed below has not yet accepted the role, regardless of how they
+may act elsewhere.
+
+A **fourth signature is also required**, from whoever holds Vetify's ultimate corporate
+authority (CEO/founder, or the board if one exists) — distinct from the three Committee members.
+This charter grants the Committee "sole authority" over Stage 2/3 scoring policy (§2); that
+authority has to be delegated to the Committee by someone who actually holds it in the first
+place. Without this fourth signature, the charter is the Committee asserting its own authority
+rather than receiving it delegated.
+
+**Sequencing for non-employee members**: any Committee member who is not a Vetify employee —
+confirmed or likely for the Shari'a advisory representative, and possibly for the Chair depending
+on whether "fractional CRO" means contracted rather than employed — needs an executed engagement
+or consulting agreement establishing their authority, compensation, and liability *before or
+alongside* signing below, not as an afterthought. A signature on this internal governance
+document is not itself a sufficient legal basis for a non-employee to hold binding authority over
+the company's credit decisions.
+
+| Role | Name | Signature | Date | Engagement agreement executed? (non-employees only) |
+|---|---|---|---|---|
+| Chair (Head of Risk / fractional CRO) | Bob Adeyemi | | | |
+| Independent member | Aisha Bello | | | |
+| Shari'a advisory representative | Imam Yusuf Abdullahi | | | |
+| Authorizing delegation (CEO / Founder / Board) | *[to be named]* | | | N/A — this signature is the delegation itself |
 
 ---
 

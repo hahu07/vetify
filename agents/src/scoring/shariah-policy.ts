@@ -122,3 +122,31 @@ export function classifyShariahCompliance(
   if (structureHit) return structureHit;
   return classifySector(businessSector, businessActivity);
 }
+
+/**
+ * Purpose-only screen for Stage 6 (review gap G4, docs/platform-review-2026-07.md).
+ *
+ * The Stage 3 pre-check runs before a FinancingRequest exists, so the
+ * Supervisor necessarily feeds classifyShariahCompliance a placeholder
+ * purpose — meaning the structure prohibitions (refinancing, working
+ * capital, cash advance) were never exercised against the business's REAL
+ * stated purpose. This re-screens FinancingRequest.terms.purpose in the
+ * Underwriting Agent's pipeline, checking:
+ *  - prohibited financing STRUCTURES (the primary target), and
+ *  - prohibited SECTOR keywords appearing in the purpose text itself
+ *    (e.g. "purchase of beer inventory" from a business whose declared
+ *    sector passed Stage 3 cleanly).
+ *
+ * Deliberately does NOT run the mixed/permissible sector tables against the
+ * purpose: sector-level review already happened at Stage 3 on the real
+ * sector/activity fields, and purpose prose matching a permissible keyword
+ * clears nothing. Returns undefined when no prohibition matches — the
+ * underwriting pipeline proceeds normally.
+ */
+export function classifyFinancingPurpose(financingPurpose: string): ShariahClassification | undefined {
+  const structureHit = classifyFinancingStructure(financingPurpose);
+  if (structureHit) return structureHit;
+  const sectorHit = matchKeywords(financingPurpose.toLowerCase(), PROHIBITED_SECTORS);
+  if (sectorHit) return { verdict: "NON_COMPLIANT", citation: sectorHit.citation, matchedKeyword: sectorHit.keywords[0] };
+  return undefined;
+}

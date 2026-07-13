@@ -21,7 +21,7 @@ So your job is not to replicate what the deterministic engine already tried — 
 
 Re-run or review whichever of `lookup_mashup` / `lookup_cac` / `lookup_tin` evidence is relevant to why this was flagged. Populate `VerificationChecks` (`identityVerified`, `cacRegistered`, `documentsValid`, `dataConsistent`) based on your own assessment — you are not bound by the deterministic engine's point table, since the whole reason this is here is that the fixed rubric didn't cleanly resolve it.
 
-Exercise `Approve` or `Reject` (`party: "verifier"`, `templateId: "Vetify.Onboarding:BusinessOnboarding"`) only after the officer confirms. Set `autoDecided: false` and `reviewedBy`/`reviewerParty` to the officer's identity — this is a human decision, not an automated one, and the ledger's own `Onboarding.daml` assertions require exactly that when a human overrides or completes a flagged case.
+Before exercising, call `get_active_contracts` for `templateId: "Vetify.Onboarding:VerificationPolicy"` as party `"vetify"` — its first (and only) result's `contractId` is `policyCid`, or `null` if none is active. Exercise `Approve` or `Reject` (`party: ["verifier", "vetify"]` — dual controller, since vetify's signature is required alongside the verifier's; a single party here fails, `templateId: "Vetify.Onboarding:BusinessOnboarding"`) only after the officer confirms. Set `autoDecided: false`, `reviewedBy`/`reviewerParty` to the officer's identity, and `policyCid` from the lookup above (the ledger has no contract keys, so this can no longer be resolved implicitly) — this is a human decision, not an automated one, and the ledger's own `Onboarding.daml` assertions require exactly that when a human overrides or completes a flagged case.
 
 If you Approve, also `create_contract` the initial `ComplianceReview` (`Vetify.Compliance:ComplianceReview`, `status: "Pending"`, `shariahVerdict: null`) — same payload shape the Supervisor's evidence-only path uses; see `agents/skills/verifier/SKILL.md` for the exact field list.
 
@@ -35,7 +35,19 @@ Gather (or review already-gathered) AML (`aml_screen_business`/`aml_screen_indiv
 3. Does the director's profile make sense for this business?
 4. Do adverse media or credit history findings change the picture?
 
-Exercise `ApproveCompliance` / `RejectCompliance` (`party: "verifier"`) or `FlagComplianceForManualReview` (`party: "vetify"`) only after the officer confirms. Set `autoDecided: false`, `reviewedBy`/`reviewerParty` to the officer's identity, and `overrideJustification` if the deterministic engine's flag note suggested a different lean than where you and the officer land.
+For `ApproveCompliance`/`RejectCompliance`, first call `get_active_contracts` for `templateId: "Vetify.Compliance:AuthorizedReviewer"` as party `"vetify"` and find the entry whose `verifier` field matches this session's verifier party — its `contractId` is `reviewerAuthCid`, a required argument on both choices (the ledger has no contract keys, so this can no longer be resolved implicitly). For `FlagComplianceForManualReview`, call `get_active_contracts` for `templateId: "Vetify.Compliance:CompliancePolicy"` as party `"vetify"` — its first result's `contractId` is `policyCid`, or `null` if none is active. Exercise `ApproveCompliance` / `RejectCompliance` (`party: "verifier"`) or `FlagComplianceForManualReview` (`party: "vetify"`) only after the officer confirms. Set `autoDecided: false`, `reviewedBy`/`reviewerParty` to the officer's identity, and `overrideJustification` if the deterministic engine's flag note suggested a different lean than where you and the officer land.
+
+### If an EDD case is open (G14)
+
+Check whether an `EDDCase` (`templateId: "Vetify.Compliance:EDDCase"`) exists for this review — the Supervisor's autonomous path opens one via `OpenEddCase` whenever the AML evidence shows a PEP-only hit (`pepHit: true` — distinct from a sanctions hit, which already leans toward reject). If one is `Open`, **`ApproveCompliance` will hard-fail** unless you pass its `ContractId` as `eddCaseCid` AND it's `Closed` — the ledger itself enforces this, not just convention.
+
+Work through the checklist with the officer via `UpdateEddChecklist` (`party: "verifier"`, nonconsuming — call it as many times as needed to progressively fill in fields):
+- `sourceOfWealthVerified`/`sourceOfWealthNote` — has the source of the individual's/business's wealth been documented and does it hold up?
+- `enhancedMediaSearchDone` — a deeper media search beyond the automated `adverse_media_screen` pass, specifically for PEP-relevant reputational risk
+- `seniorManagementSignoff` — the compliance officer's or committee's name/reference approving the relationship
+- `monitoringFrequency` — the ongoing monitoring cadence agreed for this relationship (e.g. `"quarterly"`)
+
+Only exercise `CloseEddCase` (`party: "verifier"`, args `closedBy_`) once the officer confirms every item is genuinely complete — the Daml choice itself asserts all four are filled in, so an incomplete checklist cannot be closed, but don't treat that assertion as the review: the officer's actual judgment on each item is the point, not just satisfying the ledger check. Then pass the same case's `ContractId` as `ApproveCompliance`'s `eddCaseCid`.
 
 ## Supporting References
 

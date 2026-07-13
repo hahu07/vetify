@@ -39,6 +39,7 @@ export default {
       fontFamily: {
         sans: ['Inter', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
+        display: ['Fraunces', 'ui-serif', 'Georgia', 'serif'],
       },
       borderRadius: {
         'xl': '12px',

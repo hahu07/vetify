@@ -9,19 +9,25 @@
  * Hard override: a Fraud Detection score below the policy's fraudReviewThreshold
  * forces riskCategory to High regardless of the weighted composite — mirroring
  * Stage 3's AML hard-override precedent (scoring/compliance.ts), where a bad
- * hard-rule signal is never just averaged away by good scores elsewhere. This does
- * not block BeginUnderwriting itself (unlike Stage 3's RejectCompliance) — Stage 6
- * has no Approve/Reject branching by design; the FI alone decides in Stage 7. It
- * only ensures the FI cannot miss the signal in the recommendation/risk category.
- * The threshold is per-institution policy data (UnderwritingScoringWeights.
+ * hard-rule signal is never just averaged away by good scores elsewhere. The
+ * threshold is per-institution policy data (UnderwritingScoringWeights.
  * fraudReviewThreshold), not a hardcoded constant — risk tolerance for a
  * rule-based (non-ML) fraud signal is a genuine FI-specific judgment call.
+ *
+ * decision mirrors VerificationDecision/ComplianceDecision's action-branching
+ * exactly: Low -> BeginUnderwriting (auto-qualify), Medium -> Flag (human
+ * assessor review), High -> RejectUnderwriting (hard veto, business never
+ * reaches the FI) — the fraud override above naturally routes to Reject since
+ * it forces riskCategory to High. This replaces Stage 6's previous "no
+ * Approve/Reject branching, BeginUnderwriting always proceeds" behavior now that
+ * `assessor` is a real party with its own screening authority, mirroring how
+ * verifier already screens businesses before Stage 5.
  *
  * Amount-vs-limit is a disclosure comparison here, not a scored factor: it's
  * reported as a flag/recommendation line rather than contributing points, since the
  * recommended limit itself is already derived from the other engines' evidence.
  */
-import type { EngineResult, UnderwritingAssessment, UnderwritingRiskFlag, UnderwritingScoringWeights } from "./types.js";
+import type { EngineResult, UnderwritingAssessment, UnderwritingDecision, UnderwritingRiskFlag, UnderwritingScoringWeights } from "./types.js";
 import { classifyRisk } from "../types/index.js";
 
 export interface CombineEngineInputs {
@@ -76,7 +82,7 @@ export function combineEngines(
   requestedAmount: number,
   averageMonthlyNetInflow: number,
   dscr: number | undefined,
-): { assessment: UnderwritingAssessment; riskFlags: UnderwritingRiskFlag[] } {
+): { assessment: UnderwritingAssessment; riskFlags: UnderwritingRiskFlag[]; decision: UnderwritingDecision } {
   const weightedSum =
     engines.financialBehaviour.score * weights.financialBehaviourEngineWeight +
     engines.cashflowRisk.score * weights.cashflowRiskEngineWeight +
@@ -116,5 +122,17 @@ export function combineEngines(
     fraudScore: engines.fraudDetection.score,
   };
 
-  return { assessment, riskFlags };
+  let decision: UnderwritingDecision;
+  if (riskCategory === "Low") {
+    decision = { action: "BeginUnderwriting", autoDecided: true };
+  } else if (riskCategory === "Medium") {
+    decision = { action: "FlagUnderwritingForManualReview", note: assessment.recommendation };
+  } else {
+    const reason = fraudOverrideTriggered
+      ? `Fraud Detection score of ${engines.fraudDetection.score}/100 fell below the review threshold.`
+      : `Composite risk score ${compositeScore}/100 falls in the High-risk band.`;
+    decision = { action: "RejectUnderwriting", autoDecided: true, reason };
+  }
+
+  return { assessment, riskFlags, decision };
 }

@@ -14,7 +14,7 @@ import StatusBadge from '../../components/StatusBadge'
 import AmountDisplay from '../../components/AmountDisplay'
 import { FullPageLoader, ErrorState } from '../../components/LoadingState'
 import { formatDate } from '../../lib/formatters'
-import { useOnboardingList, useComplianceQueue, useContracts } from '../../api/client'
+import { useOnboardingList, useApprovedBusinesses, useComplianceQueue, useContracts } from '../../api/client'
 
 interface Alert {
   id: string
@@ -28,13 +28,20 @@ export default function VetifyDashboard() {
   const { data: onboarding, isLoading: l1, isError: e1 } = useOnboardingList()
   const { data: complianceQueue, isLoading: l2, isError: e2 } = useComplianceQueue()
   const { data: contracts, isLoading: l3, isError: e3 } = useContracts()
+  // BusinessOnboarding.Approve archives BusinessOnboarding rather than
+  // recreating it (Onboarding.daml), so `onboarding.length` only ever counts
+  // businesses still mid-pipeline — it drops to 0 once everyone currently on
+  // the platform has been approved. "Total Businesses" needs the platform's
+  // actual business base, i.e. ApprovedBusiness — found live: the KPI read 0
+  // with 3 real approved businesses on the ledger.
+  const { data: approvedBusinesses, isLoading: l4, isError: e4 } = useApprovedBusinesses()
 
-  if (l1 || l2 || l3) return <Layout title="Platform Overview"><FullPageLoader /></Layout>
-  if (e1 || e2 || e3 || !onboarding || !complianceQueue || !contracts) {
+  if (l1 || l2 || l3 || l4) return <Layout title="Platform Overview"><FullPageLoader /></Layout>
+  if (e1 || e2 || e3 || e4 || !onboarding || !complianceQueue || !contracts || !approvedBusinesses) {
     return <Layout title="Platform Overview"><ErrorState message="Failed to load platform overview" /></Layout>
   }
 
-  const totalBusinesses = onboarding.length
+  const totalBusinesses = approvedBusinesses.length
   const pendingReviews = onboarding.filter((o) => o.status === 'UnderReview' || o.status === 'ManualReview').length
   const activeContracts = contracts.filter((c) => c.status === 'Active').length
   const pendingCompliance = complianceQueue.filter((c) => c.status === 'Pending' || c.status === 'UnderReview').length

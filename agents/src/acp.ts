@@ -39,12 +39,19 @@ const reportingMcp = new MultiServerMCPClient({
     canton: { command: "npm", args: ["run", "mcp:canton"] },
   },
 });
+const shariahMcp = new MultiServerMCPClient({
+  mcpServers: {
+    canton:  { command: "npm", args: ["run", "mcp:canton"] },
+    shariah: { command: "npm", args: ["run", "mcp:shariah"] },
+  },
+});
 
-const [verifierTools, underwritingTools, monitoringTools, reportingTools] = await Promise.all([
+const [verifierTools, underwritingTools, monitoringTools, reportingTools, shariahTools] = await Promise.all([
   verifierMcp.getTools(),
   underwritingMcp.getTools(),
   monitoringMcp.getTools(),
   reportingMcp.getTools(),
+  shariahMcp.getTools(),
 ]);
 
 await startServer({
@@ -74,30 +81,65 @@ await startServer({
     {
       name: "vetify-underwriting",
       description:
-        "Perform AI underwriting on a Vetify FinancingRequest contract. " +
-        "Retrieves 6-month bank statements and enriched transactions via mono.co Connect, " +
-        "assesses creditworthiness using mono.co DSCR scoring, analyses cash flow, " +
-        "scores risk 0-100, calculates a recommended financing limit, and exercises " +
-        "BeginUnderwriting on the Canton ledger to create an UnderwritingResult " +
-        "visible to the financial institution.",
+        "Assist a human assessor completing a FinancingRequest contract already " +
+        "flagged for UnderwritingManualReview — a human-supervised session, not " +
+        "autonomous decisioning. Every case here already went through the five " +
+        "deterministic scoring engines (agents/src/scoring/underwriting-*.ts) and scored " +
+        "in the Medium risk band: not strong enough to auto-qualify, not weak enough for " +
+        "the automatic hard veto. Reviews mono.co Connect/Creditworthiness evidence, " +
+        "reasons through what the fixed rubric couldn't, and exercises " +
+        "BeginUnderwriting/RejectUnderwriting only after the assessor confirms in " +
+        "conversation. (The unattended Supervisor loop uses a separate, evidence-only " +
+        "skill with no exercise_choice/create_contract access at all — see " +
+        "skills/underwriting — precisely so autonomous decisions are never freelanced " +
+        "by an LLM; this agent's broader tool access is safe specifically because a " +
+        "human is present watching every tool call.)",
       model,
       tools: underwritingTools,
       backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
-      skills: ["skills/underwriting"],
+      skills: ["skills/underwriting-review"],
       checkpointer: new MemorySaver(),
     },
     {
       name: "vetify-monitoring",
       description:
-        "Monitor a Vetify MurabahahContract for missed installment payments and delinquency. " +
-        "Calculates expected vs actual installments paid, verifies with mono.co transaction " +
-        "data if needed, and exercises FlagDelinquent on the Canton ledger when a borrower " +
-        "has missed more than one payment cycle. Used by financial institution staff to " +
-        "review delinquency flags before escalation.",
+        "Assist a human sentinel resolving a MurabahahContract already flagged for " +
+        "DelinquencyManualReview — a human-supervised session, not autonomous decisioning. " +
+        "Every case here already went through the deterministic scoring engine " +
+        "(agents/src/scoring/monitoring.ts) and came back ambiguous: exactly one missed " +
+        "installment, or two-or-more missed but a plausible unrecorded bank credit was found. " +
+        "Reviews mono.co transaction data and RepaymentRecord history, reasons through what " +
+        "the fixed rule couldn't, and exercises FlagDelinquent/ResumeActive only after the " +
+        "sentinel confirms in conversation. (The unattended Supervisor loop uses a separate, " +
+        "evidence-only skill with no exercise_choice access at all — see skills/monitoring — " +
+        "precisely so autonomous decisions are never freelanced by an LLM; this agent's " +
+        "broader tool access is safe specifically because a human is present watching every " +
+        "tool call. Direct Debit retries and GSM escalation are a separate concern, handled " +
+        "by runCollectionsAgent/skills/collections — out of scope for this agent.)",
       model,
       tools: monitoringTools,
       backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
-      skills: ["skills/monitoring"],
+      skills: ["skills/monitoring-review"],
+      checkpointer: new MemorySaver(),
+    },
+    {
+      name: "vetify-shariah",
+      description:
+        "Assist a human Shariah advisor reviewing a ComplianceReview's recorded Shariah " +
+        "pre-check verdict, especially REQUIRES_REVIEW cases — a human-supervised session, " +
+        "not autonomous decisioning. The standalone Shariah Agent (agents/src/agents/" +
+        "shariah.ts) has no ledger-write access at all: classifyShariahCompliance() (a " +
+        "maintained keyword table) is the verdict authority, and the RAG/LLM pipeline only " +
+        "ever produces a narrative on a table miss, never a verdict. The Supervisor records " +
+        "the result via RecordShariahPreCheck (dual-controller [advisor, vetify], gated " +
+        "by the AuthorizedAdvisor registry). This agent reviews that recorded " +
+        "verdict and exercises SupersedeShariahVerdict (controller vetify alone — the party " +
+        "that made the original call cannot unilaterally correct its own past decision) only " +
+        "after the advisor confirms in conversation.",
+      model,
+      tools: shariahTools,
+      backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
+      skills: ["skills/shariah-review"],
       checkpointer: new MemorySaver(),
     },
     {

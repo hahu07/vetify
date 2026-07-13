@@ -1,0 +1,1217 @@
+-- | Stage 1–2 tests: onboarding submission, verification approve/reject,
+--   amendment cycle, authorization guards, audit-metadata, and gap coverage.
+--   Tests are numbered below by the gap they exercise where applicable.
+module Vetify.Tests.OnboardingTests where
+
+import Daml.Script
+import DA.Time (hours)
+import Vetify.Types
+import Vetify.Onboarding
+import Vetify.Governance
+import Vetify.Tests.Fixtures
+
+data OnboardingParties = OnboardingParties with
+  business      : Party
+  vetify        : Party
+  verifier      : Party
+  riskCommittee : Party
+
+setupParties : Script OnboardingParties
+setupParties = do
+  -- Advance past epoch so `incorporationDate 2015-03-20` is not "in the future".
+  -- The sandbox starts at 1970-01-01T00:00:00Z; advancing 56 years puts us in ~2026.
+  passTime (hours (56 * 365 * 24))
+  business      <- allocateParty "Business"
+  vetify        <- allocateParty "Vetify"
+  verifier      <- allocateParty "Verifier"
+  riskCommittee <- allocateParty "RiskCommittee"
+  pure OnboardingParties with ..
+
+-- ─── Helpers ──────────────────────────────────────────────────────────────
+
+draftOnboarding : OnboardingParties -> Script (ContractId BusinessOnboarding)
+draftOnboarding p = submit p.business do
+  createCmd BusinessOnboarding with
+    business        = p.business
+    vetify          = p.vetify
+    verifier        = p.verifier
+    profile        = sampleProfile
+    kyc             = sampleKyc
+    status          = Draft
+    agentScore      = None
+    agentRisk       = None
+    submittedAt     = None
+    amendmentCount  = 0
+    documents       = [sampleDocRef]
+    documentHistory = []
+    agentNote       = None
+    agentVersion    = None
+    onboardingRef   = Some "ONB-2026-000001"
+    schemaVersion   = 1
+    workflowVersion = 1
+
+-- Agent auto-path: autoDecided=True, aiMetadata set, reviewerParty None.
+-- Model C Low risk: score must be >= 80 for riskLevel Low.
+agentApprove : VerificationChecks -> Int -> RiskLevel -> Approve
+agentApprove c s l = Approve with
+  checks                = c
+  checkScores           = Some sampleCheckScores
+  riskScore             = s
+  riskLevel             = l
+  autoDecided           = True
+  reviewerParty         = None
+  reviewedBy            = None
+  agentVersion          = Some "vetify-verification-v1.0"
+  aiMetadata            = Some sampleAIMetadata
+  verificationRef       = "VER-2026-000001"
+  overrideJustification = None
+  policyVersion         = "2026-v1"
+  overrideType          = None
+  reviewNotes           = None
+  policyCid             = None
+
+-- Human review path: autoDecided=False, reviewerParty set, aiMetadata None.
+-- Gap 7: overrideJustification required because the human decides after agent review.
+-- Gap 5: overrideType=OverrodeApproval — human is approving after the agent flagged.
+-- Gap 9: reviewNotes captured for human decision audit trail.
+humanApprove : Party -> VerificationChecks -> Int -> RiskLevel -> Approve
+humanApprove reviewer c s l = Approve with
+  checks                = c
+  checkScores           = None
+  riskScore             = s
+  riskLevel             = l
+  autoDecided           = False
+  reviewerParty         = Some reviewer
+  reviewedBy            = Some "officer-001"
+  agentVersion          = None
+  aiMetadata            = None
+  verificationRef       = "VER-2026-000001"
+  overrideJustification = Some "Manual review completed — risk assessed as acceptable"
+  policyVersion         = "2026-v1"
+  overrideType          = Some OverrodeApproval
+  reviewNotes           = Some "Reviewed all evidence; consistent with acceptable risk profile"
+  policyCid             = None
+
+-- ─── Gap 1 (formerly LF 2.3 contract key uniqueness; SDK 3.4.11 / LF 2.2 has
+-- no contract keys, so lookup is now a plain query filtered on business +
+-- CAC number instead of a ledger-side key resolution) ─────────────────────
+
+-- Active contract is findable by scanning business's active BusinessOnboarding
+-- contracts and filtering on the CAC number — useful for agents querying for
+-- pending applications now that ledger-side key lookup is unavailable.
+testKeyLookupByBusinessAndCac : Script ()
+testKeyLookupByBusinessAndCac = do
+  p       <- setupParties
+  _       <- draftOnboarding p
+  results <- query @BusinessOnboarding p.business
+  let found = filter (\(_, c) -> c.business == p.business && c.kyc.cacRegNumber == sampleKyc.cacRegNumber) results
+  assertMsg "Contract must be findable by (business, CAC) via query" (not (null found))
+
+-- Gap 1 (SLA): EscalateOverdue is blocked before the SLA window expires.
+testEscalateBlockedBeforeDeadline : Script ()
+testEscalateBlockedBeforeDeadline = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  -- Just submitted; 48-hour SLA window has not passed yet
+  submitMustFail p.vetify do exerciseCmd ur EscalateOverdue with slaHours = 48; policyCid = None
+  pure ()
+
+-- Gap 1 (SLA): EscalateOverdue succeeds after the SLA window expires.
+testEscalateSucceedsAfterDeadline : Script ()
+testEscalateSucceedsAfterDeadline = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  passTime (hours 49)
+  escalated <- submit p.vetify do exerciseCmd ur EscalateOverdue with slaHours = 48; policyCid = None
+  Some e <- queryContractId p.vetify escalated
+  assertMsg "Should be ManualReview after SLA escalation" (e.status == ManualReview)
+
+-- ─── Gap 2 (Decision lifecycle / correction) ─────────────────────────────
+
+-- An erroneous VerificationResult can be superseded; the correction is recorded
+-- as an immutable VerificationCorrection contract with full audit detail.
+testSupersedeFlow : Script ()
+testSupersedeFlow = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  res <- submit (actAs [p.verifier, p.vetify]) do exerciseCmd ur (agentApprove passingVerification 85 Low)
+  correction <- submit p.vetify do
+    exerciseCmd res Supersede with
+      correctionRef    = "COR-2026-000001"
+      correctedOutcome = Rejected
+      reason           = "Post-decision fraud discovery: synthetic CAC certificate"
+      correctedBy      = p.vetify
+  Some c <- queryContractId p.vetify correction
+  assertMsg "Original ref preserved in correction" (c.originalRef == "VER-2026-000001")
+  assertMsg "Original outcome was Approved" (c.originalOutcome == Approved)
+  assertMsg "Corrected outcome is Rejected" (c.correctedOutcome == Rejected)
+  assertMsg "Reason recorded" (c.reason /= "")
+  -- The original VerificationResult is archived after Supersede
+  archived <- queryContractId @VerificationResult p.vetify res
+  assertMsg "Original VerificationResult archived by Supersede" (archived == None)
+
+-- ─── Gap 3 (Reviewer identity) ───────────────────────────────────────────
+
+-- Human decisions (autoDecided=False) must include a reviewer party.
+testReviewerRequiredForHumanDecision : Script ()
+testReviewerRequiredForHumanDecision = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur Approve with
+      checks                = passingVerification
+      checkScores           = None
+      riskScore             = 85
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = None    -- missing: human decisions must set this
+      reviewedBy            = None
+      agentVersion          = None
+      aiMetadata            = None
+      verificationRef       = "VER-2026-TEST-001"
+      overrideJustification = None
+      policyVersion         = "2026-v1"
+      overrideType          = None
+      reviewNotes           = None
+      policyCid             = None
+  pure ()
+
+-- ─── Gap 6 (Approval business rules) ─────────────────────────────────────
+
+-- High-risk applications cannot be auto-approved by the agent.
+testCannotAutoApproveHighRisk : Script ()
+testCannotAutoApproveHighRisk = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur (agentApprove passingVerification 30 High)
+  pure ()
+
+-- ─── Gap 7 (Override justification) ─────────────────────────────────────
+
+-- When a human decides after the agent flagged the application, they must
+-- provide an override justification even if they agree with the agent.
+testOverrideRequiresJustification : Script ()
+testOverrideRequiresJustification = do
+  p       <- setupParties
+  cid     <- draftOnboarding p
+  ur      <- submit p.business do exerciseCmd cid SubmitForReview
+  flagged <- submit p.verifier do
+    exerciseCmd ur FlagForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-verification-v1.0"
+      note         = "Borderline NIN match — refer to human"
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd flagged Approve with
+      checks                = passingVerification
+      checkScores           = None
+      riskScore             = 65
+      riskLevel             = Medium
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "officer-001"
+      agentVersion          = None
+      aiMetadata            = None
+      verificationRef       = "VER-2026-TEST-001"
+      overrideJustification = None    -- missing: must provide justification
+      policyVersion         = "2026-v1"
+      overrideType          = None
+      reviewNotes           = None
+      policyCid             = None
+  pure ()
+
+-- ─── Gap 8 (verificationRef uniqueness) ──────────────────────────────────
+
+-- VerificationResult is findable by scanning verifier's active
+-- VerificationResult contracts and filtering on verificationRef — SDK 3.4.11 /
+-- LF 2.2 has no contract keys, so duplicate-ref prevention is no longer
+-- ledger-enforced (application-layer concern now), but the record should
+-- still be locatable via a plain query.
+testVerificationRefKeyLookup : Script ()
+testVerificationRefKeyLookup = do
+  p       <- setupParties
+  cid     <- draftOnboarding p
+  ur      <- submit p.business do exerciseCmd cid SubmitForReview
+  res     <- submit (actAs [p.verifier, p.vetify]) do exerciseCmd ur (agentApprove passingVerification 85 Low)
+  results <- query @VerificationResult p.vetify
+  let found = filter (\(_, r) -> r.verifier == p.verifier && r.verificationRef == "VER-2026-000001") results
+  assertMsg "VerificationResult findable by (verifier, verificationRef) via query" (not (null found))
+
+-- ─── Gap 9 (Onboarding reference mandatory on submit) ─────────────────────
+
+-- SubmitForReview must fail when onboardingRef has not been set.
+testOnboardingRefRequiredOnSubmit : Script ()
+testOnboardingRefRequiredOnSubmit = do
+  p <- setupParties
+  -- Create a draft WITHOUT onboardingRef (allowed at draft stage)
+  cid <- submit p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile; kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None   -- not set
+      schemaVersion = 1; workflowVersion = 1
+  -- Submission must fail until the onboardingRef is populated
+  submitMustFail p.business do exerciseCmd cid SubmitForReview
+  pure ()
+
+-- ─── Gap 12 (Document lifecycle preservation) ─────────────────────────────
+
+-- Prior document set is preserved in documentHistory when a new set is submitted.
+testDocumentHistoryPreserved : Script ()
+testDocumentHistoryPreserved = do
+  p    <- setupParties
+  cid  <- draftOnboarding p       -- documents = [sampleDocRef], documentHistory = []
+  ur   <- submit p.business do exerciseCmd cid SubmitForReview
+  pend <- submit p.vetify do exerciseCmd ur RequestAmendment with note = "Add utility bill"
+  let utilityBill = DocumentRef with
+        docType            = "UTILITY_BILL"
+        contentHash        = "sha256:b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5"
+        storageRef         = "s3://vetify-docs/RC123456/utility-bill.pdf"
+        mimeType           = Some "application/pdf"
+        malwareScanStatus  = Some "CLEAN"
+        fileSize           = Some 153600
+        checksumAlgorithm  = Some "sha256"
+        malwareScanAt      = None
+        digitalSignature   = None
+        signatureAlgorithm = None
+        signatoryRef       = None
+        signedAt           = None
+  amended <- submit p.business do
+    exerciseCmd pend Amend with
+      updatedProfile      = sampleProfile
+      updatedKyc          = sampleKyc
+      updatedDocuments    = [utilityBill]
+      policyMaxAmendments = None
+  Some a <- queryContractId p.business amended
+  assertMsg "New documents applied" (a.documents == [utilityBill])
+  assertMsg "Original documents preserved in history" (a.documentHistory == [[sampleDocRef]])
+  assertMsg "amendmentCount incremented to 1" (a.amendmentCount == 1)
+
+-- ─── Gap 13/14 (Identity and CAC numeric format) ─────────────────────────
+
+-- NIN must consist of decimal digits only (in addition to being 11 characters).
+testNinMustBeDigits : Script ()
+testNinMustBeDigits = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with directors = [sampleDirector with ninNumber = "1234567890A"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- BVN must consist of decimal digits only.
+testBvnMustBeDigits : Script ()
+testBvnMustBeDigits = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with directors = [sampleDirector with bvn = "A2345678901"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- CAC number suffix (after the 2-char prefix) must be all digits.
+testCacSuffixMustBeDigits : Script ()
+testCacSuffixMustBeDigits = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile
+      kyc = sampleKyc with cacRegNumber = "RC-12345"   -- hyphen in suffix
+      status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- Document types must be unique within a single submission.
+testDuplicateDocTypesRejected : Script ()
+testDuplicateDocTypesRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile; kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef, sampleDocRef]  -- duplicate CAC_CERTIFICATE
+      documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- ─── Happy path ───────────────────────────────────────────────────────────
+
+-- Draft → SubmitForReview records submittedAt; Approve produces VerificationResult
+-- with all new fields (policyVersion, submittedAt, overrideJustification) preserved.
+testApproveFlow : Script ()
+testApproveFlow = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  Some draft <- queryContractId p.business cid
+  assertMsg "submittedAt should be None before submission" (draft.submittedAt == None)
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  Some underReview <- queryContractId p.business ur
+  assertMsg "submittedAt should be set after submission" (underReview.submittedAt /= None)
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur (agentApprove passingVerification 85 Low)
+  Some r <- queryContractId p.vetify res
+  assertMsg "outcome should be Approved" (r.outcome == Approved)
+  assertMsg "cacRegNumber preserved" (r.cacRegNumber == "RC123456")
+  assertMsg "autoDecided true for agent path" r.autoDecided
+  assertMsg "verificationRef recorded" (r.verificationRef == "VER-2026-000001")
+  assertMsg "agentVersion recorded" (r.agentVersion == Some "vetify-verification-v1.0")
+  assertMsg "reviewerParty None for agent path" (r.reviewerParty == None)
+  assertMsg "checkScores recorded" (r.checkScores == Some sampleCheckScores)
+  assertMsg "aiMetadata recorded" (r.aiMetadata /= None)
+  assertMsg "policyVersion recorded" (r.policyVersion == "2026-v1")
+  assertMsg "submittedAt carried to result" (r.submittedAt /= None)
+  assertMsg "overrideJustification None for agent path" (r.overrideJustification == None)
+  -- After approval no active BusinessOnboarding remains for this CAC number —
+  -- a fresh onboarding cycle can begin (SDK 3.4.11 / LF 2.2 has no contract
+  -- keys, so this is now a plain query rather than a key-release check).
+  res2 <- query @BusinessOnboarding p.business
+  let stillActive = filter (\(_, c) -> c.business == p.business && c.kyc.cacRegNumber == sampleKyc.cacRegNumber) res2
+  assertMsg "No active BusinessOnboarding remains after approval" (null stillActive)
+
+-- Rejected decision preserved on-ledger with reason and provenance.
+testRejectFlow : Script ()
+testRejectFlow = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur Reject with
+      checks                = passingVerification with cacRegistered = False
+      checkScores           = Some sampleCheckScores
+      riskScore             = 30
+      riskLevel             = High
+      autoDecided           = True
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-verification-v1.0"
+      aiMetadata            = Some sampleAIMetadata
+      verificationRef       = "VER-2026-000001"
+      reason                = "CAC registration could not be verified"
+      overrideJustification = None
+      policyVersion         = "2026-v1"
+      overrideType          = None
+      reviewNotes           = None
+      policyCid             = None
+  Some r <- queryContractId p.vetify res
+  assertMsg "outcome should be Rejected" (r.outcome == Rejected)
+  assertMsg "reason preserved" (r.note == Some "CAC registration could not be verified")
+  assertMsg "policyVersion recorded on rejection" (r.policyVersion == "2026-v1")
+
+-- Human review path: reviewerParty set, checkScores None, autoDecided False.
+-- overrideJustification required because the agent previously flagged the application.
+testHumanReviewPath : Script ()
+testHumanReviewPath = do
+  p       <- setupParties
+  cid     <- draftOnboarding p
+  ur      <- submit p.business do exerciseCmd cid SubmitForReview
+  flagged <- submit p.verifier do
+    exerciseCmd ur FlagForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-verification-v1.0"
+      note         = "Borderline NIN match — refer to human"
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd flagged (humanApprove p.verifier passingVerification 65 Medium)
+  Some r <- queryContractId p.vetify res
+  assertMsg "autoDecided false for human path" (not r.autoDecided)
+  assertMsg "reviewerParty set for human path" (r.reviewerParty == Some p.verifier)
+  assertMsg "reviewedBy set for human path" (r.reviewedBy == Some "officer-001")
+  assertMsg "checkScores None for human path" (r.checkScores == None)
+  assertMsg "aiMetadata None for human path" (r.aiMetadata == None)
+  assertMsg "overrideJustification recorded" (r.overrideJustification /= None)
+
+-- ─── Amendment cycle ──────────────────────────────────────────────────────
+
+-- UnderReview → PendingAmendment → Draft → UnderReview → Approved.
+-- Key is preserved atomically across all transitions.
+testAmendmentFlow : Script ()
+testAmendmentFlow = do
+  p    <- setupParties
+  cid  <- draftOnboarding p
+  ur   <- submit p.business do exerciseCmd cid SubmitForReview
+  pend <- submit p.vetify do
+    exerciseCmd ur RequestAmendment with note = "Fix director NIN"
+  Some pc <- queryContractId p.business pend
+  assertMsg "status should be PendingAmendment" (pc.status == PendingAmendment)
+  let fixedProfile = sampleProfile with
+        directors = [sampleDirector with ninNumber = "99999999999"]
+  draft <- submit p.business do
+    exerciseCmd pend Amend with
+      updatedProfile      = fixedProfile
+      updatedKyc          = sampleKyc
+      updatedDocuments    = [sampleDocRef]
+      policyMaxAmendments = None
+  Some dc <- queryContractId p.business draft
+  assertMsg "status back to Draft" (dc.status == Draft)
+  assertMsg "amendmentCount incremented" (dc.amendmentCount == 1)
+  assertMsg "agentScore cleared" (dc.agentScore == None)
+  assertMsg "agentNote cleared after amendment" (dc.agentNote == None)
+  assertMsg "documentHistory has 1 entry" (length dc.documentHistory == 1)
+  ur2 <- submit p.business do exerciseCmd draft SubmitForReview
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur2 (agentApprove passingVerification 85 Low)
+  Some r <- queryContractId p.vetify res
+  assertMsg "outcome should be Approved after amendment" (r.outcome == Approved)
+
+-- CAC number cannot change during amendment.
+testAmendmentCannotChangeCac : Script ()
+testAmendmentCannotChangeCac = do
+  p    <- setupParties
+  cid  <- draftOnboarding p
+  ur   <- submit p.business do exerciseCmd cid SubmitForReview
+  pend <- submit p.vetify do
+    exerciseCmd ur RequestAmendment with note = "Data correction"
+  submitMustFail p.business do
+    exerciseCmd pend Amend with
+      updatedProfile      = sampleProfile
+      updatedKyc          = sampleKyc with cacRegNumber = "RC999999"
+      updatedDocuments    = [sampleDocRef]
+      policyMaxAmendments = None
+  pure ()
+
+-- ─── CAMA / CAC director and format rules ─────────────────────────────────
+
+testEmptyDirectorsRejected : Script ()
+testEmptyDirectorsRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with directors = []
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testLimitedCompanyOneDirectorAccepted : Script ()
+testLimitedCompanyOneDirectorAccepted = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  Some c <- queryContractId p.business cid
+  assertMsg "1-director LimitedCompany should be accepted" (length c.profile.directors == 1)
+
+testSoleProprietorshipMultipleAccepted : Script ()
+testSoleProprietorshipMultipleAccepted = do
+  p <- setupParties
+  cid <- submit p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleSoleProfile; kyc = sampleSoleKyc
+      status = Draft; agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  Some c <- queryContractId p.business cid
+  assertMsg "Multi-proprietor SoleProprietorship should be accepted"
+    (length c.profile.directors == 2)
+
+testLimitedCompanyMustHaveRcPrefix : Script ()
+testLimitedCompanyMustHaveRcPrefix = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile; kyc = sampleSoleKyc
+      status = Draft; agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testSoleProprietorshipMustHaveBnPrefix : Script ()
+testSoleProprietorshipMustHaveBnPrefix = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleSoleProfile; kyc = sampleKyc
+      status = Draft; agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testInvalidNinLengthRejected : Script ()
+testInvalidNinLengthRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with directors = [sampleDirector with ninNumber = "123"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testInvalidBvnLengthRejected : Script ()
+testInvalidBvnLengthRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with directors = [sampleDirector with bvn = "12345"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testMissingBusinessActivityRejected : Script ()
+testMissingBusinessActivityRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with businessActivity = ""
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- ─── Duplicate director guard ─────────────────────────────────────────────
+
+testDuplicateDirectorNinRejected : Script ()
+testDuplicateDirectorNinRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with
+        directors = [sampleDirector, sampleDirector with bvn = "99999999999"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+testDuplicateDirectorBvnRejected : Script ()
+testDuplicateDirectorBvnRejected = do
+  p <- setupParties
+  submitMustFail p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile with
+        directors = [sampleDirector, sampleDirector with ninNumber = "99999999999"]
+      kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  pure ()
+
+-- ─── Risk score range and consistency guards ──────────────────────────────
+
+testRejectsScoreAbove100 : Script ()
+testRejectsScoreAbove100 = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur (agentApprove passingVerification 101 Low)
+  pure ()
+
+testAgentScoreLevelMismatchRejected : Script ()
+testAgentScoreLevelMismatchRejected = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  -- Gap 6 blocks auto-approve High; even if it passed, VerificationResult.ensure
+  -- would reject because 85 is not < 50 (required for High by Model C)
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur (agentApprove passingVerification 85 High)
+  pure ()
+
+-- ─── Verification check gate ─────────────────────────────────────────────
+
+testCannotApproveWithFailedIdentityCheck : Script ()
+testCannotApproveWithFailedIdentityCheck = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail p.vetify do
+    exerciseCmd ur
+      (agentApprove (passingVerification with identityVerified = False) 85 Low)
+  pure ()
+
+-- ─── verificationRef guard ───────────────────────────────────────────────
+
+testVerificationRefRequired : Script ()
+testVerificationRefRequired = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur ((agentApprove passingVerification 85 Low) with verificationRef = "")
+  pure ()
+
+-- ─── Manual review metadata persistence ──────────────────────────────────
+
+testFlagForManualReview : Script ()
+testFlagForManualReview = do
+  p       <- setupParties
+  cid     <- draftOnboarding p
+  ur      <- submit p.business do exerciseCmd cid SubmitForReview
+  flagged <- submit p.verifier do
+    exerciseCmd ur FlagForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-verification-v1.0"
+      note         = "Borderline NIN match — refer to human"
+  Some f <- queryContractId p.vetify flagged
+  assertMsg "status should be ManualReview" (f.status == ManualReview)
+  assertMsg "agentScore recorded" (f.agentScore == Some 65)
+  assertMsg "agentNote persisted on contract"
+    (f.agentNote == Some "Borderline NIN match — refer to human")
+  assertMsg "agentVersion persisted on contract"
+    (f.agentVersion == Some "vetify-verification-v1.0")
+
+-- ─── Amendment limit ─────────────────────────────────────────────────────
+
+testAmendmentLimitEnforced : Script ()
+testAmendmentLimitEnforced = do
+  p <- setupParties
+  atLimit <- submit p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile; kyc = sampleKyc
+      status = PendingAmendment
+      agentScore = None; agentRisk = None; submittedAt = None
+      amendmentCount = 5
+      documents = [sampleDocRef]; documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = None; schemaVersion = 1; workflowVersion = 1
+  submitMustFail p.business do
+    exerciseCmd atLimit Amend with
+      updatedProfile      = sampleProfile
+      updatedKyc          = sampleKyc
+      updatedDocuments    = [sampleDocRef]
+      policyMaxAmendments = None
+  pure ()
+
+-- ─── Authorization guards ─────────────────────────────────────────────────
+
+testCannotResubmitUnderReview : Script ()
+testCannotResubmitUnderReview = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail p.business do exerciseCmd ur SubmitForReview
+  pure ()
+
+testOnlyVerifierCanApprove : Script ()
+testOnlyVerifierCanApprove = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail p.business do
+    exerciseCmd ur (agentApprove passingVerification 85 Low)
+  pure ()
+
+-- Proves the authorization migration actually took effect: vetify alone is no
+-- longer sufficient to Approve (that authority moved to verifier).
+testVetifyAloneCannotApprove : Script ()
+testVetifyAloneCannotApprove = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail p.vetify do
+    exerciseCmd ur (agentApprove passingVerification 85 Low)
+  pure ()
+
+-- ─── Gap 10 (Mandatory check scores for agent decisions) ─────────────────
+
+-- Agent auto-decisions (autoDecided=True) must include VerificationCheckScores.
+testMandatoryCheckScoresForAgent : Script ()
+testMandatoryCheckScoresForAgent = do
+  p   <- setupParties
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur ((agentApprove passingVerification 85 Low) with checkScores = None)
+  pure ()
+
+-- ─── Gap 7 (Malware scan gate) ───────────────────────────────────────────
+
+-- A document with an explicit FLAGGED malware scan status blocks approval.
+testFlaggedDocumentBlocksApproval : Script ()
+testFlaggedDocumentBlocksApproval = do
+  p <- setupParties
+  cid <- submit p.business do
+    createCmd BusinessOnboarding with
+      business = p.business; vetify = p.vetify; verifier = p.verifier
+      profile = sampleProfile; kyc = sampleKyc; status = Draft
+      agentScore = None; agentRisk = None; submittedAt = None; amendmentCount = 0
+      documents = [sampleDocRef with malwareScanStatus = Some "FLAGGED"]
+      documentHistory = []; agentNote = None; agentVersion = None
+      onboardingRef = Some "ONB-2026-MALWARE-001"; schemaVersion = 1; workflowVersion = 1
+  ur <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur (agentApprove passingVerification 85 Low)
+  pure ()
+
+-- ─── Gap 1/2 (Policy-driven required document types) ─────────────────────
+
+-- VerificationPolicy.requiredDocTypes enforces which document types must be
+-- present before approval is permitted. Missing a required type blocks the choice.
+testRequiredDocTypeEnforced : Script ()
+testRequiredDocTypeEnforced = do
+  p     <- setupParties
+  vpCid <- submit p.vetify do
+    createCmd VerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE", "UTILITY_BILL"]
+      policyVersion    = "2026-v1"
+      scoringWeights    = sampleVerificationScoringWeights
+  -- draftOnboarding uses [sampleDocRef] = ["CAC_CERTIFICATE"] only — UTILITY_BILL missing
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur ((agentApprove passingVerification 85 Low) with policyCid = Some vpCid)
+  pure ()
+
+-- ─── Gap 5 + Gap 9 (Override type and reviewer notes) ────────────────────
+
+-- When a human approves after agent flagging, both the override type and
+-- reviewer notes are recorded on the VerificationResult.
+testOverrideTypeAndReviewNotesRecorded : Script ()
+testOverrideTypeAndReviewNotesRecorded = do
+  p       <- setupParties
+  cid     <- draftOnboarding p
+  ur      <- submit p.business do exerciseCmd cid SubmitForReview
+  flagged <- submit p.verifier do
+    exerciseCmd ur FlagForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-verification-v1.0"
+      note         = "Borderline NIN match — refer to human"
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd flagged (humanApprove p.verifier passingVerification 65 Medium)
+  Some r <- queryContractId p.vetify res
+  assertMsg "overrideType recorded as OverrodeApproval" (r.overrideType == Some OverrodeApproval)
+  assertMsg "reviewNotes recorded" (r.reviewNotes /= None)
+  pure ()
+
+-- ─── Gap 1: Policy approval threshold enforcement ─────────────────────────
+
+-- When an active VerificationPolicy exists, an agent may not auto-approve an
+-- application whose score falls below policy.autoApproveMin (80).
+-- Score 75 (Medium risk) is below the 80 threshold → submitMustFail.
+testPolicyApprovalThresholdEnforced : Script ()
+testPolicyApprovalThresholdEnforced = do
+  p     <- setupParties
+  vpCid <- submit p.vetify do
+    createCmd VerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v1"
+      scoringWeights    = sampleVerificationScoringWeights
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  -- Score 75 is Medium risk; policy requires >= 80 for agent auto-approval
+  submitMustFail (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur ((agentApprove passingVerification 75 Medium) with policyCid = Some vpCid)
+  pure ()
+
+-- ─── Gap 1: EscalateOverdue reads SLA from active policy ─────────────────
+
+-- When a VerificationPolicy is active with slaHours = 24, EscalateOverdue
+-- uses 24h (not the caller-supplied 48h). After 25h the policy window has
+-- expired → escalation succeeds even though the 48h parameter has not elapsed.
+testEscalatePolicySlaUsed : Script ()
+testEscalatePolicySlaUsed = do
+  p     <- setupParties
+  vpCid <- submit p.vetify do
+    createCmd VerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 24        -- policy says 24h SLA
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v1"
+      scoringWeights    = sampleVerificationScoringWeights
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  passTime (hours 25)              -- past policy's 24h window but not the 48h parameter
+  -- slaHours = 48 is ignored; policy.slaHours = 24 applies → escalation succeeds
+  escalated <- submit p.vetify do exerciseCmd ur EscalateOverdue with slaHours = 48; policyCid = Some vpCid
+  Some e <- queryContractId p.vetify escalated
+  assertMsg "Status must be ManualReview after policy-driven SLA expiry" (e.status == ManualReview)
+  pure ()
+
+-- ─── Gap 4: policyVersion derived from active VerificationPolicy ──────────
+
+-- Approve records the policyVersion from the active VerificationPolicy,
+-- ignoring the caller-supplied parameter value.
+testPolicyVersionDerivedFromPolicy : Script ()
+testPolicyVersionDerivedFromPolicy = do
+  p     <- setupParties
+  vpCid <- submit p.vetify do
+    createCmd VerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v2"   -- intentionally different from agentApprove's "2026-v1"
+      scoringWeights   = sampleVerificationScoringWeights
+  cid <- draftOnboarding p
+  ur  <- submit p.business do exerciseCmd cid SubmitForReview
+  -- agentApprove helper hard-codes policyVersion = "2026-v1", but the active
+  -- policy has "2026-v2" — the VerificationResult should record "2026-v2"
+  res <- submit (actAs [p.verifier, p.vetify]) do
+    exerciseCmd ur ((agentApprove passingVerification 85 Low) with policyCid = Some vpCid)
+  Some r <- queryContractId p.vetify res
+  assertMsg "policyVersion must come from active VerificationPolicy, not from the caller"
+    (r.policyVersion == "2026-v2")
+  pure ()
+
+-- ─── Maker-checker for VerificationPolicy changes ──────────────────────────
+
+-- ApprovePolicyChange with a distinct approver activates the proposal: the
+-- new VerificationPolicy exists and carries the proposed scoringWeights.
+testPolicyChangeApprovedByDifferentPerson : Script ()
+testPolicyChangeApprovedByDifferentPerson = do
+  p <- setupParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights with identityVerified = 30
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review — raise identity check weight"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  activeCid <- submit p.vetify do
+    exerciseCmd endorsed ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  Some active <- queryContractId p.vetify activeCid
+  assertMsg "activated policy carries the proposed weights" (active.scoringWeights.identityVerified == 30)
+  assertMsg "activated policy carries the proposed version" (active.policyVersion == "2026-v3")
+
+-- The same person cannot both propose and approve — this is the whole point
+-- of the gate, so it must fail, not just be discouraged by convention.
+testPolicyChangeCannotSelfApprove : Script ()
+testPolicyChangeCannotSelfApprove = do
+  p <- setupParties
+  t <- getTime
+  -- A real, registered PolicyApprover is needed to supply a valid ContractId
+  -- argument (no contract keys/conjured CIDs on SDK 3.4.11 / LF 2.2) — but the
+  -- self-approve assertion (approvedBy == proposedBy below) fails before this
+  -- ContractId is ever fetched, so its identity doesn't matter to this test.
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Alice (Risk Analyst)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- Approving a proposal replaces whichever VerificationPolicy was previously
+-- active — old scoringWeights are gone, not merely shadowed.
+testPolicyChangeReplacesActivePolicy : Script ()
+testPolicyChangeReplacesActivePolicy = do
+  p <- setupParties
+  t <- getTime
+  currentPolicyCid <- submit p.vetify do
+    createCmd VerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v1"
+      scoringWeights   = sampleVerificationScoringWeights
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v2"
+      scoringWeights   = sampleVerificationScoringWeights with identityVerified = 20
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Lower identity check weight"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  activeCid <- submit p.vetify do
+    exerciseCmd endorsed ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = Some currentPolicyCid
+  Some active <- queryContractId p.vetify activeCid
+  assertMsg "the new policy version is active" (active.policyVersion == "2026-v2")
+  assertMsg "the old scoringWeights no longer apply" (active.scoringWeights.identityVerified == 20)
+  -- Not asserted here: that a second VerificationPolicy create would now
+  -- fail on the vetify-singleton key. dpm test's in-memory Script
+  -- interpreter doesn't enforce ledger-level key uniqueness (see
+  -- testVerificationRefKeyLookup's comment above) — only a real Canton
+  -- participant does. ApprovePolicyChange's own successful create (asserted
+  -- above) already proves the archive-then-create ran without a spurious
+  -- duplicate-key failure against the old policy within the same transaction.
+  pure ()
+
+-- RejectPolicyChange withdraws a proposal without ever creating a
+-- VerificationPolicy — self-rejection (withdrawing your own draft) is fine.
+testPolicyChangeCanBeRejected : Script ()
+testPolicyChangeCanBeRejected = do
+  p <- setupParties
+  t <- getTime
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Experimental change"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submit p.vetify do
+    exerciseCmd pending RejectPolicyChange with
+      rejectedBy      = "Alice (Risk Analyst)"
+      rejectionReason = "Decided against it before anyone else reviewed"
+  pure ()
+
+-- Layer 1 of the Policy-Approval Security Roadmap: an unregistered name
+-- cannot approve, even though it legitimately differs from proposedBy.
+-- SDK 3.4.11 / LF 2.2 has no contract keys, so a ContractId can no longer be
+-- conjured for an unregistered name via lookupByKey failing gracefully —
+-- there is no valid ContractId to construct for someone who was never
+-- registered at all. Instead this exercises the same underlying business
+-- rule (requireActivePolicyApprover's name-match assertion in
+-- Vetify.Governance) via a real, registered approver's ContractId presented
+-- with a mismatched `approvedBy` name ("Carol", who never registered).
+testPolicyChangeFailsIfApproverNotRegistered : Script ()
+testPolicyChangeFailsIfApproverNotRegistered = do
+  p <- setupParties
+  t <- getTime
+  -- A real registrant, "Bob" — but the approval below claims to be "Carol",
+  -- who was never registered as a PolicyApprover.
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Carol (Nobody in Particular)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- A deactivated approver cannot approve, even though they were once registered.
+testPolicyChangeFailsIfApproverDeactivated : Script ()
+testPolicyChangeFailsIfApproverDeactivated = do
+  p <- setupParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  deactivatedCid <- submit p.vetify do
+    exerciseCmd approverCid DeactivatePolicyApprover with
+      reason      = "Left the risk committee"
+      performedBy = "Vetify Founder"
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = deactivatedCid
+      currentPolicyCid = None
+  pure ()
+
+-- Layer 2 of the Policy-Approval Security Roadmap: vetify cannot finalize a
+-- policy change on its own, even with a validly registered approver, until
+-- the Risk Committee's own separately-signed transaction has endorsed it.
+testPolicyChangeFailsWithoutRiskCommitteeEndorsement : Script ()
+testPolicyChangeFailsWithoutRiskCommitteeEndorsement = do
+  p <- setupParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  -- No EndorseByRiskCommittee call — a registered approver alone is not enough.
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- EndorseByRiskCommittee cannot be exercised twice on the same proposal.
+testPolicyChangeCannotDoubleEndorse : Script ()
+testPolicyChangeCannotDoubleEndorse = do
+  p <- setupParties
+  t <- getTime
+  pending <- submit p.vetify do
+    createCmd PendingVerificationPolicy with
+      vetify           = p.vetify
+      maxAmendments    = 5
+      slaHours         = 48
+      autoApproveMin   = 80
+      autoRejectMax    = 50
+      requiredDocTypes = ["CAC_CERTIFICATE"]
+      policyVersion    = "2026-v3"
+      scoringWeights   = sampleVerificationScoringWeights
+      proposedBy       = "Alice (Risk Analyst)"
+      reason           = "Quarterly rubric review"
+      proposedAt       = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  submitMustFail p.riskCommittee do
+    exerciseCmd endorsed EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  pure ()

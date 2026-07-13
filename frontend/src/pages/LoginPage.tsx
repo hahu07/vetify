@@ -4,19 +4,30 @@ import { Eye, EyeOff, ArrowLeft, Loader2 } from 'lucide-react'
 import { useAuth } from '../auth/AuthContext'
 
 export default function LoginPage() {
-  const { login } = useAuth()
+  const { login, verifyMfa } = useAuth()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Layer 4: set after a successful password step on an MFA-enabled account —
+  // the form switches to a 6-digit TOTP code input until verifyMfa succeeds.
+  const [mfaStep, setMfaStep] = useState(false)
+  const [mfaCode, setMfaCode] = useState('')
 
   const handleSubmit = async () => {
-    if (!email || !password || loading) return
+    if (loading) return
     setError(null)
     setLoading(true)
     try {
-      await login(email, password)
+      if (mfaStep) {
+        if (!mfaCode) return
+        await verifyMfa(mfaCode)
+      } else {
+        if (!email || !password) return
+        const result = await login(email, password)
+        if (result === 'mfa') setMfaStep(true)
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid email or password')
     } finally {
@@ -114,52 +125,82 @@ export default function LoginPage() {
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit() } }}
             className="space-y-4"
           >
-            {/* Email */}
-            <div>
-              <label htmlFor="email" className="block text-xs font-medium text-gray-700 mb-1.5">
-                Email address
-              </label>
-              <input
-                id="email"
-                type="email"
-                autoComplete="email"
-                placeholder="your@email.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="input"
-                disabled={loading}
-              />
-            </div>
+            {!mfaStep && (
+              <>
+                {/* Email */}
+                <div>
+                  <label htmlFor="email" className="block text-xs font-medium text-gray-700 mb-1.5">
+                    Email address
+                  </label>
+                  <input
+                    id="email"
+                    type="email"
+                    autoComplete="email"
+                    placeholder="your@email.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="input"
+                    disabled={loading}
+                  />
+                </div>
 
-            {/* Password */}
-            <div>
-              <label htmlFor="password" className="block text-xs font-medium text-gray-700 mb-1.5">
-                Password
-              </label>
-              <div className="relative">
+                {/* Password */}
+                <div>
+                  <label htmlFor="password" className="block text-xs font-medium text-gray-700 mb-1.5">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <input
+                      id="password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      placeholder="••••••••"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                      className="input pr-10"
+                      disabled={loading}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600 transition-colors"
+                      tabIndex={-1}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                    >
+                      {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* Layer 4 TOTP step — shown only for MFA-enabled accounts */}
+            {mfaStep && (
+              <div>
+                <label htmlFor="mfa-code" className="block text-xs font-medium text-gray-700 mb-1.5">
+                  Authenticator code
+                </label>
                 <input
-                  id="password"
-                  type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  id="mfa-code"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  placeholder="123456"
+                  maxLength={6}
+                  value={mfaCode}
+                  onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ''))}
                   required
-                  className="input pr-10"
+                  className="input font-mono tracking-widest"
                   disabled={loading}
+                  autoFocus
                 />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword((v) => !v)}
-                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-gray-400 hover:text-gray-600 transition-colors"
-                  tabIndex={-1}
-                  aria-label={showPassword ? 'Hide password' : 'Show password'}
-                >
-                  {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                </button>
+                <p className="text-xs text-gray-400 mt-1.5">
+                  This account has MFA enabled — enter the 6-digit code from your authenticator app.
+                </p>
               </div>
-            </div>
+            )}
 
             {/* Error */}
             {error && (
@@ -176,17 +217,17 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={loading || !email || !password}
+              disabled={loading || (mfaStep ? mfaCode.length !== 6 : (!email || !password))}
               className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-lg text-sm font-medium text-white transition-opacity disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90"
               style={{ backgroundColor: '#0D6E4D' }}
             >
               {loading ? (
                 <>
                   <Loader2 size={15} className="animate-spin" />
-                  Signing in…
+                  {mfaStep ? 'Verifying…' : 'Signing in…'}
                 </>
               ) : (
-                'Sign in'
+                mfaStep ? 'Verify code' : 'Sign in'
               )}
             </button>
           </form>
@@ -225,9 +266,9 @@ export default function LoginPage() {
 
           <p className="text-center text-xs text-gray-400 mt-6">
             Don't have an account?{' '}
-            <a href="mailto:hello@vetify.ng" className="text-gray-600 hover:text-gray-800 underline transition-colors">
-              Contact us
-            </a>
+            <Link to="/signup" className="text-gray-600 hover:text-gray-800 underline transition-colors">
+              Sign up
+            </Link>
           </p>
         </div>
       </div>

@@ -47,7 +47,7 @@ function EndorseCard({
 }
 
 function summarizeVerificationWeights(w: VerificationScoringWeights): string {
-  return `identityPerfect=${w.identityPerfect}, cacActiveExactMatch=${w.cacActiveExactMatch}, tinVerifiedMatchesCac=${w.tinVerifiedMatchesCac}`
+  return `identityVerified=${w.identityVerified}, cacActiveExactMatch=${w.cacActiveExactMatch}, tinVerifiedMatchesCac=${w.tinVerifiedMatchesCac}`
 }
 
 function summarizeComplianceWeights(w: ComplianceScoringWeights): string {

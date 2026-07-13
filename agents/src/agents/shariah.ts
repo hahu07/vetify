@@ -18,10 +18,11 @@
  */
 import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
-import { ChatAnthropic } from "@langchain/anthropic";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
 import { classifyShariahCompliance } from "../scoring/shariah-policy.js";
+import { buildModel, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience } from "./util.js";
+import { ShariahNarrativeSchema } from "./evidence-schemas.js";
 import type { ShariahVerdict } from "../scoring/shariah-policy.js";
 
 export type { ShariahVerdict };
@@ -80,36 +81,33 @@ export async function runShariahAgent(
     mcpServers: { shariah: { command: "npm", args: ["run", "mcp:shariah"] } },
   });
   const tools = await mcpClient.getTools();
-  const model = new ChatAnthropic({
-    model: process.env.LLM_MODEL ?? "claude-sonnet-4-6",
-    temperature: 0,
-  });
 
   const agent = createDeepAgent({
-    model,
+    model: buildModel(),
     tools,
-    systemPrompt: NARRATIVE_SYSTEM_PROMPT,
+    systemPrompt: NARRATIVE_SYSTEM_PROMPT + "\n\n" + UNTRUSTED_DATA_GUIDANCE,
     backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
     skills: ["skills/shariah"],
     checkpointer: new MemorySaver(),
   });
 
+  // Sector/activity/purpose are business-authored text — fenced (G3) so a
+  // crafted business description can't steer the narrative generation. The
+  // verdict itself is already fixed and cannot be affected either way.
   const task = `
 Explain, for a human Shariah officer, why the following business needs manual Shariah review
 (it did not match any entry in the maintained sector policy table).
 
-Business Sector:   ${businessSector}
-Business Activity: ${businessActivity}
-Financing Purpose: ${financingPurpose}
+${fenceUntrusted("business-application", { businessSector, businessActivity, financingPurpose })}
 
 Run query_shariah_ruling, review the retrieved AAOIFI/CBN passages, and return the JSON object
 described in your system prompt. Do not include a "verdict" field — it is already fixed to
 REQUIRES_REVIEW and is not yours to decide.
 `.trim();
 
-  const result = await agent.invoke({
+  const result = await withLlmResilience("Shariah narrative", () => agent.invoke({
     messages: [{ role: "user", content: task }],
-  });
+  }));
   await mcpClient.close();
 
   const lastMessage = result.messages[result.messages.length - 1];
@@ -118,21 +116,18 @@ REQUIRES_REVIEW and is not yours to decide.
       ? lastMessage.content
       : JSON.stringify(lastMessage.content);
 
-  const jsonMatch = content.match(/\{[\s\S]*"reasoning"[\s\S]*?\}/);
-  if (!jsonMatch) {
+  try {
+    // Schema-validated (G3/G13) — length-capped reasoning/citations, since
+    // this narrative is persisted on-ledger inside ShariahAssessment.
+    const parsed = parseEvidence(content, ShariahNarrativeSchema, "Shariah Agent narrative");
+    return { verdict: "REQUIRES_REVIEW", reasoning: parsed.reasoning, citations: parsed.citations ?? [] };
+  } catch {
     // Even a malformed narrative response cannot change the verdict — fall
     // back to a minimal, honest record rather than fail the whole pipeline.
     return {
       verdict: "REQUIRES_REVIEW",
-      reasoning: `Sector not found in the maintained Shariah policy table. Narrative generation failed to return valid JSON: ${content}`,
+      reasoning: `Sector not found in the maintained Shariah policy table. Narrative generation failed schema validation: ${content.slice(0, 500)}`,
       citations: [],
     };
   }
-
-  const parsed = JSON.parse(jsonMatch[0]) as { reasoning?: string; citations?: string[] };
-  return {
-    verdict: "REQUIRES_REVIEW",
-    reasoning: parsed.reasoning ?? "Sector not found in the maintained Shariah policy table.",
-    citations: parsed.citations ?? [],
-  };
 }

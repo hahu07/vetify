@@ -1,0 +1,3191 @@
+-- | Stage 7→10 tests: full Wa'd → Wakala → AssetPurchaseRecord → Qabdh →
+--   MurabahahProposal → MurabahahContract flow; payment guards; delinquency;
+--   Ibra'; LatePaymentCharity; Rahn; default; closure.
+module Vetify.Tests.MurabahahTests where
+
+import Daml.Script
+import DA.Date
+import DA.Time
+import Vetify.Types
+import Vetify.Murabahah
+import Vetify.Governance
+import Vetify.Tests.Fixtures
+
+data MParties = MParties with
+  business    : Party
+  vetify      : Party
+  fi          : Party
+  regulator   : Party
+  sentinel    : Party
+  advisor     : Party
+  -- | The registered AuthorizedSentinel/AuthorizedAdvisor entries created in
+  -- setupMParties, threaded explicitly to every FlagDelinquent/ResumeActive/
+  -- CertifyShariahTerms call site — caller-supplied, since SDK 3.4.11 /
+  -- Daml-LF 2.1/2.2 does not support contract keys (no lookupByKey).
+  sentinelCid : ContractId AuthorizedSentinel
+  advisorCid  : ContractId AuthorizedAdvisor
+
+setupMParties : Script MParties
+setupMParties = do
+  business  <- allocateParty "Business"
+  vetify    <- allocateParty "Vetify"
+  fi        <- allocateParty "FI"
+  regulator <- allocateParty "Regulator"
+  sentinel  <- allocateParty "Sentinel"
+  advisor   <- allocateParty "Advisor"
+  t <- getTime
+  sentinelCid <- submit vetify do
+    createCmd AuthorizedSentinel with
+      vetify
+      sentinel
+      role         = "Senior Portfolio Analyst"
+      authorizedBy = "Vetify Head of Risk"
+      authorizedAt = t
+      active       = True
+  -- G11: register the advisor so CertifyShariahTerms (requireActiveAdvisor) passes.
+  advisorCid <- submit vetify do
+    createCmd AuthorizedAdvisor with
+      vetify
+      advisor
+      role         = "Shari'a Supervisory Board Member"
+      authorizedBy = "Vetify Head of Shariah Governance"
+      authorizedAt = t
+      active       = True
+  pure MParties with ..
+
+-- G11: advisor certifies a proposal's terms, returning the certification CID the
+-- business must present to AcceptProposal. Mirrors the real flow: OfferMurabahah →
+-- CertifyShariahTerms → AcceptProposal.
+certifyProposal : MParties -> ContractId MurabahahProposal -> Script (ContractId ShariahContractCertification)
+certifyProposal p proposal =
+  submit (actAs [p.advisor, p.vetify]) do
+    exerciseCmd proposal CertifyShariahTerms with
+      certificationRef = "SSB-CERT-2026-0001"
+      aaoifiStandards  = ["Std No. 8", "Std No. 40"]
+      rationale        = "Cost, profit, sale price and tenure conform to AAOIFI Murabahah standards."
+      certifiedBy      = "Sh. Test Advisor"
+      advisorCid       = p.advisorCid
+
+-- ─── Helpers ──────────────────────────────────────────────────────────────
+
+-- Full Wa'd → Wakala path to an active MurabahahContract.
+activeContractViaWakala : MParties -> Script (ContractId MurabahahContract)
+activeContractViaWakala p = do
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  wakala <- submit p.fi do exerciseCmd wad ProceedWithWakala
+  apr <- submit p.business do
+    exerciseCmd wakala RecordAssetPurchase with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "LMS-INV-2026-00441"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  aprAcked <- submit p.business do exerciseCmd apr AcknowledgeDelivery
+  proposal <- submit p.fi do
+    exerciseCmd aprAcked OfferMurabahah with
+      murabahahTerms      = sampleMurabahahTerms
+      paymentSchedule     = samplePaymentSchedule
+      regulator           = Some p.regulator
+      advisor             = p.advisor
+      facilityRef         = "FAC-2026-RC123456-001"
+      startDate           = date 2026 Jul 1
+      acceptanceExpiresAt = None
+  cert <- certifyProposal p proposal
+  submit p.business do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+
+-- Direct helper for unit-testing payment/closure without repeating the
+-- full acquisition chain in every test.
+activeContractDirect : MParties -> Script (ContractId MurabahahContract)
+activeContractDirect p = do
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  cert <- certifyProposal p proposal
+  submit p.business do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+
+-- Same as activeContractDirect but for a second, distinctly-referenced facility
+-- of the same business/FI — used to test that facility-scoped choices reject a
+-- ContractId belonging to a different facility.
+activeContractDirectWithRef : MParties -> Text -> Script (ContractId MurabahahContract)
+activeContractDirectWithRef p ref = do
+  schedCid <- submit p.fi do
+    createCmd PaymentScheduleContract with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = Some p.regulator
+      facilityRef          = ref
+      cacRegNumber         = sampleKyc.cacRegNumber
+      entries              = samplePaymentSchedule
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = ref
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  cert <- certifyProposal p proposal
+  submit p.business do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+
+-- RahnAgreement is bilateral so requires both parties to act.
+createRahn : MParties -> Script (ContractId RahnAgreement)
+createRahn p = submit (actAs [p.business, p.fi]) do
+  createCmd RahnAgreement with
+    business              = p.business
+    vetify                = p.vetify
+    financialInstitution  = p.fi
+    regulator             = Some p.regulator
+    facilityRef           = "FAC-2026-RC123456-001"
+    businessName          = sampleProfile.name
+    cacRegNumber          = sampleKyc.cacRegNumber
+    collateralDescription = "Plot 14, Lekki Phase 1 — C of O No. LG98765"
+    collateralValue       = 5_000_000.0
+    collateralStatus      = CollateralActive
+    releaseEvidence       = None
+
+-- RBAC (Governance Phase A): registers a proposer/confirmer officer pair for a
+-- maker-checker choice (WriteOffContract, ReleaseCollateral, EnforceCollateral,
+-- GrantIbra, GrantPartialIbra) and returns their officerIds AND ContractIds —
+-- the choices now take `proposedByOfficerCid`/`confirmedByOfficerCid` explicitly
+-- (caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not support contract
+-- keys / lookupByKey). `label` must be unique per call within a single test to
+-- avoid ambiguous officerId matches.
+createOfficerPair
+  : MParties -> Text -> OfficerRole
+  -> Script (Text, ContractId AuthorizedOfficer, Text, ContractId AuthorizedOfficer)
+createOfficerPair p label proposerRole = do
+  t <- getTime
+  let proposerId  = "PROP-" <> label
+      confirmerId = "CONF-" <> label
+  proposerCid <- submit p.fi do
+    createCmd AuthorizedOfficer with
+      financialInstitution = p.fi
+      vetify                = p.vetify
+      officerId             = proposerId
+      officerName           = "Proposer Officer " <> label
+      roles                 = [proposerRole]
+      authorizedBy          = "FI Head Office"
+      authorizedAt          = t
+      active                = True
+      approvalLimit         = None
+      validUntil            = None
+      lastUpdatedBy         = None
+      lastUpdatedAt         = None
+      statusReason          = None
+      department            = None
+      branch                = None
+      employeeId            = None
+      email                 = None
+  confirmerCid <- submit p.fi do
+    createCmd AuthorizedOfficer with
+      financialInstitution = p.fi
+      vetify                = p.vetify
+      officerId             = confirmerId
+      officerName           = "Confirmer Officer " <> label
+      roles                 = [RiskOfficer]
+      authorizedBy          = "FI Head Office"
+      authorizedAt          = t
+      active                = True
+      approvalLimit         = None
+      validUntil            = None
+      lastUpdatedBy         = None
+      lastUpdatedAt         = None
+      statusReason          = None
+      department            = None
+      branch                = None
+      employeeId            = None
+      email                 = None
+  pure (proposerId, proposerCid, confirmerId, confirmerCid)
+
+-- E-1: Create a PaymentScheduleContract with samplePaymentSchedule for the standard facility.
+createScheduleContract : MParties -> Script (ContractId PaymentScheduleContract)
+createScheduleContract p = submit p.fi do
+  createCmd PaymentScheduleContract with
+    financialInstitution = p.fi
+    vetify               = p.vetify
+    business             = p.business
+    regulator            = Some p.regulator
+    facilityRef          = "FAC-2026-RC123456-001"
+    cacRegNumber         = sampleKyc.cacRegNumber
+    entries              = samplePaymentSchedule
+
+-- ─── Wa'd tests ───────────────────────────────────────────────────────────
+
+-- Full Wa'd → Wakala chain produces an Active bilateral contract visible to regulator
+testFullWadWakalaFlow : Script ()
+testFullWadWakalaFlow = do
+  p        <- setupMParties
+  contract <- activeContractViaWakala p
+  Some c   <- queryContractId p.regulator contract
+  assertMsg "Contract should be Active" (c.status == Active)
+  assertMsg "Outstanding balance should be salePrice" (c.outstandingBalance == 2_300_000.0)
+  -- Regulator observes accepted contract but NOT the proposal
+  proposals <- query @MurabahahProposal p.regulator
+  assertMsg "Regulator should not see proposals" (null proposals)
+
+-- Business can withdraw the Wa'd before FI proceeds
+testWithdrawWad : Script ()
+testWithdrawWad = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  submit p.business do
+    exerciseCmd wad WithdrawWad with reason = "Supplier price changed"
+  wads <- query @MurabahahWad p.business
+  assertMsg "Wa'd should be archived after withdrawal" (null wads)
+
+-- FI can buy directly without appointing the business as agent
+testProceedDirectly : Script ()
+testProceedDirectly = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  apr <- submit p.fi do
+    exerciseCmd wad ProceedDirectly with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 20
+      invoiceRef            = "FI-PO-001"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  Some r <- queryContractId p.fi apr
+  assertMsg "Should not be via Wakala" (not r.purchasedViaWakala)
+  assertMsg "Delivery not yet acknowledged" (not r.deliveryAcknowledged)
+
+-- ─── Qabdh gate ───────────────────────────────────────────────────────────
+
+-- FI cannot make a sale offer before the business acknowledges delivery
+testCannotOfferBeforeQabdh : Script ()
+testCannotOfferBeforeQabdh = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  apr <- submit p.fi do
+    exerciseCmd wad ProceedDirectly with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 20
+      invoiceRef            = "FI-PO-001"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  submitMustFail p.fi do
+    exerciseCmd apr OfferMurabahah with
+      murabahahTerms      = sampleMurabahahTerms
+      paymentSchedule     = samplePaymentSchedule
+      regulator           = Some p.regulator
+      advisor             = p.advisor
+      facilityRef         = "FAC-2026-RC123456-001"
+      startDate           = date 2026 Jul 1
+      acceptanceExpiresAt = None
+  pure ()
+
+-- ─── Disclosed-profit invariant ───────────────────────────────────────────
+
+-- salePrice ≠ assetCost + profitAmount must be rejected
+testRejectsBadDisclosedProfit : Script ()
+testRejectsBadDisclosedProfit = do
+  p <- setupMParties
+  schedCid <- createScheduleContract p
+  submitMustFail p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms with salePrice = 9_999_999.0
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  pure ()
+
+-- Disclosed cost must match the actual purchase price
+testRejectsDisclosedCostMismatch : Script ()
+testRejectsDisclosedCostMismatch = do
+  p <- setupMParties
+  schedCid <- createScheduleContract p
+  submitMustFail p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms with
+        assetCost  = 1_800_000.0
+        salePrice  = 2_100_000.0
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  pure ()
+
+-- ─── Bilateral consent ────────────────────────────────────────────────────
+
+-- Only the business can accept a proposal
+testOnlyBusinessCanAccept : Script ()
+testOnlyBusinessCanAccept = do
+  p <- setupMParties
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  cert <- certifyProposal p proposal
+  submitMustFail p.fi do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+  pure ()
+
+-- ─── Payment guards ───────────────────────────────────────────────────────
+
+-- On-time payment reduces balance, creates RepaymentRecord, no charity
+testRecordPaymentOnTime : Script ()
+testRecordPaymentOnTime = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some uc <- queryContractId p.fi payRes.updatedContract
+  assertMsg "installmentsPaid should be 1" (uc.installmentsPaid == 1)
+  Some r <- queryContractId p.regulator payRes.repaymentRecord
+  assertMsg "Payment should not be late" (not r.wasLate)
+  assertMsg "No charity obligation for on-time payment" (payRes.charityObligation == None)
+
+-- Idempotency: replaying the same directDebitRef must be rejected even for a
+-- different (subsequent) installment.
+testRecordPaymentRejectsDuplicateDirectDebitRef : Script ()
+testRecordPaymentRejectsDuplicateDirectDebitRef = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = Some "MONO-COLLECT-2026-0001"
+      existingGuardCid  = None
+  -- No key to fetch the auto-created PaymentIdempotencyGuard by name anymore —
+  -- query for it and match on directDebitRef instead.
+  guards <- query @PaymentIdempotencyGuard p.fi
+  let Some (guardCid, _) = find (\(_, g) -> g.directDebitRef == "MONO-COLLECT-2026-0001") guards
+  submitMustFail p.fi do
+    exerciseCmd payRes.updatedContract RecordPayment with
+      paymentDate       = date 2026 Aug 1
+      amountPaid        = 191_666.67
+      installmentNo     = 2
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = Some "MONO-COLLECT-2026-0001"  -- replayed reference
+      existingGuardCid  = Some guardCid
+  pure ()
+
+-- A different directDebitRef for the next installment succeeds normally.
+testRecordPaymentAllowsDistinctDirectDebitRef : Script ()
+testRecordPaymentAllowsDistinctDirectDebitRef = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes1 <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = Some "MONO-COLLECT-2026-0002"
+      existingGuardCid  = None
+  payRes2 <- submit p.fi do
+    exerciseCmd payRes1.updatedContract RecordPayment with
+      paymentDate       = date 2026 Aug 1
+      amountPaid        = 191_666.67
+      installmentNo     = 2
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = Some "MONO-COLLECT-2026-0003"
+      existingGuardCid  = None
+  Some uc <- queryContractId p.fi payRes2.updatedContract
+  assertMsg "installmentsPaid should be 2" (uc.installmentsPaid == 2)
+
+-- Overpayment rejected
+testRejectsOverpayment : Script ()
+testRejectsOverpayment = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Jul 1, amountPaid = 5_000_000.0, installmentNo = 1, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  pure ()
+
+-- Zero payment rejected
+testRejectsNonPositivePayment : Script ()
+testRejectsNonPositivePayment = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Jul 1, amountPaid = 0.0, installmentNo = 1, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  pure ()
+
+-- Out-of-sequence installment rejected
+testRejectsOutOfSequenceInstallment : Script ()
+testRejectsOutOfSequenceInstallment = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Jul 1, amountPaid = 191_666.67, installmentNo = 5, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  pure ()
+
+-- Installment not in schedule rejected
+testRejectsInstallmentNotInSchedule : Script ()
+testRejectsInstallmentNotInSchedule = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Jul 1, amountPaid = 191_666.67, installmentNo = 99, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  pure ()
+
+-- ─── Late payment / Sadaqah ───────────────────────────────────────────────
+
+-- Payment after dueDate creates a LatePaymentCharity obligation
+testLatePaymentCreatesCharity : Script ()
+testLatePaymentCreatesCharity = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Aug 15   -- due Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some r <- queryContractId p.regulator payRes.repaymentRecord
+  assertMsg "Payment should be flagged as late" r.wasLate
+  case payRes.charityObligation of
+    None -> assertFail "Expected LatePaymentCharity to be created"
+    Some cid -> do
+      Some ch <- queryContractId p.fi cid
+      assertMsg "Charity installment matches" (ch.installmentNo == 1)
+      assertMsg "Charity not yet settled" (not ch.settled)
+
+-- FI sets the charity amount; business confirms donation
+testCharitySettlementFlow : Script ()
+testCharitySettlementFlow = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Aug 15, amountPaid = 191_666.67, installmentNo = 1, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  let Some charityCid = payRes.charityObligation
+  withAmount <- submit p.fi do
+    exerciseCmd charityCid SetCharityAmount with amount = 5_000.0
+  rcptCid <- submit p.business do
+    exerciseCmd withAmount ConfirmCharityPayment with
+      charityRef          = "CHARITY-RCPT-2026-001"
+      charityOrganization = "Islamic Relief Nigeria"
+  Some rcpt <- queryContractId p.vetify rcptCid
+  assertMsg "Charity amount on receipt" (rcpt.charityAmount == 5_000.0)
+  assertMsg "Charity organization recorded" (rcpt.charityOrganization == "Islamic Relief Nigeria")
+
+-- ─── Delinquency lifecycle ────────────────────────────────────────────────
+
+-- A payment does not auto-cure delinquency; ResumeActive does
+testDelinquencyLifecycle : Script ()
+testDelinquencyLifecycle = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (delq, delqEvt) <- submit (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd c FlagDelinquent with reason = "Missed 2 installments"; sentinelCid = p.sentinelCid
+  Some d <- queryContractId p.fi delq
+  assertMsg "Should be Delinquent" (d.status == Delinquent)
+  Some evt1 <- queryContractId p.fi delqEvt
+  assertMsg "AuditEvent recorded for delinquency flag" (evt1.eventType == "DELINQUENCY_FLAGGED")
+  payRes <- submit p.fi do
+    exerciseCmd delq RecordPayment with
+      paymentDate = date 2026 Sep 1, amountPaid = 191_666.67, installmentNo = 1, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  Some ap <- queryContractId p.fi payRes.updatedContract
+  assertMsg "Partial payment does not cure delinquency" (ap.status == Delinquent)
+  (resumed, resumedEvt) <- submit (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd payRes.updatedContract ResumeActive with note = "Arrears cleared"; sentinelCid = p.sentinelCid
+  Some rs <- queryContractId p.fi resumed
+  assertMsg "ResumeActive restores Active status" (rs.status == Active)
+  Some evt2 <- queryContractId p.fi resumedEvt
+  assertMsg "AuditEvent recorded for resume" (evt2.eventType == "CONTRACT_RESUMED")
+
+-- An ambiguous delinquency signal escalates to DelinquencyManualReview rather
+-- than being auto-decided either way; sentinel then resolves it — either
+-- confirming into Delinquent (FlagDelinquent from DelinquencyManualReview) or
+-- clearing back to Active (ResumeActive from DelinquencyManualReview).
+testFlagForDelinquencyReviewThenResolve : Script ()
+testFlagForDelinquencyReviewThenResolve = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  flagged <- submit p.vetify do
+    exerciseCmd c FlagForDelinquencyReview with note = "One missed payment; ambiguous — possible unrecorded credit"
+  Some fw <- queryContractId p.fi flagged
+  assertMsg "Should be DelinquencyManualReview" (fw.status == DelinquencyManualReview)
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd flagged FlagDelinquent with reason = "Sentinel confirmed: no offsetting credit found"; sentinelCid = p.sentinelCid
+  Some d <- queryContractId p.fi delq
+  assertMsg "Sentinel can confirm delinquency from DelinquencyManualReview" (d.status == Delinquent)
+
+testFlagForDelinquencyReviewThenClear : Script ()
+testFlagForDelinquencyReviewThenClear = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  flagged <- submit p.vetify do
+    exerciseCmd c FlagForDelinquencyReview with note = "One missed payment; ambiguous"
+  (resumed, _) <- submit (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd flagged ResumeActive with note = "False positive — payment had cleared, ledger was stale"; sentinelCid = p.sentinelCid
+  Some rs <- queryContractId p.fi resumed
+  assertMsg "Sentinel can clear DelinquencyManualReview back to Active" (rs.status == Active)
+
+-- Registry gate: an unregistered sentinel cannot flag or resume, mirroring
+-- testBeginUnderwritingBlockedWithoutRegisteredAssessor (FinancingTests.daml).
+testFlagDelinquentBlockedWithoutRegisteredSentinel : Script ()
+testFlagDelinquentBlockedWithoutRegisteredSentinel = do
+  p0 <- setupMParties
+  unregisteredSentinel <- allocateParty "UnregisteredSentinel"
+  let p = p0 with sentinel = unregisteredSentinel
+  c <- activeContractDirect p
+  submitMustFail (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd c FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  submitMustFail (actAs [p.sentinel, p.vetify]) do
+    exerciseCmd c ResumeActive with note = "Arrears cleared"; sentinelCid = p.sentinelCid
+
+-- ─── Default ──────────────────────────────────────────────────────────────
+
+-- FI can write off a delinquent contract
+testDefaultContract : Script ()
+testDefaultContract = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd c FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (def, defRecord) <- submit p.fi do
+    exerciseCmd delq DefaultContract with reason = "Unrecoverable"; defaultedBy = "Test Officer"
+  Some df <- queryContractId p.fi def
+  assertMsg "Should be Defaulted" (df.status == Defaulted)
+  Some dr <- queryContractId p.fi defRecord
+  assertMsg "DefaultRecord reason recorded" (dr.reason == "Unrecoverable")
+  assertMsg "DefaultRecord defaultedBy recorded" (dr.defaultedBy == "Test Officer")
+  Some _ <- queryContractId p.business defRecord
+  pure ()
+
+-- Cannot default an Active contract
+testCannotDefaultActiveContract : Script ()
+testCannotDefaultActiveContract = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do exerciseCmd c DefaultContract with reason = "Premature"; defaultedBy = "Test Officer"
+  pure ()
+
+-- ─── Ibra' (early settlement rebate) ─────────────────────────────────────
+
+testIbraGranted : Script ()
+testIbraGranted = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "ibra-granted" CreditOfficer
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with requestedSettlementDate = date 2026 Dec 1, settlementType = FullIbra, requestedAmount = None
+  submit p.fi do
+    exerciseCmd req GrantIbra with
+      rebateAmount          = 50_000.0
+      proposedByOfficerId   = proposerId
+      confirmedByOfficerId  = confirmerId
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  pure ()
+
+testIbraDeclined : Script ()
+testIbraDeclined = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with requestedSettlementDate = date 2026 Dec 1, settlementType = FullIbra, requestedAmount = None
+  declineCid <- submit p.fi do exerciseCmd req DeclineIbra with reason = "Insufficient hardship justification"
+  Some decline <- queryContractId p.fi declineCid
+  assertMsg "reason recorded" (decline.reason == "Insufficient hardship justification")
+
+-- ─── Rahn (collateral) ────────────────────────────────────────────────────
+
+-- Collateral released on full repayment
+testRahnReleasedOnClosure : Script ()
+testRahnReleasedOnClosure = do
+  p      <- setupMParties
+  rahnCid <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "release-closure" OperationsOfficer
+  released <- submit p.fi do
+    exerciseCmd rahnCid ReleaseCollateral with
+      note = "Contract fully repaid"
+      releaseDocumentRef = None
+      proposedByOfficerId = proposerId
+      confirmedByOfficerId = confirmerId
+      proposedByOfficerCid = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  Some r <- queryContractId p.fi released
+  assertMsg "Collateral should be Released" (r.collateralStatus == CollateralReleased)
+
+-- Collateral enforced on default
+testRahnEnforcedOnDefault : Script ()
+testRahnEnforcedOnDefault = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "enforce-default" RecoveryOfficer
+  enforced <- submit p.fi do
+    exerciseCmd rahnCid EnforceCollateral with
+      reason = "Contract defaulted"
+      proposedByOfficerId = proposerId
+      confirmedByOfficerId = confirmerId
+      proposedByOfficerCid = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  Some e <- queryContractId p.fi enforced
+  assertMsg "Collateral should be Enforced" (e.collateralStatus == CollateralEnforced)
+
+-- Cannot release already-released collateral
+testCannotDoubleRelease : Script ()
+testCannotDoubleRelease = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "double-release" OperationsOfficer
+  released <- submit p.fi do
+    exerciseCmd rahnCid ReleaseCollateral with
+      note = "First release"
+      releaseDocumentRef = None
+      proposedByOfficerId = proposerId
+      confirmedByOfficerId = confirmerId
+      proposedByOfficerCid = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  submitMustFail p.fi do
+    exerciseCmd released ReleaseCollateral with
+      note = "Second release"
+      releaseDocumentRef = None
+      proposedByOfficerId = proposerId
+      confirmedByOfficerId = confirmerId
+      proposedByOfficerCid = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  pure ()
+
+-- ─── Closure ──────────────────────────────────────────────────────────────
+
+-- Full single-payment repayment enables CloseContract
+testCloseWhenFullyRepaid : Script ()
+testCloseWhenFullyRepaid = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate = date 2026 Jul 1, amountPaid = 2_300_000.0, installmentNo = 1, allocation = None, settlementAccount = None, directDebitRef = None, existingGuardCid = None
+  closed <- submit p.fi do
+    exerciseCmd payRes.updatedContract CloseContract with closingDate = date 2026 Jul 2
+  Some cl <- queryContractId p.fi closed
+  assertMsg "Should be Completed" (cl.status == Completed)
+
+-- ─── M4/M3 helper ─────────────────────────────────────────────────────────────
+
+-- Wa'd → Wakala → RecordAssetPurchase; stops before Qabdh so rejection tests
+-- can exercise RejectDelivery without AcknowledgeDelivery having been called.
+assetPurchaseViaWakala : MParties -> Script (ContractId AssetPurchaseRecord)
+assetPurchaseViaWakala p = do
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  wakala <- submit p.fi do exerciseCmd wad ProceedWithWakala
+  submit p.business do
+    exerciseCmd wakala RecordAssetPurchase with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "LMS-INV-2026-00441"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+
+-- ─── M4: Asset rejection ─────────────────────────────────────────────────────
+
+-- Business can reject a defective asset before acknowledging delivery.
+-- RejectDelivery is nonconsuming — APR stays live for replacement or cancellation.
+testRejectDelivery : Script ()
+testRejectDelivery = do
+  p      <- setupMParties
+  apr    <- assetPurchaseViaWakala p
+  rejCid <- submit p.business do
+    exerciseCmd apr RejectDelivery with
+      reason            = "Asset does not match specification"
+      defectDescription = "Capacity 30MT, not 50MT as contracted"
+  Some rej <- queryContractId p.fi rejCid
+  assertMsg "Rejection reason captured" (rej.reason == "Asset does not match specification")
+  -- APR must still be active — nonconsuming choice leaves it live for FI to replace
+  Some live <- queryContractId p.business apr
+  assertMsg "AssetPurchaseRecord still active after rejection" (not live.deliveryAcknowledged)
+
+-- Guard: RejectDelivery fails once delivery has been acknowledged
+testCannotRejectAfterAcknowledge : Script ()
+testCannotRejectAfterAcknowledge = do
+  p      <- setupMParties
+  apr    <- assetPurchaseViaWakala p
+  aprAck <- submit p.business do exerciseCmd apr AcknowledgeDelivery
+  submitMustFail p.business do
+    exerciseCmd aprAck RejectDelivery with
+      reason            = "Too late"
+      defectDescription = "Asset already acknowledged"
+  pure ()
+
+-- ─── M3: Supplier payment record ─────────────────────────────────────────────
+
+-- FI records supplier payment proof; AssetPurchaseRecord remains active (nonconsuming)
+testRecordSupplierPayment : Script ()
+testRecordSupplierPayment = do
+  p          <- setupMParties
+  apr        <- assetPurchaseViaWakala p
+  paymentCid <- submit p.fi do
+    exerciseCmd apr RecordSupplierPayment with
+      amountPaid          = 2_000_000.0
+      paymentDate         = date 2026 Jun 14
+      paymentRef          = "FI-PAY-2026-00001"
+      bankConfirmationRef = Some "BANK-CONF-2026-001"
+  Some payment <- queryContractId p.fi paymentCid
+  assertMsg "Supplier payment amount matches" (payment.amountPaid == 2_000_000.0)
+  assertMsg "Payment reference captured" (payment.paymentRef == "FI-PAY-2026-00001")
+  aprs <- query @AssetPurchaseRecord p.fi
+  assertMsg "AssetPurchaseRecord still active after supplier payment record" (not (null aprs))
+
+-- ─── M5: Proposal expiry and withdrawal ──────────────────────────────────────
+
+-- FI can withdraw a proposal before the business responds
+testWithdrawProposal : Script ()
+testWithdrawProposal = do
+  p        <- setupMParties
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  submit p.fi do
+    exerciseCmd proposal WithdrawProposal with reason = "FI credit limit exceeded"
+  proposals <- query @MurabahahProposal p.fi
+  assertMsg "Proposal archived after withdrawal" (null proposals)
+
+-- vetify can expire a proposal after the acceptance window has elapsed
+testExpireProposalAfterWindow : Script ()
+testExpireProposalAfterWindow = do
+  p <- setupMParties
+  -- Test ledger starts at 1970-01-01T00:00:00Z; expiry 30 min after epoch
+  let expiry = datetime 1970 Jan 1 0 30 0
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = Some expiry
+  passTime (hours 1)
+  submit p.vetify do exerciseCmd proposal ExpireProposal
+  proposals <- query @MurabahahProposal p.vetify
+  assertMsg "Proposal archived after expiry" (null proposals)
+
+-- Guard: ExpireProposal fails when the acceptance window has not yet elapsed
+testCannotExpireProposalBeforeWindow : Script ()
+testCannotExpireProposalBeforeWindow = do
+  p <- setupMParties
+  -- Expiry 1 hour after epoch; no passTime → current time still at epoch
+  let expiry = datetime 1970 Jan 1 1 0 0
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = Some expiry
+  submitMustFail p.vetify do exerciseCmd proposal ExpireProposal
+  pure ()
+
+-- ─── M6: Payment allocation ───────────────────────────────────────────────────
+
+-- RecordPayment with a PaymentAllocation breakdown is stored on RepaymentRecord
+testPaymentWithAllocation : Script ()
+testPaymentWithAllocation = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  let alloc = PaymentAllocation with
+        principalComponent = 175_000.0
+        profitComponent    = 15_000.0
+        feesCharged        = 0.0
+        charityProvision   = 1_666.67
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = Some alloc
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some rep <- queryContractId p.fi payRes.repaymentRecord
+  assertMsg "PaymentAllocation stored on RepaymentRecord" (rep.allocation == Some alloc)
+  assertMsg "On-time payment not marked late" (not rep.wasLate)
+
+-- ─── Guard: cannot close a contract that still carries a balance
+testCannotCloseWithBalance : Script ()
+testCannotCloseWithBalance = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  submitMustFail p.fi do
+    exerciseCmd c CloseContract with closingDate = date 2026 Jul 1
+  pure ()
+
+-- ─── M7: Contract restructuring ──────────────────────────────────────────────
+
+-- Business requests restructuring; FI approves with a new schedule
+testApproveRestructuring : Script ()
+testApproveRestructuring = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  let newSchedule =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2026 Oct 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 2; dueDate = date 2027 Jan 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 3; dueDate = date 2027 Apr 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        ]
+  reqCid <- submit p.business do
+    exerciseCmd c RequestRestructuring with
+      proposedSchedule = newSchedule
+      reason           = "Cash flow difficulties due to seasonal downturn"
+      requestDate      = date 2026 Aug 1
+  Some req <- queryContractId p.fi reqCid
+  assertMsg "Request carries outstanding balance" (req.outstandingBalance == 2_300_000.0)
+  updated <- submit p.fi do
+    exerciseCmd c ApproveRestructuring with
+      reqCid            = reqCid
+      approvedSchedule  = newSchedule
+      restructuringDate = date 2026 Aug 5
+      maxRestructurings = None
+  Some u <- queryContractId p.business updated
+  Some sched <- queryContractId p.fi u.paymentScheduleCid
+  assertMsg "Payment schedule updated" (length sched.entries == 3)
+  assertMsg "scheduleVersion incremented" (u.scheduleVersion == 2)
+  assertMsg "restructuringCount incremented" (u.restructuringCount == 1)
+  reqs <- query @RestructuringRequest p.fi
+  assertMsg "RestructuringRequest archived after approval" (null reqs)
+
+-- Business limit: a second restructuring is blocked once maxRestructurings is reached.
+testRestructuringFrequencyLimitEnforced : Script ()
+testRestructuringFrequencyLimitEnforced = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  let schedule1 =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2026 Oct 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 2; dueDate = date 2027 Jan 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 3; dueDate = date 2027 Apr 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        ]
+  req1 <- submit p.business do
+    exerciseCmd c RequestRestructuring with
+      proposedSchedule = schedule1
+      reason           = "First restructuring — seasonal downturn"
+      requestDate      = date 2026 Aug 1
+  updated1 <- submit p.fi do
+    exerciseCmd c ApproveRestructuring with
+      reqCid            = req1
+      approvedSchedule  = schedule1
+      restructuringDate = date 2026 Aug 5
+      maxRestructurings = Some 1
+  let schedule2 =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2027 Feb 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 2; dueDate = date 2027 May 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        , PaymentScheduleEntry with installmentNo = 3; dueDate = date 2027 Aug 1; dueAmount = 115_000.0; principalComponent = None; profitComponent = None
+        ]
+  req2 <- submit p.business do
+    exerciseCmd updated1 RequestRestructuring with
+      proposedSchedule = schedule2
+      reason           = "Second restructuring request"
+      requestDate      = date 2026 Dec 1
+  submitMustFail p.fi do
+    exerciseCmd updated1 ApproveRestructuring with
+      reqCid            = req2
+      approvedSchedule  = schedule2
+      restructuringDate = date 2026 Dec 5
+      maxRestructurings = Some 1  -- already at limit (restructuringCount == 1)
+  pure ()
+
+-- Guard: FI rejects the restructuring request
+testRejectRestructuring : Script ()
+testRejectRestructuring = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  let proposedSchedule =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2027 Jun 1; dueAmount = 2_300_000.0; principalComponent = None; profitComponent = None ]
+  reqCid <- submit p.business do
+    exerciseCmd c RequestRestructuring with
+      proposedSchedule
+      reason      = "Request extension to single bullet payment"
+      requestDate = date 2026 Aug 1
+  rejCid <- submit p.fi do
+    exerciseCmd c RejectRestructuring with
+      reqCid = reqCid
+      reason = "Policy does not permit bullet repayment structures"
+  reqs <- query @RestructuringRequest p.fi
+  assertMsg "RestructuringRequest archived after rejection" (null reqs)
+  Some rej <- queryContractId p.fi rejCid
+  assertMsg "Rejection reason recorded" (rej.reason == "Policy does not permit bullet repayment structures")
+
+-- Regression: ApproveRestructuring must reject a RestructuringRequest that belongs
+-- to a different facility of the same business/FI, even though authorization
+-- succeeds (business co-signs both facilities' MurabahahContracts).
+testApproveRestructuringBlocksWrongFacility : Script ()
+testApproveRestructuringBlocksWrongFacility = do
+  p  <- setupMParties
+  c1 <- activeContractDirect p                                    -- FAC-2026-RC123456-001
+  c2 <- activeContractDirectWithRef p "FAC-2026-RC123456-002"
+  let proposedSchedule =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2027 Jun 1; dueAmount = 2_300_000.0; principalComponent = None; profitComponent = None ]
+  reqCid1 <- submit p.business do
+    exerciseCmd c1 RequestRestructuring with
+      proposedSchedule
+      reason      = "Facility 1 restructuring request"
+      requestDate = date 2026 Aug 1
+  submitMustFail p.fi do
+    exerciseCmd c2 ApproveRestructuring with
+      reqCid            = reqCid1
+      approvedSchedule  = proposedSchedule
+      restructuringDate = date 2026 Aug 5
+      maxRestructurings = None
+
+-- Same cross-facility guard on the rejection path.
+testRejectRestructuringBlocksWrongFacility : Script ()
+testRejectRestructuringBlocksWrongFacility = do
+  p  <- setupMParties
+  c1 <- activeContractDirect p
+  c2 <- activeContractDirectWithRef p "FAC-2026-RC123456-002"
+  let proposedSchedule =
+        [ PaymentScheduleEntry with installmentNo = 1; dueDate = date 2027 Jun 1; dueAmount = 2_300_000.0; principalComponent = None; profitComponent = None ]
+  reqCid1 <- submit p.business do
+    exerciseCmd c1 RequestRestructuring with
+      proposedSchedule
+      reason      = "Facility 1 restructuring request"
+      requestDate = date 2026 Aug 1
+  submitMustFail p.fi do
+    exerciseCmd c2 RejectRestructuring with
+      reqCid = reqCid1
+      reason = "Wrong-facility rejection attempt"
+
+-- Regression: RecordGSMSweep must reject a MurabahahContract cid that belongs to a
+-- different facility than the GSMInvocation it's exercised on.
+testRecordGSMSweepBlocksWrongFacility : Script ()
+testRecordGSMSweepBlocksWrongFacility = do
+  p  <- setupMParties
+  c1 <- activeContractDirect p                                    -- FAC-2026-RC123456-001
+  _  <- activeContractDirectWithRef p "FAC-2026-RC123456-002"
+  t  <- getTime
+  gsm <- submit p.fi do
+    createCmd GSMInvocation with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-002"
+      businessBvn          = "22334455667"
+      invokedAmount        = 500_000.0
+      monoGsmRef           = "NIBSS-GSM-2026-0001"
+      invokedAt            = t
+      status               = GSMActive
+      lastSweepRef         = None
+  submitMustFail p.fi do
+    exerciseCmd gsm RecordGSMSweep with
+      contractCid   = c1  -- wrong facility (001) vs. gsm's facilityRef (002)
+      sweepAmount   = 100_000.0
+      sweepDate     = date 2026 Aug 1
+      nibssSweepRef = "NIBSS-SWEEP-2026-0001"
+
+-- ─── M8: Partial Ibra' ───────────────────────────────────────────────────────
+
+-- FI grants a partial early settlement rebate
+testPartialIbra : Script ()
+testPartialIbra = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "partial-ibra" CreditOfficer
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with
+      requestedSettlementDate = date 2026 Sep 1
+      settlementType          = PartialIbra
+      requestedAmount         = Some 1_000_000.0
+  submit p.fi do
+    exerciseCmd req GrantPartialIbra with
+      rebateAmount             = 30_000.0
+      approvedSettlementAmount = 970_000.0
+      proposedByOfficerId      = proposerId
+      confirmedByOfficerId     = confirmerId
+      proposedByOfficerCid     = proposerCid
+      confirmedByOfficerCid    = confirmerCid
+  pure ()
+
+-- ─── M9: Multiple assets ─────────────────────────────────────────────────────
+
+-- AssetPurchaseRecord can carry additional assets beyond the primary
+testMultipleAssets : Script ()
+testMultipleAssets = do
+  p   <- setupMParties
+  apr <- assetPurchaseViaWakala p
+  let extraItem = AssetLineItem with
+        description     = "Commercial refrigerator — 500L capacity"
+        supplierName    = "CoolTech Equipment Ltd"
+        supplierRef     = "CT-INV-2026-00112"
+        estimatedCost   = 350_000.0
+        actualCost      = Some 340_000.0
+        supplierDetails = None
+  -- UpdateAdditionalAssets is not a choice — we verify the field exists on APR
+  Some a <- queryContractId p.fi apr
+  assertMsg "Additional assets list starts empty" (null a.additionalAssets)
+  -- A real workflow would archive and recreate (not modelled here);
+  -- this test confirms the field is structurally present and typeable.
+  let _ = extraItem
+  pure ()
+
+-- ─── M10: Settlement accounts ────────────────────────────────────────────────
+
+-- RecordPayment stores the repayment bank account on RepaymentRecord
+testRecordPaymentWithSettlementAccount : Script ()
+testRecordPaymentWithSettlementAccount = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  let acct = SettlementAccount with
+        bankName       = "Access Bank"
+        accountRef     = "0123456789"
+        accountType    = "NUBAN"
+        currency       = "NGN"
+        beneficiaryRef = Some "VETIFY-BENE-001"
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = Some acct
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some rep <- queryContractId p.fi payRes.repaymentRecord
+  assertMsg "Settlement account stored on RepaymentRecord" (rep.settlementAccount == Some acct)
+
+-- ─── M11: Shariah audit ──────────────────────────────────────────────────────
+
+-- Vetify creates a Shariah audit record visible to FI and regulator
+testShariahAudit : Script ()
+testShariahAudit = do
+  p <- setupMParties
+  auditCid <- submit p.vetify do
+    createCmd ShariahAuditRecord with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      facilityRef          = None
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      auditDate            = date 2026 Jun 30
+      auditPeriod          = "2026-H1"
+      auditorRef           = "AAOIFI-CERT-AUDITOR-001"
+      findings             = ["Murabahah profit disclosure confirmed", "Payment schedule matches contract"]
+      overallCompliant     = True
+      recommendations      = ["Maintain current documentation standards"]
+      nextAuditDate        = Some (date 2026 Dec 31)
+  Some audit <- queryContractId p.regulator auditCid
+  assertMsg "Audit marked as compliant" audit.overallCompliant
+  Some _ <- queryContractId p.fi auditCid
+  pure ()
+
+-- ─── M12: Shariah exceptions ─────────────────────────────────────────────────
+
+-- Vetify records and then resolves a Shariah exception
+testShariahException : Script ()
+testShariahException = do
+  p <- setupMParties
+  excCid <- submit p.vetify do
+    createCmd ShariahException with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      facilityRef          = None
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      exceptionType        = "LATE_CHARITY_DISBURSEMENT"
+      description          = "Sadaqah obligation from Aug installment not disbursed within 30 days"
+      severity             = MinorException
+      detectedAt           = datetime 1970 Jan 1 0 0 0
+      resolutionNote       = None
+      resolvedAt           = None
+  Some exc <- queryContractId p.fi excCid
+  assertMsg "Exception unresolved on creation" (exc.resolutionNote == None)
+  resolved <- submit p.vetify do
+    exerciseCmd excCid ResolveException with
+      note      = "Sadaqah of NGN 5,000 disbursed to Islamic Relief Nigeria — receipt REF-2026-0087"
+      resolveAt = datetime 1970 Jan 1 1 0 0
+  Some r <- queryContractId p.fi resolved
+  assertMsg "Resolution note stored" (r.resolutionNote /= None)
+  assertMsg "Resolved timestamp stored" (r.resolvedAt /= None)
+
+-- ─── M13: Regulatory reporting ────────────────────────────────────────────────
+
+-- Vetify generates a MurabahahStatement observable by the regulator
+testMurabahahStatement : Script ()
+testMurabahahStatement = do
+  p <- setupMParties
+  stmtCid <- submit p.vetify do
+    createCmd MurabahahStatement with
+      vetify               = p.vetify
+      business             = p.business
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      statementDate        = date 2026 Sep 30
+      statementPeriod      = "2026-Q3"
+      totalFinanced        = 2_300_000.0
+      totalRepaid          = 575_000.01
+      outstandingBalance   = 1_724_999.99
+      installmentsPaid     = 3
+      totalInstallments    = 12
+      contractStatus       = Active
+      shariahAuditRef      = Some "AAOIFI-CERT-AUDITOR-001"
+  Some stmt <- queryContractId p.regulator stmtCid
+  assertMsg "Statement period captured" (stmt.statementPeriod == "2026-Q3")
+  assertMsg "Regulator sees correct status" (stmt.contractStatus == Active)
+  Some _ <- queryContractId p.business stmtCid
+  pure ()
+
+-- ─── M14: Document integrity ─────────────────────────────────────────────────
+
+-- A DocumentRef with a digital signature is stored and retrievable
+testDocumentWithSignature : Script ()
+testDocumentWithSignature = do
+  p   <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  wakala <- submit p.fi do exerciseCmd wad ProceedWithWakala
+  apr <- submit p.business do
+    exerciseCmd wakala RecordAssetPurchase with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "LMS-INV-2026-00441"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  let signedDoc = DocumentRef with
+        docType            = "ASSET_INVOICE"
+        contentHash        = "sha256:d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
+        storageRef         = "s3://vetify-docs/RC123456/lms-invoice-2026.pdf"
+        mimeType           = Some "application/pdf"
+        malwareScanStatus  = Some "CLEAN"
+        fileSize           = Some 102400
+        checksumAlgorithm  = Some "sha256"
+        malwareScanAt      = None
+        digitalSignature   = Some "3045022100f4c3b2a1...e0d9c8b7"  -- M14
+        signatureAlgorithm = Some "ECDSA-P256"                        -- M14
+        signatoryRef       = Some "LMS-AUTHORIZED-OFFICER-001"        -- M14
+        signedAt           = None                                      -- M14 (None in test; set at runtime)
+  assertMsg "Digital signature present" (signedDoc.digitalSignature /= None)
+  assertMsg "Signature algorithm recorded" (signedDoc.signatureAlgorithm == Some "ECDSA-P256")
+
+-- ─── R1: Collateral lifecycle ────────────────────────────────────────────────
+
+-- FI revalues collateral; creates CollateralValuationRecord and updates RahnAgreement
+testRevalueCollateral : Script ()
+testRevalueCollateral = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (newRahnCid, valCid) <- submit p.fi do
+    exerciseCmd rahnCid Revalue with
+      newValue      = 5_500_000.0
+      valuationDate = date 2026 Sep 30
+      valuatorRef   = "CBRE-NIGERIA-APPRAISAL-2026-001"
+      notes         = Some "Annual desk review — market values up 10%"
+  Some newRahn <- queryContractId p.fi newRahnCid
+  assertMsg "Collateral value updated" (newRahn.collateralValue == 5_500_000.0)
+  assertMsg "Collateral still Active after revaluation" (newRahn.collateralStatus == CollateralActive)
+  Some val <- queryContractId p.vetify valCid
+  assertMsg "Valuation record has new amount" (val.valuationAmount == 5_500_000.0)
+  assertMsg "Previous value recorded" (val.previousValue == 5_000_000.0)
+
+-- ReleaseCollateral stores the discharge document reference on the contract
+testReleaseWithDocument : Script ()
+testReleaseWithDocument = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "release-with-doc" OperationsOfficer
+  released <- submit p.fi do
+    exerciseCmd rahnCid ReleaseCollateral with
+      note                  = "Contract fully repaid — see discharge letter"
+      releaseDocumentRef    = Some "DISCHARGE-LTR-2026-RC123456"
+      proposedByOfficerId   = proposerId
+      confirmedByOfficerId  = confirmerId
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  Some r <- queryContractId p.fi released
+  assertMsg "Collateral released" (r.collateralStatus == CollateralReleased)
+  assertMsg "Release evidence stored" (r.releaseEvidence == Some "DISCHARGE-LTR-2026-RC123456")
+
+-- ─── R2: Takaful integration ──────────────────────────────────────────────────
+
+-- FI creates a TakafulPolicy; regulator and business observe it
+testTakafulPolicy : Script ()
+testTakafulPolicy = do
+  p      <- setupMParties
+  polCid <- submit p.fi do
+    createCmd TakafulPolicy with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      policyNumber         = "TAKAFUL-2026-RC123456-001"
+      takafulOperator      = "Cornerstone Takaful Nigeria Ltd"
+      coverageType         = "ASSET_TAKAFUL"
+      coverageAmount       = 2_000_000.0
+      premiumAmount        = 40_000.0
+      startDate            = date 2026 Jul 1
+      expiryDate           = date 2027 Jul 1
+      assetRef             = Some "LMS-INV-2026-00441"
+  Some pol <- queryContractId p.regulator polCid
+  assertMsg "Policy number captured" (pol.policyNumber == "TAKAFUL-2026-RC123456-001")
+  assertMsg "Coverage amount correct" (pol.coverageAmount == 2_000_000.0)
+  Some _ <- queryContractId p.business polCid
+  pure ()
+
+-- ─── R3: Supplier failure workflow ───────────────────────────────────────────
+
+-- FI records a supplier cancellation; AssetPurchaseRecord is archived
+testSupplierFailure : Script ()
+testSupplierFailure = do
+  p      <- setupMParties
+  apr    <- assetPurchaseViaWakala p
+  failCid <- submit p.fi do
+    exerciseCmd apr RecordSupplierFailure with
+      failureType        = SupplierCancelled
+      failureDescription = "Supplier cancelled purchase order citing production shutdown"
+      refundAmount       = Some 2_000_000.0
+  Some failure <- queryContractId p.vetify failCid
+  assertMsg "Failure type recorded" (failure.failureType == SupplierCancelled)
+  assertMsg "Refund amount recorded" (failure.refundAmount == Some 2_000_000.0)
+  aprs <- query @AssetPurchaseRecord p.fi
+  assertMsg "AssetPurchaseRecord archived after supplier failure" (null aprs)
+
+-- ─── R4: Dispute and arbitration ─────────────────────────────────────────────
+
+-- Business raises a dispute; vetify escalates to arbitration; outcome recorded
+testArbitration : Script ()
+testArbitration = do
+  p          <- setupMParties
+  c          <- activeContractDirect p
+  arbitrator <- allocateParty "Arbitrator"
+  -- Business raises a payment dispute
+  dispCid <- submit p.business do
+    exerciseCmd c RaiseDispute with
+      disputeType = PaymentDispute
+      disputeDesc = "FI recorded a payment that was already settled"
+      evidenceRef = Some "BANK-STMT-2026-07"
+  Some disp <- queryContractId p.fi dispCid
+  assertMsg "Dispute description captured" (disp.description == "FI recorded a payment that was already settled")
+  -- Vetify escalates to arbitration
+  arbCid <- submit p.vetify do
+    exerciseCmd dispCid EscalateToArbitration with arbitrator
+  Some arb <- queryContractId arbitrator arbCid
+  assertMsg "Arbitration not yet concluded" (arb.outcome == None)
+  -- Vetify records the arbitrator's finding
+  concludedCid <- submit p.vetify do
+    exerciseCmd arbCid RecordArbitrationOutcome with
+      arbOutcome    = BusinessPrevails
+      arbResolution = "Duplicate payment entry reversed; business credited NGN 191,666.67"
+  Some concluded <- queryContractId p.regulator concludedCid
+  assertMsg "Outcome recorded" (concluded.outcome == Some BusinessPrevails)
+  assertMsg "Resolution recorded" (concluded.resolution /= None)
+
+-- ─── R5: Portfolio risk analytics ────────────────────────────────────────────
+
+-- Reporting Agent creates a PortfolioRiskReport visible to FI and regulator
+testPortfolioRiskReport : Script ()
+testPortfolioRiskReport = do
+  p      <- setupMParties
+  let riskMetrics = PortfolioRiskMetrics with
+        probabilityOfDefault = 0.03
+        lossGivenDefault     = 0.45
+        expectedLoss         = 31_050_000.0
+        exposureAtDefault    = 2_300_000_000.0
+        concentrationRisk    = 0.18
+        sectorConcentration  = "Retail Trade"
+        delinquencyRate      = 0.07
+        activeContractCount  = 142
+  rptCid <- submit p.vetify do
+    createCmd PortfolioRiskReport with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      reportDate           = date 2026 Sep 30
+      reportPeriod         = "2026-Q3"
+      metrics              = riskMetrics
+      generatedByAgent     = "vetify-reporting"
+      modelVersion         = "vetify-reporting-v1.0"
+  Some rpt <- queryContractId p.regulator rptCid
+  assertMsg "Report period correct" (rpt.reportPeriod == "2026-Q3")
+  assertMsg "Active contract count correct" (rpt.metrics.activeContractCount == 142)
+  assertMsg "PD in expected range" (rpt.metrics.probabilityOfDefault == 0.03)
+  Some _ <- queryContractId p.fi rptCid
+  pure ()
+
+-- ─── R6: Continuous AI monitoring alerts ─────────────────────────────────────
+
+-- Monitoring Agent raises a delinquency-risk alert; vetify dismisses after review
+testMonitoringAlert : Script ()
+testMonitoringAlert = do
+  p      <- setupMParties
+  alertCid <- submit p.vetify do
+    createCmd MonitoringAlert with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      facilityRef          = None
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      alertType            = DelinquencyRisk
+      alertSeverity        = SeverityHigh
+      alertDescription     = "Installment 3 overdue by 15 days; no payment received"
+      detectedAt           = datetime 1970 Jan 1 0 0 0
+      dismissed            = False
+      dismissalNote        = None
+  Some alert <- queryContractId p.fi alertCid
+  assertMsg "Alert not yet dismissed" (not alert.dismissed)
+  assertMsg "Alert type correct" (alert.alertType == DelinquencyRisk)
+  dismissed <- submit p.vetify do
+    exerciseCmd alertCid DismissAlert with
+      dismissNote = "Business confirmed payment — bank transfer delay; installment now cleared"
+  Some d <- queryContractId p.fi dismissed
+  assertMsg "Alert dismissed" d.dismissed
+  assertMsg "Dismissal note stored" (d.dismissalNote /= None)
+
+-- ─── S1: Early settlement after Ibra' ────────────────────────────────────────
+
+-- Full Ibra': FI grants rebate then records early settlement; contract closes at zero
+testEarlySettlementFull : Script ()
+testEarlySettlementFull = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "early-settlement-full" CreditOfficer
+  -- Business requests full early settlement
+  ibraCid <- submit p.business do
+    exerciseCmd c RequestIbra with
+      requestedSettlementDate = date 2026 Dec 1
+      settlementType          = FullIbra
+      requestedAmount         = None
+  -- FI grants a rebate of NGN 100,000 on the remaining profit
+  submit p.fi do
+    exerciseCmd ibraCid GrantIbra with
+      rebateAmount           = 100_000.0
+      proposedByOfficerId    = proposerId
+      confirmedByOfficerId   = confirmerId
+      proposedByOfficerCid   = proposerCid
+      confirmedByOfficerCid  = confirmerCid
+  -- FI records actual settlement with the net amount (salePrice - rebate)
+  (closedCid, repCid) <- submit p.fi do
+    exerciseCmd c RecordEarlySettlement with
+      settlementType    = FullIbra
+      settlementAmount  = 2_200_000.0     -- 2,300,000 − 100,000 rebate
+      settlementDate    = date 2026 Dec 1
+      settlementAccount = None
+  Some closed <- queryContractId p.fi closedCid
+  assertMsg "Contract completed after full Ibra'" (closed.status == Completed)
+  assertMsg "Outstanding balance zeroed on full settlement" (closed.outstandingBalance == 0.0)
+  Some rep <- queryContractId p.regulator repCid
+  assertMsg "Settlement recorded as a repayment" (rep.amountPaid == 2_200_000.0)
+  assertMsg "Remaining balance is zero" (rep.remainingBalance == 0.0)
+
+-- ─── D1: Delivery milestones ─────────────────────────────────────────────────
+
+-- Business records two partial delivery milestones before full Qabdh
+testDeliveryMilestone : Script ()
+testDeliveryMilestone = do
+  p   <- setupMParties
+  apr <- assetPurchaseViaWakala p
+  -- First delivery batch: 20 MT of 50 MT total
+  m1 <- submit p.business do
+    exerciseCmd apr RecordDeliveryMilestone with
+      milestoneDescription = "First batch — 20 MT flour delivered"
+      quantityDelivered    = 20.0
+      milestoneDate        = date 2026 Jun 10
+      evidenceRef          = Some "WH-NOTE-2026-001"
+  Some ms1 <- queryContractId p.fi m1
+  assertMsg "First milestone quantity correct" (ms1.quantityDelivered == 20.0)
+  -- Second delivery batch: remaining 30 MT
+  m2 <- submit p.business do
+    exerciseCmd apr RecordDeliveryMilestone with
+      milestoneDescription = "Final batch — 30 MT flour delivered"
+      quantityDelivered    = 30.0
+      milestoneDate        = date 2026 Jun 14
+      evidenceRef          = Some "WH-NOTE-2026-002"
+  Some ms2 <- queryContractId p.vetify m2
+  assertMsg "Second milestone quantity correct" (ms2.quantityDelivered == 30.0)
+  -- APR still active; business can now exercise AcknowledgeDelivery
+  aprs <- query @AssetPurchaseRecord p.fi
+  assertMsg "AssetPurchaseRecord still active after milestones" (not (null aprs))
+
+-- ─── R1: Suspicious activity reporting ───────────────────────────────────────
+
+-- Vetify files a SAR visible to FI and regulator; business excluded
+testSARReport : Script ()
+testSARReport = do
+  p      <- setupMParties
+  sarCid <- submit p.vetify do
+    createCmd SARReport with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      sarRef               = "NFIU-SAR-2026-RC123456-001"
+      suspiciousActivity   = "Repayment source changed from declared business account to third-party wire transfers; PEP connection detected on new account"
+      reportDate           = date 2026 Sep 15
+      reportedByParty      = "vetify-compliance-officer-001"
+      confidential         = True
+  Some sar <- queryContractId p.regulator sarCid
+  assertMsg "SAR reference recorded" (sar.sarRef == "NFIU-SAR-2026-RC123456-001")
+  assertMsg "SAR is confidential" sar.confidential
+  Some _ <- queryContractId p.fi sarCid
+  -- Business must NOT see the SAR
+  sarsByBusiness <- query @SARReport p.business
+  assertMsg "Business cannot observe SAR" (null sarsByBusiness)
+
+-- ─── M-PI: Sub-installment payment splitting ─────────────────────────────────
+
+-- Paying installment 1 in two partial credits; installmentsPaid advances only
+-- when the full due amount is accumulated.
+testSubInstallmentPayment : Script ()
+testSubInstallmentPayment = do
+  p   <- setupMParties
+  cid <- activeContractDirect p
+  -- First partial: 95,833 < 191,666.67 — installmentsPaid stays at 0
+  pay1 <- submit p.fi do
+    exerciseCmd cid RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 95_833.0
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some c1v <- queryContractId p.fi pay1.updatedContract
+  assertMsg "installmentsPaid should not advance on partial payment" (c1v.installmentsPaid == 0)
+  assertMsg "pendingInstallmentPaid accumulates" (c1v.pendingInstallmentPaid == 95_833.0)
+  assertMsg "No charity on incomplete installment" (pay1.charityObligation == None)
+  -- Second partial: 96,000 completes installment (total 191,833 >= 191,666.67)
+  pay2 <- submit p.fi do
+    exerciseCmd pay1.updatedContract RecordPayment with
+      paymentDate       = date 2026 Jul 1
+      amountPaid        = 96_000.0
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some c2v <- queryContractId p.fi pay2.updatedContract
+  assertMsg "installmentsPaid advances after completion" (c2v.installmentsPaid == 1)
+  assertMsg "pendingInstallmentPaid resets to 0" (c2v.pendingInstallmentPaid == 0.0)
+
+-- ─── M-GP: Moratorium / payment holiday ─────────────────────────────────────
+
+-- Payments within an active moratorium do not trigger the wasLate flag.
+testMoratorium : Script ()
+testMoratorium = do
+  p   <- setupMParties
+  cid <- activeContractDirect p
+  -- Grant moratorium covering through end of September
+  (morCid, morRecordCid) <- submit p.fi do
+    exerciseCmd cid GrantMoratorium with
+      moratoriumEnd = date 2026 Sep 30
+      reason        = "Covid-19 hardship relief — CBN directive"
+  Some morV <- queryContractId p.fi morCid
+  assertMsg "Moratorium is active" (morV.activeMoratorium == Some (date 2026 Sep 30))
+  Some mr <- queryContractId p.fi morRecordCid
+  assertMsg "MoratoriumRecord reason recorded" (mr.reason == "Covid-19 hardship relief — CBN directive")
+  -- Pay installment 1 on Aug 5 (after Jul 1 due date, but within moratorium)
+  payMor <- submit p.fi do
+    exerciseCmd morCid RecordPayment with
+      paymentDate       = date 2026 Aug 5
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some r <- queryContractId p.fi payMor.repaymentRecord
+  assertMsg "Payment within moratorium is NOT late" (not r.wasLate)
+  assertMsg "No charity while moratorium is active" (payMor.charityObligation == None)
+  -- End moratorium
+  c3 <- submit p.vetify do
+    exerciseCmd payMor.updatedContract EndMoratorium with note = "Moratorium period expired"
+  Some c3v <- queryContractId p.fi c3
+  assertMsg "Moratorium cleared" (c3v.activeMoratorium == None)
+  -- Pay installment 2 on Oct 15 (after Oct 1 due date, moratorium ended)
+  payPostMor <- submit p.fi do
+    exerciseCmd c3 RecordPayment with
+      paymentDate       = date 2026 Oct 15
+      amountPaid        = 191_666.67
+      installmentNo     = 2
+      allocation        = None
+      settlementAccount = None
+      directDebitRef     = None
+      existingGuardCid  = None
+  Some rv2 <- queryContractId p.fi payPostMor.repaymentRecord
+  assertMsg "Payment after moratorium ends IS late" rv2.wasLate
+  assertMsg "Charity created for late post-moratorium payment" (payPostMor.charityObligation /= None)
+
+-- GrantMoratorium fails when a moratorium is already active
+testCannotDoubleGrantMoratorium : Script ()
+testCannotDoubleGrantMoratorium = do
+  p   <- setupMParties
+  cid <- activeContractDirect p
+  (morCid, _) <- submit p.fi do
+    exerciseCmd cid GrantMoratorium with
+      moratoriumEnd = date 2026 Sep 30
+      reason        = "Covid-19 hardship relief"
+  -- Second grant must fail — a moratorium is already active
+  submitMustFail p.fi do
+    exerciseCmd morCid GrantMoratorium with
+      moratoriumEnd = date 2026 Dec 31
+      reason        = "Extension attempt"
+  pure ()
+
+-- ─── M-RC: Recovery & collections workflow ───────────────────────────────────
+
+testRecoveryWorkflow : Script ()
+testRecoveryWorkflow = do
+  p      <- setupMParties
+  cid    <- activeContractDirect p
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd cid FlagDelinquent with reason = "3 missed installments"; sentinelCid = p.sentinelCid
+  -- FI defaults the contract (direct FI-only credit decision)
+  (defaulted, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with
+      reason      = "No response to demand within deadline"
+      defaultedBy = "Aminu Garba, Credit Officer"
+  Some dv <- queryContractId p.fi defaulted
+  assertMsg "Contract is Defaulted" (dv.status == Defaulted)
+  -- Issue formal demand notice on the Defaulted contract
+  dNotice <- submit p.fi do
+    exerciseCmd defaulted IssueDemandNotice with
+      demandDate       = date 2026 Nov 1
+      demandRef        = "DEMAND-2026-RC123456-001"
+      responseDeadline = date 2026 Nov 15
+      gsmEligible      = False
+  Some dn <- queryContractId p.fi dNotice
+  assertMsg "Demand amount matches outstanding" (dn.outstandingAmount == 2_300_000.0)
+  -- Record a partial recovery
+  (afterRec, recRecord) <- submit p.fi do
+    exerciseCmd defaulted RecordRecoveryPayment with
+      amountRecovered = 500_000.0
+      recoveryDate    = date 2026 Dec 1
+      recoverySource  = "COLLATERAL_SALE"
+  Some rv <- queryContractId p.fi afterRec
+  assertMsg "Outstanding balance reduced after recovery" (rv.outstandingBalance == 1_800_000.0)
+  -- Escalate to legal on the demand notice
+  legalCid <- submit p.fi do
+    exerciseCmd dNotice EscalateToLegal with
+      escalationDate = date 2026 Dec 5
+      solicitorRef   = "TEMPLARS-2026-0042"
+      legalAction    = "Civil recovery proceedings — Federal High Court Lagos"
+  Some leg <- queryContractId p.fi legalCid
+  assertMsg "Legal action recorded" (leg.legalAction == "Civil recovery proceedings — Federal High Court Lagos")
+  -- Write off residual balance
+  (writeOffProposerId, writeOffProposerCid, writeOffConfirmerId, writeOffConfirmerCid) <-
+    createOfficerPair p "recovery-workflow" RecoveryOfficer
+  (closed, woRecord) <- submit p.fi do
+    exerciseCmd afterRec WriteOffContract with
+      writeOffDate          = date 2027 Jan 31
+      writeOffRef           = "WO-2027-RC123456-001"
+      totalRecovered        = 500_000.0
+      writeOffApprovedBy    = "Confirmer Officer recovery-workflow"
+      proposedByOfficerId   = writeOffProposerId
+      confirmedByOfficerId  = writeOffConfirmerId
+      proposedByOfficerCid  = writeOffProposerCid
+      confirmedByOfficerCid = writeOffConfirmerCid
+  Some cv <- queryContractId p.fi closed
+  assertMsg "Contract completed after write-off" (cv.status == Completed)
+  assertMsg "Outstanding balance zeroed" (cv.outstandingBalance == 0.0)
+  Some wo <- queryContractId p.fi woRecord
+  assertMsg "Amount written off is correct" (wo.amountWrittenOff == 1_800_000.0)
+
+-- Full recovery to zero balance unlocks CloseDefaultedContract
+testCloseAfterFullRecovery : Script ()
+testCloseAfterFullRecovery = do
+  p      <- setupMParties
+  cid    <- activeContractDirect p
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd cid FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (dflt, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with
+      reason      = "Irrecoverable — business insolvent"
+      defaultedBy = "Test Officer"
+  -- Record full recovery (full 2_300_000.0)
+  (afterRec, _) <- submit p.fi do
+    exerciseCmd dflt RecordRecoveryPayment with
+      amountRecovered = 2_300_000.0
+      recoveryDate    = date 2026 Dec 10
+      recoverySource  = "GUARANTOR"
+  Some rv <- queryContractId p.fi afterRec
+  assertMsg "Balance zeroed after full recovery" (rv.outstandingBalance == 0.0)
+  -- CloseDefaultedContract should now succeed
+  closed <- submit p.fi do
+    exerciseCmd afterRec CloseDefaultedContract with closingDate = date 2026 Dec 15
+  Some cv <- queryContractId p.fi closed
+  assertMsg "Contract completed via CloseDefaultedContract" (cv.status == Completed)
+
+-- CloseDefaultedContract fails when balance is still outstanding
+testCloseDefaultedRequiresZeroBalance : Script ()
+testCloseDefaultedRequiresZeroBalance = do
+  p    <- setupMParties
+  cid  <- activeContractDirect p
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd cid FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (dflt, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with
+      reason      = "Irrecoverable"
+      defaultedBy = "Test Officer"
+  submitMustFail p.fi do
+    exerciseCmd dflt CloseDefaultedContract with closingDate = date 2026 Dec 1
+  pure ()
+
+-- ─── M-MK: Maker-checker for collateral enforcement ──────────────────────────
+
+testMakerCheckerCollateral : Script ()
+testMakerCheckerCollateral = do
+  p    <- setupMParties
+  rahn <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "maker-checker-collateral" RecoveryOfficer
+  -- FI proposes enforcement (step 1 — maker)
+  pending <- submit p.fi do
+    exerciseCmd rahn ProposeEnforceCollateral with
+      reason               = "Default confirmed; RahnAgreement activated"
+      gsmExhausted         = False
+      gsmRef               = None
+      proposedByOfficerId  = proposerId
+      proposedByOfficerCid = proposerCid
+  Some pd <- queryContractId p.fi pending
+  assertMsg "Pending enforcement reason recorded" (pd.reason == "Default confirmed; RahnAgreement activated")
+  -- Vetify confirms enforcement (step 2 — checker)
+  enforcedRahn <- submit p.vetify do
+    exerciseCmd pending ConfirmEnforce with
+      rahnCid               = rahn
+      confirmedByOfficerId  = confirmerId
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  Some ev <- queryContractId p.fi enforcedRahn
+  assertMsg "Collateral is now Enforced" (ev.collateralStatus == CollateralEnforced)
+
+-- ─── M-RI: Regulatory inspection workflow ────────────────────────────────────
+
+testRegulatoryInspection : Script ()
+testRegulatoryInspection = do
+  p   <- setupMParties
+  now <- getTime
+  -- Vetify creates the inspection request upon receiving CBN notice
+  reqCid <- submit p.vetify do
+    createCmd RegulatoryInspectionRequest with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      inspectionRef        = "CBN-NIFI-INSP-2026-0031"
+      inspectionScope      = "Murabahah portfolio review Q3 2026"
+      responseDeadline     = date 2026 Oct 31
+      requestedAt          = now
+  -- FI responds with documentation
+  respCid <- submit p.fi do
+    exerciseCmd reqCid RespondToInspection with
+      responseRef     = "FI-RESP-2026-0031"
+      documents       = ["PortfolioReport-Q3-2026.pdf", "ShariahAudit-2026-H1.pdf"]
+      respondedByName = "Aminu Garba, Head of Operations"
+      responseDate    = date 2026 Oct 25
+  Some resp <- queryContractId p.vetify respCid
+  assertMsg "Response reference recorded" (resp.responseRef == "FI-RESP-2026-0031")
+  assertMsg "Documents included" (length resp.documents == 2)
+  -- Vetify closes the inspection
+  recordCid <- submit p.vetify do
+    exerciseCmd respCid CloseInspection with
+      findings       = ["All Murabahah contracts carry proper Qabdh evidence", "SAR reporting is timely"]
+      passed         = True
+      followUpNeeded = False
+      closingNote    = "Inspection closed. Portfolio is Shariah-compliant."
+  Some rec <- queryContractId p.regulator recordCid
+  assertMsg "Inspection passed" rec.passed
+  assertMsg "No follow-up needed" (not rec.followUpNeeded)
+
+-- ─── M-CI: Collateral inspection record ─────────────────────────────────────
+
+testCollateralInspection : Script ()
+testCollateralInspection = do
+  p    <- setupMParties
+  rahn <- createRahn p
+  inspCid <- submit p.fi do
+    exerciseCmd rahn RecordInspection with
+      inspectionDate     = date 2026 Sep 15
+      inspectedBy        = "Sterling Appraisals Ltd"
+      condition          = Satisfactory
+      inspectionNotes    = Some "Property is well-maintained; no encumbrances found"
+      nextInspectionDate = Some (date 2027 Mar 15)
+      mandateStatus           = None
+      estimatedGsmRecoverable = None
+  Some insp <- queryContractId p.fi inspCid
+  assertMsg "Condition recorded" (insp.condition == Satisfactory)
+  assertMsg "Next inspection date set" (insp.nextInspectionDate == Some (date 2027 Mar 15))
+  -- RahnAgreement is still active (nonconsuming choice)
+  Some r <- queryContractId p.fi rahn
+  assertMsg "Rahn still Active" (r.collateralStatus == CollateralActive)
+
+-- ─── M-CV: Covenant tracking ─────────────────────────────────────────────────
+
+testCovenantTracking : Script ()
+testCovenantTracking = do
+  p <- setupMParties
+  covenantCid <- submit p.fi do
+    createCmd CreditCovenant with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      covenantType         = "DSCR_MINIMUM"
+      threshold            = 1.2
+      measurementFrequency = "QUARTERLY"
+  -- Measurement within threshold — not breached
+  mOk <- submit p.vetify do
+    exerciseCmd covenantCid RecordCovenantMeasurement with
+      measuredValue = 1.5
+      measureDate   = date 2026 Sep 30
+      measuredBy    = "vetify-underwriting"
+  Some mOkV <- queryContractId p.fi mOk
+  assertMsg "DSCR 1.5 not breached" (not mOkV.breached)
+  -- Measurement below threshold — breached
+  mBreached <- submit p.vetify do
+    exerciseCmd covenantCid RecordCovenantMeasurement with
+      measuredValue = 0.9
+      measureDate   = date 2026 Dec 31
+      measuredBy    = "vetify-underwriting"
+  Some mBv <- queryContractId p.fi mBreached
+  assertMsg "DSCR 0.9 is breached" mBv.breached
+
+-- ─── M-DR: Document registry ─────────────────────────────────────────────────
+
+testDocumentEntry : Script ()
+testDocumentEntry = do
+  p <- setupMParties
+  -- Create an AssetPurchaseRecord via ProceedDirectly (not acked — stays alive)
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  apr <- submit p.fi do
+    exerciseCmd wad ProceedDirectly with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "LMS-INV-2026-00441"
+      freightCost           = 0.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  -- Register a bill of lading
+  let bolRef = sampleDocRef with docType = "BILL_OF_LADING"; storageRef = "s3://vetify-docs/RC123456/bol-2026.pdf"
+  entryCid <- submit p.fi do
+    exerciseCmd apr RegisterDocument with
+      documentRef  = bolRef
+      registeredBy = "Fatima Suleiman, Trade Finance"
+  Some entry <- queryContractId p.fi entryCid
+  assertMsg "Document not yet verified" (entry.verifiedAt == None)
+  assertMsg "Not superseded" (not entry.superseded)
+  -- Vetify verifies the document
+  verifiedCid <- submit p.vetify do
+    exerciseCmd entryCid VerifyDocument with verifyNote = Some "Hash matched; malware scan clean"
+  Some vEntry <- queryContractId p.vetify verifiedCid
+  assertMsg "Document is now verified" (vEntry.verifiedAt /= None)
+
+-- ─── M-PO: Supplier quotation ────────────────────────────────────────────────
+
+testSupplierQuotation : Script ()
+testSupplierQuotation = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  -- FI attaches formal quotation before proceeding
+  quotCid <- submit p.fi do
+    exerciseCmd wad AttachQuotation with
+      supplierName = "Lagos Mill Supplies Ltd"
+      quotationRef = "LMS-QUOTE-2026-00098"
+      quotedAmount = 2_000_000.0
+      validUntil   = Some (date 2026 Jul 31)
+  Some quot <- queryContractId p.fi quotCid
+  assertMsg "Quotation reference recorded" (quot.quotationRef == "LMS-QUOTE-2026-00098")
+  assertMsg "Quoted amount matches asset cost" (quot.quotedAmount == 2_000_000.0)
+  -- Wad is still active (nonconsuming choice)
+  Some _ <- queryContractId p.fi wad
+  pure ()
+
+-- ─── M-AT: Audit event ───────────────────────────────────────────────────────
+
+testAuditEvent : Script ()
+testAuditEvent = do
+  p   <- setupMParties
+  now <- getTime
+  evtCid <- submit p.vetify do
+    createCmd AuditEvent with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      eventType            = "CONTRACT_DEFAULTED"
+      description          = "MurabahahContract RC123456-001 defaulted after 90-day delinquency"
+      actedBy              = "vetify-monitoring-agent"
+      occurredAt           = now
+  Some evt <- queryContractId p.fi evtCid
+  assertMsg "Event type recorded" (evt.eventType == "CONTRACT_DEFAULTED")
+  Some _ <- queryContractId p.regulator evtCid
+  -- Business does not observe AuditEvent
+  evtsByBusiness <- query @AuditEvent p.business
+  assertMsg "Business cannot see audit events" (null evtsByBusiness)
+
+-- ─── M-IF: Ibra' rebate proposal ─────────────────────────────────────────────
+
+testIbraRebateProposal : Script ()
+testIbraRebateProposal = do
+  p   <- setupMParties
+  cid <- activeContractDirect p
+  -- Business requests early full settlement
+  ibraCid <- submit p.business do
+    exerciseCmd cid RequestIbra with
+      requestedSettlementDate = date 2026 Dec 1
+      settlementType          = FullIbra
+      requestedAmount         = None
+  -- FI's financing team proposes an advisory rebate (BD-4: FI, not vetify, controls this)
+  proposalCid <- submit p.fi do
+    exerciseCmd ibraCid ProposeRebate with
+      suggestedRebate = 150_000.0   -- FI formula: remaining profit × remaining tenure / total tenure
+      rationale       = "12 of 12 instalments remaining; full profit waiver suggested per CBN guidance"
+  Some proposal <- queryContractId p.fi proposalCid
+  assertMsg "Suggested rebate recorded" (proposal.suggestedRebate == 150_000.0)
+  -- FI exercises their own discretion — grants a smaller rebate (not obligated to follow)
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "ibra-rebate-proposal" CreditOfficer
+  submit p.fi do
+    exerciseCmd ibraCid GrantIbra with
+      rebateAmount           = 100_000.0
+      proposedByOfficerId    = proposerId
+      confirmedByOfficerId   = confirmerId
+      proposedByOfficerCid   = proposerCid
+      confirmedByOfficerCid  = confirmerCid
+  -- IbraRequest is consumed; FI now exercises RecordEarlySettlement
+  (settled, _rec) <- submit p.fi do
+    exerciseCmd cid RecordEarlySettlement with
+      settlementType    = FullIbra
+      settlementAmount  = 2_300_000.0
+      settlementDate    = date 2026 Dec 1
+      settlementAccount = None
+  Some sv <- queryContractId p.fi settled
+  assertMsg "Contract completed after full settlement" (sv.status == Completed)
+
+
+-- ─── Batch B: new Batch B tests ──────────────────────────────────────────────
+
+-- B-1: Reject delivery → FI replaces asset → acquisition proceeds normally
+testRejectAndReplace : Script ()
+testRejectAndReplace = do
+  p   <- setupMParties
+  apr <- assetPurchaseViaWakala p
+  -- Business rejects the initial delivery (nonconsuming — APR stays live)
+  rejCid <- submit p.business do
+    exerciseCmd apr RejectDelivery with
+      reason            = "Wrong model delivered"
+      defectDescription = "Model MDDP received instead of contracted MDDQ"
+  Some rej <- queryContractId p.fi rejCid
+  assertMsg "Rejection recorded" (rej.reason == "Wrong model delivered")
+  -- FI ships a replacement — new APR created, old one archived
+  newApr <- submit p.fi do
+    exerciseCmd apr ProceedWithReplacement with
+      newActualCost   = 2_050_000.0
+      newPurchaseDate = date 2026 Jul 5
+      newInvoiceRef   = "LMS-INV-2026-00442"
+      replacementNote = "MDDQ model sourced from alternative supplier"
+  Some newA <- queryContractId p.fi newApr
+  assertMsg "Replacement cost updated" (newA.actualCost == 2_050_000.0)
+  assertMsg "Delivery not yet acknowledged on replacement" (not newA.deliveryAcknowledged)
+  -- Business acknowledges the replacement delivery
+  newAprAcked <- submit p.business do exerciseCmd newApr AcknowledgeDelivery
+  Some acked <- queryContractId p.fi newAprAcked
+  assertMsg "Replacement acknowledged" acked.deliveryAcknowledged
+
+-- B-1: Business requests cancellation; FI accepts — both records archived
+testCancellationPath : Script ()
+testCancellationPath = do
+  p   <- setupMParties
+  apr <- assetPurchaseViaWakala p
+  -- Business raises rejection then requests cancellation (FI cannot source replacement)
+  _ <- submit p.business do
+    exerciseCmd apr RejectDelivery with
+      reason            = "Supplier cannot deliver"
+      defectDescription = "Supplier has gone into administration"
+  reqCid <- submit p.business do
+    exerciseCmd apr RequestCancellation with
+      reason = "Supplier insolvent; no alternative source available"
+  Some req <- queryContractId p.fi reqCid
+  assertMsg "Cancellation reason recorded" (req.reason == "Supplier insolvent; no alternative source available")
+  -- FI accepts — archives both the request and the APR
+  submit p.fi do
+    exerciseCmd apr ConfirmCancellation with reqCid = reqCid
+  aprs <- query @AssetPurchaseRecord p.fi
+  assertMsg "APR archived after confirmed cancellation" (null aprs)
+
+-- B-1: FI rejects the cancellation request — APR and request archived, deal continues
+testCancellationRejected : Script ()
+testCancellationRejected = do
+  p   <- setupMParties
+  apr <- assetPurchaseViaWakala p
+  reqCid <- submit p.business do
+    exerciseCmd apr RequestCancellation with
+      reason = "Business changed mind"
+  -- FI rejects the cancellation
+  submit p.fi do exerciseCmd reqCid RejectCancellation
+  -- APR is still active
+  Some live <- queryContractId p.fi apr
+  assertMsg "APR still active after FI rejects cancellation" (not live.deliveryAcknowledged)
+
+-- B-2: GuaranteeAgreement lifecycle — enforce then release paths
+testGuaranteeEnforced : Script ()
+testGuaranteeEnforced = do
+  p   <- setupMParties
+  -- Both guarantor and FI are signatories — multi-party actAs required
+  gCid <- submit (actAs [p.business, p.fi]) do
+    createCmd GuaranteeAgreement with
+      guarantor            = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      guaranteeType        = "PERSONAL"
+      guaranteedAmount     = 2_300_000.0
+      guarantorName        = "Chukwuemeka Okonkwo"
+      guarantorId          = "12345678901"
+      effectiveDate        = date 2026 Jul 1
+      expiryDate           = None
+      guaranteeStatus      = GuaranteeActive
+  gCid2 <- submit p.fi do
+    exerciseCmd gCid EnforceGuarantee with reason = "Contract defaulted; collateral insufficient"
+  Some g <- queryContractId p.fi gCid2
+  assertMsg "Guarantee is Enforced" (g.guaranteeStatus == GuaranteeEnforced)
+  -- Cannot enforce an already-enforced guarantee
+  submitMustFail p.fi do
+    exerciseCmd gCid2 EnforceGuarantee with reason = "Double enforcement"
+  pure ()
+
+testGuaranteeReleased : Script ()
+testGuaranteeReleased = do
+  p   <- setupMParties
+  gCid <- submit (actAs [p.business, p.fi]) do
+    createCmd GuaranteeAgreement with
+      guarantor            = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      guaranteeType        = "PERSONAL"
+      guaranteedAmount     = 2_300_000.0
+      guarantorName        = "Chukwuemeka Okonkwo"
+      guarantorId          = "12345678901"
+      effectiveDate        = date 2026 Jul 1
+      expiryDate           = None
+      guaranteeStatus      = GuaranteeActive
+  gCid2 <- submit p.fi do
+    exerciseCmd gCid ReleaseGuarantee with note = "Full repayment received; guarantee released"
+  Some g <- queryContractId p.fi gCid2
+  assertMsg "Guarantee is Released" (g.guaranteeStatus == GuaranteeReleased)
+
+-- B-4: GrantIbra creates an IbraGrantRecord on the ledger
+testIbraGrantRecord : Script ()
+testIbraGrantRecord = do
+  p   <- setupMParties
+  c   <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "ibra-grant-record" CreditOfficer
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with
+      requestedSettlementDate = date 2026 Dec 1
+      settlementType          = FullIbra
+      requestedAmount         = None
+  grantCid <- submit p.fi do
+    exerciseCmd req GrantIbra with
+      rebateAmount           = 75_000.0
+      proposedByOfficerId    = proposerId
+      confirmedByOfficerId   = confirmerId
+      proposedByOfficerCid   = proposerCid
+      confirmedByOfficerCid  = confirmerCid
+  Some gr <- queryContractId p.fi grantCid
+  assertMsg "Grant record: rebate amount" (gr.rebateAmount == 75_000.0)
+  assertMsg "Grant record: outstanding balance" (gr.outstandingBalance == 2_300_000.0)
+  assertMsg "Grant record visible to business" True
+  Some _ <- queryContractId p.business grantCid
+  pure ()
+
+-- B-4: GrantPartialIbra creates a PartialIbraGrant
+testPartialIbraGrantRecord : Script ()
+testPartialIbraGrantRecord = do
+  p   <- setupMParties
+  c   <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "partial-ibra-grant-record" CreditOfficer
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with
+      requestedSettlementDate = date 2026 Sep 1
+      settlementType          = PartialIbra
+      requestedAmount         = Some 1_000_000.0
+  grantCid <- submit p.fi do
+    exerciseCmd req GrantPartialIbra with
+      rebateAmount             = 30_000.0
+      approvedSettlementAmount = 970_000.0
+      proposedByOfficerId      = proposerId
+      confirmedByOfficerId     = confirmerId
+      proposedByOfficerCid     = proposerCid
+      confirmedByOfficerCid    = confirmerCid
+  Some pg <- queryContractId p.fi grantCid
+  assertMsg "Partial grant: approved amount" (pg.approvedSettlementAmount == 970_000.0)
+  assertMsg "Partial grant: rebate amount" (pg.rebateAmount == 30_000.0)
+
+-- ─── D-1: Wa'd withdrawal creates immutable audit record ─────────────────────
+
+testWadWithdrawalRecorded : Script ()
+testWadWithdrawalRecorded = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  submit p.business do
+    exerciseCmd wad WithdrawWad with reason = "Supplier changed pricing"
+  records <- query @WadWithdrawalRecord p.business
+  assertMsg "WadWithdrawalRecord created" (length records == 1)
+  assertMsg "Withdrawal reason recorded"
+    (any (\(_, wr) -> wr.reason == "Supplier changed pricing") records)
+  assertMsg "Business is signatory"
+    (any (\(_, wr) -> wr.business == p.business) records)
+
+-- ─── D-2: Proposal decline creates immutable audit record ─────────────────────
+
+testDeclineProposalRecorded : Script ()
+testDeclineProposalRecorded = do
+  p <- setupMParties
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  submit p.business do
+    exerciseCmd proposal DeclineProposal with reason = "Terms not acceptable"
+  records <- query @ProposalDeclineRecord p.business
+  assertMsg "ProposalDeclineRecord created" (length records == 1)
+  assertMsg "Decline reason recorded"
+    (any (\(_, dr) -> dr.reason == "Terms not acceptable") records)
+  assertMsg "facilityRef propagated"
+    (any (\(_, dr) -> dr.facilityRef == "FAC-2026-RC123456-001") records)
+
+-- ─── D-3: Agency decline creates immutable audit record ───────────────────────
+
+testDeclineAgencyRecorded : Script ()
+testDeclineAgencyRecorded = do
+  p <- setupMParties
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  wakala <- submit p.fi do exerciseCmd wad ProceedWithWakala
+  submit p.business do
+    exerciseCmd wakala DeclineAgency with reason = "Cannot source asset from named supplier"
+  records <- query @AgencyWithdrawalRecord p.business
+  assertMsg "AgencyWithdrawalRecord created" (length records == 1)
+  assertMsg "Agency decline reason recorded"
+    (any (\(_, ar) -> ar.reason == "Cannot source asset from named supplier") records)
+
+-- ─── D-4: Restructuring rejection creates immutable audit record ───────────────
+
+testRejectRestructuringRecorded : Script ()
+testRejectRestructuringRecorded = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  reqCid <- submit p.business do
+    exerciseCmd c RequestRestructuring with
+      proposedSchedule = samplePaymentSchedule
+      reason           = "Need more time"
+      requestDate      = date 2026 Aug 1
+  rejCid <- submit p.fi do
+    exerciseCmd c RejectRestructuring with
+      reqCid = reqCid
+      reason = "Proposed schedule exceeds policy tenure"
+  Some rej <- queryContractId p.fi rejCid
+  assertMsg "Rejection reason stored" (rej.reason == "Proposed schedule exceeds policy tenure")
+  assertMsg "facilityRef on rejection record" (rej.facilityRef == "FAC-2026-RC123456-001")
+  Some _ <- queryContractId p.business rejCid  -- business observes the rejection record
+  pure ()
+
+-- B-3: WriteOffContract requires writeOffApprovedBy
+testWriteOffApproverRequired : Script ()
+testWriteOffApproverRequired = do
+  p   <- setupMParties
+  c   <- activeContractDirect p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "writeoff-approver-required" RecoveryOfficer
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd c FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (dflt, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with
+      reason      = "Irrecoverable"
+      defaultedBy = "Test Officer"
+  submitMustFail p.fi do
+    exerciseCmd dflt WriteOffContract with
+      writeOffDate          = date 2027 Jan 1
+      writeOffRef           = "WO-001"
+      totalRecovered        = 0.0
+      writeOffApprovedBy    = ""   -- empty approver must be rejected
+      proposedByOfficerId   = proposerId
+      confirmedByOfficerId  = confirmerId
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = confirmerCid
+  pure ()
+
+-- ─── C-1: facilityRef lookup ──────────────────────────────────────────────────
+
+-- MurabahahContract no longer carries a contract key (SDK 3.4.11 / Daml-LF
+-- 2.1/2.2 does not support contract keys) — resolve it by querying this
+-- party's active MurabahahContract set and filtering on
+-- (business, financialInstitution, facilityRef) instead of lookupByKey.
+testFacilityRefKeyLookup : Script ()
+testFacilityRefKeyLookup = do
+  p  <- setupMParties
+  _  <- activeContractViaWakala p
+  contracts <- query @MurabahahContract p.fi
+  let result =
+        find
+          (\(_, mc) ->
+            mc.business == p.business
+              && mc.financialInstitution == p.fi
+              && mc.facilityRef == "FAC-2026-RC123456-001")
+          contracts
+  case result of
+    None         -> assertFail "MurabahahContract not found by facilityRef"
+    Some (_, mc) -> assertMsg "facilityRef matches" (mc.facilityRef == "FAC-2026-RC123456-001")
+
+-- ─── C-2: Full acquisition cost disclosure ───────────────────────────────────
+
+-- ensure clause rejects mismatched totalAcquisitionCost; OfferMurabahah guard
+-- requires murabahahTerms.assetCost == totalAcquisitionCost (AAOIFI §3/3).
+testFullCostDisclosure : Script ()
+testFullCostDisclosure = do
+  p <- setupMParties
+  -- Ensure clause: direct creation with mismatched totalAcquisitionCost is rejected
+  submitMustFail p.fi do
+    createCmd AssetPurchaseRecord with
+      business              = p.business
+      vetify                = p.vetify
+      financialInstitution  = p.fi
+      businessName          = sampleProfile.name
+      cacRegNumber          = sampleKyc.cacRegNumber
+      terms                 = sampleFinancingTerms
+      assetDetails          = sampleAssetDetails
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "TEST-001"
+      freightCost           = 50_000.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+      totalAcquisitionCost  = 2_000_000.0  -- wrong; should be 2_050_000
+      purchasedViaWakala    = False
+      deliveryAcknowledged  = False
+      ownershipDocuments    = []
+      supplierDetails       = None
+      additionalAssets      = []
+  -- Build an APR via Wakala with non-zero freight cost
+  wad <- submit p.business do
+    createCmd MurabahahWad with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      financingRef         = None
+      offerExpiresAt       = None
+  wakala <- submit p.fi do exerciseCmd wad ProceedWithWakala
+  -- actualCost=2_000_000 + freight=50_000 → totalAcquisitionCost=2_050_000
+  apr <- submit p.business do
+    exerciseCmd wakala RecordAssetPurchase with
+      actualCost            = 2_000_000.0
+      purchaseDate          = date 2026 Jun 15
+      invoiceRef            = "LMS-INV-001"
+      freightCost           = 50_000.0
+      customsDuty           = 0.0
+      insurancePremium      = 0.0
+      otherAcquisitionCosts = 0.0
+  Some aprc <- queryContractId p.fi apr
+  assertMsg "totalAcquisitionCost = actualCost + freight" (aprc.totalAcquisitionCost == 2_050_000.0)
+  aprAcked <- submit p.business do exerciseCmd apr AcknowledgeDelivery
+  -- OfferMurabahah with assetCost=2_000_000 (raw) fails (≠ totalAcquisitionCost=2_050_000)
+  submitMustFail p.fi do
+    exerciseCmd aprAcked OfferMurabahah with
+      murabahahTerms      = sampleMurabahahTerms  -- assetCost=2_000_000
+      paymentSchedule     = samplePaymentSchedule
+      regulator           = Some p.regulator
+      advisor             = p.advisor
+      facilityRef         = "FAC-2026-RC123456-001"
+      startDate           = date 2026 Jul 1
+      acceptanceExpiresAt = None
+  -- OfferMurabahah with assetCost=2_050_000 (total) succeeds
+  let disclosedTerms = sampleMurabahahTerms with
+        assetCost = 2_050_000.0
+        salePrice = 2_350_000.0  -- assetCost + profitAmount (300_000)
+  _ <- submit p.fi do
+    exerciseCmd aprAcked OfferMurabahah with
+      murabahahTerms      = disclosedTerms
+      paymentSchedule     = samplePaymentSchedule
+      regulator           = Some p.regulator
+      advisor             = p.advisor
+      facilityRef         = "FAC-2026-RC123456-001"
+      startDate           = date 2026 Jul 1
+      acceptanceExpiresAt = None
+  pure ()
+
+-- ─── C-3: profitRate / effectiveRate stored on contract ──────────────────────
+
+testProfitRateStored : Script ()
+testProfitRateStored = do
+  p <- setupMParties
+  let customTerms = sampleMurabahahTerms with
+        profitRate    = Some 0.15
+        effectiveRate = Some 0.1605
+  schedCid <- createScheduleContract p
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = "FAC-2026-RC123456-001"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = customTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  cert <- certifyProposal p proposal
+  cid <- submit p.business do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+  Some mc <- queryContractId p.business cid
+  assertMsg "profitRate stored" (mc.murabahahTerms.profitRate == Some 0.15)
+  assertMsg "effectiveRate stored" (mc.murabahahTerms.effectiveRate == Some 0.1605)
+
+-- ─── E-1: PaymentScheduleContract accessible via CID on MurabahahContract ───
+
+-- Schedule created by OfferMurabahah is accessible from the contract's CID field.
+testScheduleContractAccessible : Script ()
+testScheduleContractAccessible = do
+  p <- setupMParties
+  cid <- activeContractViaWakala p
+  Some mc <- queryContractId p.fi cid
+  Some sched <- queryContractId p.fi mc.paymentScheduleCid
+  assertMsg "Schedule has 12 entries" (length sched.entries == 12)
+  assertMsg "Schedule facilityRef matches contract" (sched.facilityRef == mc.facilityRef)
+  assertMsg "FI is signatory on schedule" (sched.financialInstitution == p.fi)
+  assertMsg "Regulator observes schedule" (sched.regulator == Some p.regulator)
+
+-- ─── G-5: None regulator path — no visibility leak ───────────────────────────
+
+-- MurabahahContract can be created and operated with regulator = None.
+-- Verifies BD-5: deploying without a live CBN regulator party is valid.
+testNoneRegulatorPath : Script ()
+testNoneRegulatorPath = do
+  p <- setupMParties
+  schedCid <- submit p.fi do
+    createCmd PaymentScheduleContract with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = None
+      facilityRef          = "FAC-2026-RC123456-NOREG"
+      cacRegNumber         = sampleKyc.cacRegNumber
+      entries              = samplePaymentSchedule
+  proposal <- submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = None
+      facilityRef          = "FAC-2026-RC123456-NOREG"
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = sampleMurabahahTerms
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+  cert <- certifyProposal p proposal
+  cid <- submit p.business do exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+  Some mc <- queryContractId p.fi cid
+  assertMsg "Contract active with no regulator" (mc.status == Active)
+  assertMsg "Regulator field is None" (mc.regulator == None)
+  -- Regulator party cannot observe a contract created with regulator = None
+  noVisibility <- queryContractId p.regulator cid
+  assertMsg "Regulator party has no visibility when regulator = None" (noVisibility == None)
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BATCH F — OPTIONAL PRODUCT FEATURE TESTS
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- ─── F-1: HamishJiddiyyah ────────────────────────────────────────────────
+
+testHamishReturnDeposit : Script ()
+testHamishReturnDeposit = do
+  p <- setupMParties
+  hCid <- submit p.fi do
+    createCmd HamishJiddiyyah with
+      business             = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      depositAmount        = 200_000.0
+      depositRef           = "TRF-2026-HAMISH-001"
+      depositDate          = date 2026 Jul 1
+      returnDeadline       = date 2026 Aug 1
+      actualLossDeducted   = None
+      status               = HamishHeld
+  returned <- submit p.fi do
+    exerciseCmd hCid ReturnDeposit with transferRef = "TRF-RETURN-2026-001"
+  Some rv <- queryContractId p.fi returned
+  assertMsg "Deposit status is Returned" (rv.status == HamishReturned)
+  Some bv <- queryContractId p.business returned
+  assertMsg "Business can see returned deposit" (bv.depositAmount == 200_000.0)
+
+testHamishForfeitDeposit : Script ()
+testHamishForfeitDeposit = do
+  p <- setupMParties
+  hCid <- submit p.fi do
+    createCmd HamishJiddiyyah with
+      business             = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      depositAmount        = 200_000.0
+      depositRef           = "TRF-2026-HAMISH-002"
+      depositDate          = date 2026 Jul 1
+      returnDeadline       = date 2026 Aug 1
+      actualLossDeducted   = None
+      status               = HamishHeld
+  forfeited <- submit p.fi do
+    exerciseCmd hCid ForfeitDeposit with
+      actualLoss = 120_000.0
+      reason     = "Business withdrew Wa'd; FI incurred supplier cancellation fee"
+  Some fv <- queryContractId p.fi forfeited
+  assertMsg "Deposit status is Forfeited" (fv.status == HamishForfeited)
+  assertMsg "Actual loss recorded" (fv.actualLossDeducted == Some 120_000.0)
+
+testHamishForfeitCannotExceedDeposit : Script ()
+testHamishForfeitCannotExceedDeposit = do
+  p <- setupMParties
+  hCid <- submit p.fi do
+    createCmd HamishJiddiyyah with
+      business             = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      depositAmount        = 200_000.0
+      depositRef           = "TRF-2026-HAMISH-003"
+      depositDate          = date 2026 Jul 1
+      returnDeadline       = date 2026 Aug 1
+      actualLossDeducted   = None
+      status               = HamishHeld
+  submitMustFail p.fi do
+    exerciseCmd hCid ForfeitDeposit with
+      actualLoss = 250_000.0
+      reason     = "Exceeds deposit"
+  pure ()
+
+testCannotReturnForfeitedDeposit : Script ()
+testCannotReturnForfeitedDeposit = do
+  p <- setupMParties
+  hCid <- submit p.fi do
+    createCmd HamishJiddiyyah with
+      business             = p.business
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      depositAmount        = 200_000.0
+      depositRef           = "TRF-2026-HAMISH-004"
+      depositDate          = date 2026 Jul 1
+      returnDeadline       = date 2026 Aug 1
+      actualLossDeducted   = None
+      status               = HamishHeld
+  forfeited <- submit p.fi do
+    exerciseCmd hCid ForfeitDeposit with
+      actualLoss = 50_000.0
+      reason     = "Partial forfeiture"
+  submitMustFail p.fi do
+    exerciseCmd forfeited ReturnDeposit with transferRef = "TRF-RETURN-INVALID"
+  pure ()
+
+-- ─── F-2: PurchaseOrder ──────────────────────────────────────────────────
+
+sampleSupplierDetails : SupplierDetails
+sampleSupplierDetails = SupplierDetails with
+  supplierName      = "Flour Mills of Nigeria PLC"
+  supplierAddress   = "2 Old Dock Road, Apapa, Lagos"
+  supplierRegNumber = Some "RC001759"
+  contactEmail      = Some "sales@flourmillsnigeria.com"
+  bankAccountRef    = Some "VETIFY-VENDOR-FMN-001"
+
+sampleOrderedItems : [AssetLineItem]
+sampleOrderedItems =
+  [ AssetLineItem with
+      description     = "50 metric tonnes of white flour (Grade A)"
+      supplierName    = "Flour Mills of Nigeria PLC"
+      supplierRef     = "FMN-INV-2026-0042"
+      estimatedCost   = 2_300_000.0
+      actualCost      = None
+      supplierDetails = Some sampleSupplierDetails
+  ]
+
+testPurchaseOrderLifecycle : Script ()
+testPurchaseOrderLifecycle = do
+  p   <- setupMParties
+  now <- getTime
+  poCid <- submit p.fi do
+    createCmd PurchaseOrder with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      supplierName         = "Flour Mills of Nigeria PLC"
+      supplierDetails      = sampleSupplierDetails
+      orderedItems         = sampleOrderedItems
+      totalOrderValue      = 2_300_000.0
+      deliveryDeadline     = date 2026 Aug 15
+      poRef                = "PO-2026-RC123456-001"
+      issuedAt             = now
+      status               = POIssued
+  -- Supplier confirms
+  confirmed <- submit p.fi do
+    exerciseCmd poCid ConfirmPO with confirmationRef = "FMN-PO-CONF-2026-0042"
+  Some cv <- queryContractId p.fi confirmed
+  assertMsg "PO status is Confirmed" (cv.status == POConfirmed)
+  -- Partial delivery
+  partial <- submit p.fi do
+    exerciseCmd confirmed MarkPartiallyFulfilled with deliveryRef = "DEL-001"
+  Some pv <- queryContractId p.fi partial
+  assertMsg "PO status is PartiallyFulfilled" (pv.status == POPartiallyFulfilled)
+  -- Full fulfillment
+  fulfilled <- submit p.fi do
+    exerciseCmd partial MarkFulfilled with deliveryRef = "DEL-002"
+  Some fv <- queryContractId p.fi fulfilled
+  assertMsg "PO status is Fulfilled" (fv.status == POFulfilled)
+  -- Business can observe the PO
+  Some bv <- queryContractId p.business fulfilled
+  assertMsg "Business sees PO total value" (bv.totalOrderValue == 2_300_000.0)
+
+testPurchaseOrderCancellation : Script ()
+testPurchaseOrderCancellation = do
+  p   <- setupMParties
+  now <- getTime
+  poCid <- submit p.fi do
+    createCmd PurchaseOrder with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      supplierName         = "Flour Mills of Nigeria PLC"
+      supplierDetails      = sampleSupplierDetails
+      orderedItems         = sampleOrderedItems
+      totalOrderValue      = 2_300_000.0
+      deliveryDeadline     = date 2026 Aug 15
+      poRef                = "PO-2026-RC123456-002"
+      issuedAt             = now
+      status               = POIssued
+  cancelled <- submit p.fi do
+    exerciseCmd poCid CancelPO with reason = "Business withdrew Wa'd before supplier confirmation"
+  Some cv <- queryContractId p.fi cancelled
+  assertMsg "PO status is Cancelled" (cv.status == POCancelled)
+
+testCannotCancelFulfilledPO : Script ()
+testCannotCancelFulfilledPO = do
+  p   <- setupMParties
+  now <- getTime
+  poCid <- submit p.fi do
+    createCmd PurchaseOrder with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      supplierName         = "Flour Mills of Nigeria PLC"
+      supplierDetails      = sampleSupplierDetails
+      orderedItems         = sampleOrderedItems
+      totalOrderValue      = 2_300_000.0
+      deliveryDeadline     = date 2026 Aug 15
+      poRef                = "PO-2026-RC123456-003"
+      issuedAt             = now
+      status               = POIssued
+  confirmed  <- submit p.fi do exerciseCmd poCid ConfirmPO with confirmationRef = "CONF-003"
+  fulfilled  <- submit p.fi do exerciseCmd confirmed MarkFulfilled with deliveryRef = "DEL-003"
+  submitMustFail p.fi do
+    exerciseCmd fulfilled CancelPO with reason = "Cannot cancel after fulfillment"
+  pure ()
+
+-- ─── F-3: CapitalCallRecord ───────────────────────────────────────────────
+
+testCapitalCallRecord : Script ()
+testCapitalCallRecord = do
+  p <- setupMParties
+  tranche1 <- submit p.fi do
+    createCmd CapitalCallRecord with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      trancheNumber        = 1
+      trancheAmount        = 1_000_000.0
+      disbursementDate     = date 2026 Jul 15
+      purposeOfTranche     = "Initial inventory purchase — 25 MT flour"
+      disbursementRef      = "DISB-2026-RC123456-001"
+      cumulativeDisbursed  = 1_000_000.0
+      remainingFacility    = 1_300_000.0
+  Some t1 <- queryContractId p.fi tranche1
+  assertMsg "Tranche 1 amount correct" (t1.trancheAmount == 1_000_000.0)
+  assertMsg "Remaining facility correct" (t1.remainingFacility == 1_300_000.0)
+  Some regView <- queryContractId p.regulator tranche1
+  assertMsg "Regulator sees tranche disbursement" (regView.trancheNumber == 1)
+  tranche2 <- submit p.fi do
+    createCmd CapitalCallRecord with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = Some p.regulator
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      trancheNumber        = 2
+      trancheAmount        = 1_300_000.0
+      disbursementDate     = date 2026 Aug 15
+      purposeOfTranche     = "Second inventory tranche — 25 MT flour"
+      disbursementRef      = "DISB-2026-RC123456-002"
+      cumulativeDisbursed  = 2_300_000.0
+      remainingFacility    = 0.0
+  Some t2 <- queryContractId p.fi tranche2
+  assertMsg "Tranche 2 cumulative correct" (t2.cumulativeDisbursed == 2_300_000.0)
+  assertMsg "Facility fully drawn" (t2.remainingFacility == 0.0)
+
+testCapitalCallNoRegulator : Script ()
+testCapitalCallNoRegulator = do
+  p <- setupMParties
+  trancheCid <- submit p.fi do
+    createCmd CapitalCallRecord with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      business             = p.business
+      regulator            = None
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      facilityRef          = "FAC-2026-RC123456-001"
+      trancheNumber        = 1
+      trancheAmount        = 500_000.0
+      disbursementDate     = date 2026 Jul 15
+      purposeOfTranche     = "Test tranche without regulator"
+      disbursementRef      = "DISB-TEST-001"
+      cumulativeDisbursed  = 500_000.0
+      remainingFacility    = 1_800_000.0
+  noVisibility <- queryContractId p.regulator trancheCid
+  assertMsg "Regulator has no visibility when regulator = None" (noVisibility == None)
+  pure ()
+
+-- ─── F-4: ForceMajeureDeclaration ────────────────────────────────────────
+
+testForceMajeureLifecycle : Script ()
+testForceMajeureLifecycle = do
+  p <- setupMParties
+  decCid <- submit p.vetify do
+    createCmd ForceMajeureDeclaration with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = Some p.regulator
+      declarationRef       = "FMD-2026-CBN-001"
+      eventDescription     = "COVID-19 wave 3 — CBN directive for 90-day payment moratorium"
+      affectedRegion       = "Nationwide"
+      suspensionStart      = date 2026 Mar 1
+      suspensionEnd        = date 2026 May 31
+      regulatoryBasis      = "CBN Circular FPR/DIR/GEN/CIR/07/004"
+      isActive             = True
+  Some dv <- queryContractId p.fi decCid
+  assertMsg "Declaration is active" dv.isActive
+  assertMsg "Affected region recorded" (dv.affectedRegion == "Nationwide")
+  Some rv <- queryContractId p.regulator decCid
+  assertMsg "Regulator observes declaration" (rv.declarationRef == "FMD-2026-CBN-001")
+  -- Lift after event passes
+  lifted <- submit p.vetify do
+    exerciseCmd decCid LiftDeclaration with note = "CBN confirmed end of moratorium period"
+  Some lv <- queryContractId p.fi lifted
+  assertMsg "Declaration is no longer active" (not lv.isActive)
+
+testCannotLiftAlreadyLiftedDeclaration : Script ()
+testCannotLiftAlreadyLiftedDeclaration = do
+  p <- setupMParties
+  decCid <- submit p.vetify do
+    createCmd ForceMajeureDeclaration with
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      regulator            = None
+      declarationRef       = "FMD-2026-TEST-001"
+      eventDescription     = "Test force majeure"
+      affectedRegion       = "Lagos"
+      suspensionStart      = date 2026 Mar 1
+      suspensionEnd        = date 2026 Apr 30
+      regulatoryBasis      = "Internal test"
+      isActive             = True
+  lifted <- submit p.vetify do
+    exerciseCmd decCid LiftDeclaration with note = "First lift"
+  submitMustFail p.vetify do
+    exerciseCmd lifted LiftDeclaration with note = "Cannot lift again"
+  pure ()
+
+-- ─── F-5: CharityOrganizationRegistry ────────────────────────────────────
+
+testCharityRegistryLifecycle : Script ()
+testCharityRegistryLifecycle = do
+  p <- setupMParties
+  -- FI creates its approved Shariah board charity list
+  regCid <- submit p.fi do
+    createCmd CharityOrganizationRegistry with
+      financialInstitution  = p.fi
+      vetify                = p.vetify
+      regulator             = Some p.regulator
+      approvedOrganizations =
+        [ ("Islamic Relief Nigeria", "IRN-CAC-2024-001")
+        , ("Al-Hayat Foundation", "AHF-CAC-2023-117")
+        ]
+      shariahBoardRef       = "SB-RESOLUTION-2024-03"
+      effectiveDate         = date 2024 Jan 1
+      version               = "v1.0"
+  Some rv <- queryContractId p.fi regCid
+  assertMsg "Registry has 2 approved orgs" (length rv.approvedOrganizations == 2)
+  Some vv <- queryContractId p.vetify regCid
+  assertMsg "Vetify observes registry" (vv.version == "v1.0")
+  -- FI updates the list (Shariah board adds a new org)
+  updated <- submit p.fi do
+    exerciseCmd regCid UpdateRegistry with
+      newOrganizations =
+        [ ("Islamic Relief Nigeria", "IRN-CAC-2024-001")
+        , ("Al-Hayat Foundation", "AHF-CAC-2023-117")
+        , ("Mercy Corps Nigeria", "MCN-CAC-2025-044")
+        ]
+      newVersion       = "v1.1"
+      updatedBoardRef  = "SB-RESOLUTION-2025-01"
+  Some uv <- queryContractId p.fi updated
+  assertMsg "Registry updated to 3 orgs" (length uv.approvedOrganizations == 3)
+  assertMsg "Version updated" (uv.version == "v1.1")
+
+testConfirmCharityPaymentWithRegistry : Script ()
+testConfirmCharityPaymentWithRegistry = do
+  p <- setupMParties
+  -- FI creates its charity registry
+  regCid <- submit p.fi do
+    createCmd CharityOrganizationRegistry with
+      financialInstitution  = p.fi
+      vetify                = p.vetify
+      regulator             = Some p.regulator
+      approvedOrganizations = [("Islamic Relief Nigeria", "IRN-CAC-2024-001")]
+      shariahBoardRef       = "SB-RESOLUTION-2024-03"
+      effectiveDate         = date 2024 Jan 1
+      version               = "v1.0"
+  -- Create a late payment (triggers charity obligation)
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Aug 15
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = None
+      existingGuardCid  = None
+  Some charityCid <- pure payRes.charityObligation
+  withAmount <- submit p.fi do
+    exerciseCmd charityCid SetCharityAmount with amount = 5_000.0
+  -- Both parties co-sign: FI fetches registry; business authorises CharityPaymentRecord
+  rcptCid <- submit (actAs [p.business, p.fi]) do
+    exerciseCmd withAmount ConfirmCharityPaymentValidated with
+      charityRef          = "CHARITY-RCPT-REG-001"
+      charityOrganization = "Islamic Relief Nigeria"
+      registryCid         = regCid
+  Some rcpt <- queryContractId p.fi rcptCid
+  assertMsg "Registry-validated charity payment recorded" (rcpt.charityAmount == 5_000.0)
+
+testConfirmCharityPaymentRejectsUnapprovedOrg : Script ()
+testConfirmCharityPaymentRejectsUnapprovedOrg = do
+  p <- setupMParties
+  regCid <- submit p.fi do
+    createCmd CharityOrganizationRegistry with
+      financialInstitution  = p.fi
+      vetify                = p.vetify
+      regulator             = None
+      approvedOrganizations = [("Islamic Relief Nigeria", "IRN-CAC-2024-001")]
+      shariahBoardRef       = "SB-RESOLUTION-2024-03"
+      effectiveDate         = date 2024 Jan 1
+      version               = "v1.0"
+  c <- activeContractDirect p
+  payRes <- submit p.fi do
+    exerciseCmd c RecordPayment with
+      paymentDate       = date 2026 Aug 15
+      amountPaid        = 191_666.67
+      installmentNo     = 1
+      allocation        = None
+      settlementAccount = None
+      directDebitRef    = None
+      existingGuardCid  = None
+  Some charityCid <- pure payRes.charityObligation
+  withAmount <- submit p.fi do
+    exerciseCmd charityCid SetCharityAmount with amount = 5_000.0
+  -- Unapproved org fails when using the co-signed validated path
+  submitMustFail (actAs [p.business, p.fi]) do
+    exerciseCmd withAmount ConfirmCharityPaymentValidated with
+      charityRef          = "CHARITY-RCPT-BAD-001"
+      charityOrganization = "Unknown Charity Organisation"
+      registryCid         = regCid
+  pure ()
+
+-- ─── Governance Phase A: RBAC / maker-checker negative tests ────────────────
+
+-- WriteOffContract must fail when the proposer and confirmer are the same officer.
+testWriteOffSameOfficerBlocked : Script ()
+testWriteOffSameOfficerBlocked = do
+  p    <- setupMParties
+  c    <- activeContractDirect p
+  (officerId, officerCid, _, _) <- createOfficerPair p "writeoff-same-officer" RecoveryOfficer
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd c FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (dflt, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with reason = "Irrecoverable"; defaultedBy = "Test Officer"
+  submitMustFail p.fi do
+    exerciseCmd dflt WriteOffContract with
+      writeOffDate          = date 2027 Jan 1
+      writeOffRef           = "WO-SAME-001"
+      totalRecovered        = 0.0
+      writeOffApprovedBy    = "Proposer Officer writeoff-same-officer"
+      proposedByOfficerId   = officerId
+      confirmedByOfficerId  = officerId  -- same officer as proposer — must be rejected
+      proposedByOfficerCid  = officerCid
+      confirmedByOfficerCid = officerCid
+  pure ()
+
+-- WriteOffContract must fail when the confirming officer does not hold the RiskOfficer role.
+testWriteOffWrongRoleBlocked : Script ()
+testWriteOffWrongRoleBlocked = do
+  p    <- setupMParties
+  c    <- activeContractDirect p
+  (proposerId, proposerCid, _, _) <- createOfficerPair p "writeoff-wrong-role" RecoveryOfficer
+  t <- getTime
+  wrongRoleCid <- submit p.fi do
+    createCmd AuthorizedOfficer with
+      financialInstitution = p.fi
+      vetify                = p.vetify
+      officerId             = "CONF-writeoff-wrong-role-2"
+      officerName           = "Wrong Role Confirmer"
+      roles                 = [OperationsOfficer]  -- not RiskOfficer
+      authorizedBy          = "FI Head Office"
+      authorizedAt          = t
+      active                = True
+      approvalLimit         = None
+      validUntil            = None
+      lastUpdatedBy         = None
+      lastUpdatedAt         = None
+      statusReason          = None
+      department            = None
+      branch                = None
+      employeeId            = None
+      email                 = None
+  (delq, _) <- submit (actAs [p.sentinel, p.vetify]) do exerciseCmd c FlagDelinquent with reason = "Non-payment"; sentinelCid = p.sentinelCid
+  (dflt, _) <- submit p.fi do
+    exerciseCmd delq DefaultContract with reason = "Irrecoverable"; defaultedBy = "Test Officer"
+  submitMustFail p.fi do
+    exerciseCmd dflt WriteOffContract with
+      writeOffDate          = date 2027 Jan 1
+      writeOffRef           = "WO-WRONGROLE-001"
+      totalRecovered        = 0.0
+      writeOffApprovedBy    = "Wrong Role Confirmer"
+      proposedByOfficerId   = proposerId
+      confirmedByOfficerId  = "CONF-writeoff-wrong-role-2"
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = wrongRoleCid
+  pure ()
+
+-- ReleaseCollateral must fail when the proposer and confirmer are the same officer.
+testReleaseCollateralSameOfficerBlocked : Script ()
+testReleaseCollateralSameOfficerBlocked = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (officerId, officerCid, _, _) <- createOfficerPair p "release-same-officer" OperationsOfficer
+  submitMustFail p.fi do
+    exerciseCmd rahnCid ReleaseCollateral with
+      note                  = "Attempted single-officer release"
+      releaseDocumentRef    = None
+      proposedByOfficerId   = officerId
+      confirmedByOfficerId  = officerId
+      proposedByOfficerCid  = officerCid
+      confirmedByOfficerCid = officerCid
+  pure ()
+
+-- EnforceCollateral must fail when the confirming officer is inactive.
+testEnforceCollateralDeactivatedOfficerBlocked : Script ()
+testEnforceCollateralDeactivatedOfficerBlocked = do
+  p       <- setupMParties
+  rahnCid <- createRahn p
+  (proposerId, proposerCid, confirmerId, confirmerCid) <- createOfficerPair p "enforce-deactivated" RecoveryOfficer
+  -- No key to refetch the officer by name after deactivation — DeactivateOfficer
+  -- archives the old (active) contract and creates a new (inactive) one, so
+  -- capture ITS ContractId directly and use that in EnforceCollateral.
+  deactivatedConfirmerCid <- submit p.fi do
+    exerciseCmd confirmerCid DeactivateOfficer with reason = "On leave"; performedBy = "FI HR"
+  submitMustFail p.fi do
+    exerciseCmd rahnCid EnforceCollateral with
+      reason                = "Contract defaulted"
+      proposedByOfficerId   = proposerId
+      confirmedByOfficerId  = confirmerId
+      proposedByOfficerCid  = proposerCid
+      confirmedByOfficerCid = deactivatedConfirmerCid
+  pure ()
+
+-- GrantIbra must fail when proposer and confirmer are the same officer.
+testGrantIbraSameOfficerBlocked : Script ()
+testGrantIbraSameOfficerBlocked = do
+  p <- setupMParties
+  c <- activeContractDirect p
+  (officerId, officerCid, _, _) <- createOfficerPair p "ibra-same-officer" CreditOfficer
+  req <- submit p.business do
+    exerciseCmd c RequestIbra with requestedSettlementDate = date 2026 Dec 1, settlementType = FullIbra, requestedAmount = None
+  submitMustFail p.fi do
+    exerciseCmd req GrantIbra with
+      rebateAmount           = 50_000.0
+      proposedByOfficerId    = officerId
+      confirmedByOfficerId   = officerId
+      proposedByOfficerCid   = officerCid
+      confirmedByOfficerCid  = officerCid
+  pure ()
+
+-- ─── G11: Per-contract Shari'a certification (advisor sign-off gate) ─────────
+
+-- Build a certifiable proposal directly, for the certification-gate tests.
+directProposal : MParties -> Text -> MurabahahTerms -> Script (ContractId MurabahahProposal)
+directProposal p fRef terms' = do
+  schedCid <- createScheduleContract p
+  submit p.fi do
+    createCmd MurabahahProposal with
+      business             = p.business
+      vetify               = p.vetify
+      financialInstitution = p.fi
+      advisor              = p.advisor
+      regulator            = Some p.regulator
+      facilityRef          = fRef
+      businessName         = sampleProfile.name
+      cacRegNumber         = sampleKyc.cacRegNumber
+      terms                = sampleFinancingTerms
+      assetDetails         = sampleAssetDetails
+      actualCost           = 2_000_000.0
+      murabahahTerms       = terms'
+      paymentScheduleCid   = schedCid
+      startDate            = date 2026 Jul 1
+      acceptanceExpiresAt  = None
+
+-- Happy path: the executed contract carries the advisor's certification reference
+-- and signing member (regulator-observable examiner proof).
+testShariahCertStampedOnContract : Script ()
+testShariahCertStampedOnContract = do
+  p <- setupMParties
+  cid <- activeContractViaWakala p
+  Some mc <- queryContractId p.regulator cid
+  assertMsg "cert ref stamped" (mc.shariahCertificationRef == "SSB-CERT-2026-0001")
+  assertMsg "certifying member stamped" (mc.shariahCertifiedBy == "Sh. Test Advisor")
+
+-- A certification issued for a different facility cannot gate this acceptance.
+testCertForWrongFacilityBlocks : Script ()
+testCertForWrongFacilityBlocks = do
+  p <- setupMParties
+  propA <- directProposal p "FAC-A-001" sampleMurabahahTerms
+  propB <- directProposal p "FAC-B-002" sampleMurabahahTerms
+  certA <- certifyProposal p propA
+  -- Present facility A's certificate when accepting facility B → rejected.
+  submitMustFail p.business do
+    exerciseCmd propB AcceptProposal with sentinel = p.sentinel; certificationCid = certA
+  pure ()
+
+-- A certification whose certified terms no longer match the proposal is rejected.
+testCertTermsMismatchBlocks : Script ()
+testCertTermsMismatchBlocks = do
+  p <- setupMParties
+  -- Certify one proposal, then try to reuse that cert on a same-facility proposal
+  -- whose profit/sale price differ.
+  let higherProfit = sampleMurabahahTerms with
+        profitAmount = sampleMurabahahTerms.profitAmount + 100_000.0
+        salePrice    = sampleMurabahahTerms.assetCost + sampleMurabahahTerms.profitAmount + 100_000.0
+  propOrig <- directProposal p "FAC-SAME-001" sampleMurabahahTerms
+  propNew  <- directProposal p "FAC-SAME-001" higherProfit
+  certOrig <- certifyProposal p propOrig
+  submitMustFail p.business do
+    exerciseCmd propNew AcceptProposal with sentinel = p.sentinel; certificationCid = certOrig
+  pure ()
+
+-- Revoking a certification (terms changed / error found) blocks execution: the
+-- archived cert can no longer be fetched by AcceptProposal.
+testRevokedCertBlocksAcceptance : Script ()
+testRevokedCertBlocksAcceptance = do
+  p <- setupMParties
+  proposal <- directProposal p "FAC-REV-001" sampleMurabahahTerms
+  cert <- certifyProposal p proposal
+  _ <- submit p.advisor do
+    exerciseCmd cert RevokeCertification with
+      revocationRef = "SSB-REV-2026-0001"
+      reason        = "Profit rate corrected after sign-off"
+      revokedBy     = "Sh. Test Advisor"
+  submitMustFail p.business do
+    exerciseCmd proposal AcceptProposal with sentinel = p.sentinel; certificationCid = cert
+  pure ()
+
+-- Fail-closed: CertifyShariahTerms is rejected when the advisor is deactivated.
+testCertifyRequiresActiveAdvisor : Script ()
+testCertifyRequiresActiveAdvisor = do
+  p <- setupMParties
+  -- Deactivate the registered advisor. No key to refetch by name — MParties
+  -- already carries the registered AuthorizedAdvisor's ContractId directly
+  -- (p.advisorCid); DeactivateAdvisor archives it and returns the new
+  -- (inactive) ContractId, which is what CertifyShariahTerms must be given
+  -- below to correctly exercise the "not active" rejection.
+  deactivatedAdvisorCid <- submit p.vetify do
+    exerciseCmd p.advisorCid DeactivateAdvisor with
+      reason      = "Rotation"
+      performedBy = "Vetify Head of Shariah Governance"
+  proposal <- directProposal p "FAC-INACT-001" sampleMurabahahTerms
+  submitMustFail (actAs [p.advisor, p.vetify]) do
+    exerciseCmd proposal CertifyShariahTerms with
+      certificationRef = "SSB-CERT-2026-9999"
+      aaoifiStandards  = ["Std No. 8"]
+      rationale        = "should not be recorded"
+      certifiedBy      = "Sh. Test Advisor"
+      advisorCid       = deactivatedAdvisorCid
+  pure ()

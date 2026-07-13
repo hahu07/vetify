@@ -1,3 +1,15 @@
+/**
+ * Shared agent-side status/type unions.
+ *
+ * G15 (docs/platform-review-2026-07.md): these previously drifted from the
+ * Daml enums (MurabahahStatus lacked DelinquencyManualReview; FinancingStatus
+ * lacked four values) — now realigned with daml/Vetify/Types.daml. This file
+ * is one of THREE hand-maintained copies of the Daml enums (the others:
+ * frontend/src/api/client.ts, and the Daml source itself). `dpm codegen-js`
+ * exists on this SDK and is the real fix — adopting generated bindings is
+ * Phase 2 work; until then, any Daml enum change must be mirrored here and
+ * in client.ts by hand.
+ */
 export type RiskLevel = "Low" | "Medium" | "High";
 export type ReviewStatus =
   | "Draft"
@@ -7,8 +19,16 @@ export type ReviewStatus =
   | "PendingAmendment"
   | "Approved"
   | "Rejected";
-export type FinancingStatus = "Submitted" | "Underwriting" | "FinancingApproved" | "FinancingRejected";
-export type MurabahahStatus = "Active" | "Delinquent" | "Completed" | "Defaulted";
+export type FinancingStatus =
+  | "Submitted"
+  | "Underwriting"
+  | "UnderwritingManualReview"
+  | "FinancingApproved"
+  | "FinancingRejected"
+  | "Withdrawn"
+  | "Expired"
+  | "Cancelled";
+export type MurabahahStatus = "Active" | "Delinquent" | "Completed" | "Defaulted" | "DelinquencyManualReview";
 
 export interface VerificationChecks {
   identityVerified: boolean;
@@ -29,13 +49,6 @@ export interface RiskAssessment {
   riskCategory: RiskLevel;
   recommendedLimit: number;
   recommendation: string;
-}
-
-export interface RiskDecision {
-  riskScore: number;         // 0–100
-  riskLevel: RiskLevel;
-  autoDecided: boolean;
-  reason?: string;
 }
 
 // Thresholds read from env; defaults match .env.example

@@ -12,13 +12,16 @@ import {
   X,
   ChevronRight,
   LogOut,
-  Bell,
   Bot,
   Users,
   Building2,
+  FlaskConical,
+  AlertTriangle,
+  Truck,
 } from 'lucide-react'
 import { useAuth, ROLE_DASHBOARD } from '../auth/AuthContext'
 import type { UserRole } from '../auth/AuthContext'
+import NotificationBell from './NotificationBell'
 
 interface NavItem {
   label: string
@@ -30,11 +33,13 @@ const roleNav: Record<UserRole, NavItem[]> = {
   business: [
     { label: 'Dashboard', path: '/business/dashboard', icon: <LayoutDashboard size={16} /> },
     { label: 'Apply for Financing', path: '/business/financing', icon: <TrendingUp size={16} /> },
+    { label: 'Acquisition Status', path: '/business/acquisition', icon: <Truck size={16} /> },
     { label: 'Onboarding', path: '/business/onboarding', icon: <FileText size={16} /> },
   ],
   financer: [
     { label: 'Portfolio', path: '/fi/dashboard', icon: <BarChart3 size={16} /> },
     { label: 'Contracts', path: '/fi/contracts', icon: <FileText size={16} /> },
+    { label: 'Acquisition Pipeline', path: '/fi/acquisition', icon: <Truck size={16} /> },
     { label: 'Underwriting', path: '/fi/underwriting', icon: <ClipboardCheck size={16} /> },
     { label: 'Provider Settings', path: '/fi/provider-settings', icon: <Building2 size={16} /> },
   ],
@@ -42,8 +47,11 @@ const roleNav: Record<UserRole, NavItem[]> = {
     { label: 'Overview', path: '/vetify/dashboard', icon: <LayoutDashboard size={16} /> },
     { label: 'Onboarding Pipeline', path: '/vetify/onboarding', icon: <Users size={16} /> },
     { label: 'Compliance Reviews', path: '/vetify/compliance', icon: <Shield size={16} /> },
+    { label: 'Underwriting Queue', path: '/vetify/underwriting', icon: <ClipboardCheck size={16} /> },
     { label: 'Provider Approvals', path: '/vetify/providers', icon: <Building2 size={16} /> },
+    { label: 'Delinquency Monitoring', path: '/vetify/monitoring', icon: <AlertTriangle size={16} /> },
     { label: 'Policy Governance', path: '/vetify/policy', icon: <ShieldCheck size={16} /> },
+    { label: 'Authorization Registries', path: '/vetify/registries', icon: <Users size={16} /> },
     { label: 'AI Agent Activity', path: '/vetify/agents', icon: <Bot size={16} /> },
     { label: 'Reports', path: '/vetify/reports', icon: <BarChart3 size={16} /> },
   ],
@@ -53,7 +61,7 @@ const roleNav: Record<UserRole, NavItem[]> = {
 }
 
 const ROLE_BADGE: Record<UserRole, { label: string; bg: string; text: string }> = {
-  business: { label: 'SME Borrower', bg: 'rgba(13,110,77,0.18)', text: '#6EE7B7' },
+  business: { label: 'SME Business', bg: 'rgba(13,110,77,0.18)', text: '#6EE7B7' },
   financer: { label: 'Financial Institution', bg: 'rgba(59,130,246,0.18)', text: '#93C5FD' },
   vetify: { label: 'Vetify Staff', bg: 'rgba(201,168,76,0.20)', text: '#e8c97a' },
   riskCommittee: { label: 'Risk & Credit Governance Committee', bg: 'rgba(168,85,247,0.18)', text: '#D8B4FE' },
@@ -70,7 +78,13 @@ export default function Layout({ children, title, breadcrumb }: Props) {
   const { user, logout } = useAuth()
 
   const role: UserRole = user?.role ?? 'business'
-  const navItems = roleNav[role]
+  // Dev Tools (Stage 2/3 simulation, routes/dev.ts) — only ever rendered in
+  // a Vite dev build (import.meta.env.DEV is false in a production build);
+  // the backend route itself is separately hard-gated on NODE_ENV, so this
+  // is a UI convenience on top of a real server-side gate, not the only one.
+  const navItems = role === 'vetify' && import.meta.env.DEV
+    ? [...roleNav[role], { label: 'Dev Tools', path: '/vetify/dev-tools', icon: <FlaskConical size={16} /> }]
+    : roleNav[role]
   const roleBadge = ROLE_BADGE[role]
 
   // Dashboard root path per role (for "end" matching)
@@ -218,10 +232,7 @@ export default function Layout({ children, title, breadcrumb }: Props) {
 
           {/* Right actions */}
           <div className="flex items-center gap-2">
-            <button className="relative p-2 rounded-lg text-gray-500 hover:bg-gray-100 transition-colors">
-              <Bell size={16} />
-              <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-red-500" />
-            </button>
+            <NotificationBell />
             <div
               className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold text-white"
               style={{ backgroundColor: '#0D6E4D' }}

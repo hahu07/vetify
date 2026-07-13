@@ -7,15 +7,18 @@
   "status": "successful",
   "data": {
     "nin": { "verified": true, "firstName": "...", "lastName": "...", "middleName": "..." },
-    "bvn": { "verified": true, "firstName": "...", "lastName": "...", "dateOfBirth": "YYYY-MM-DD" },
-    "match": { "name": true, "dateOfBirth": true }
+    "bvn": { "verified": true, "firstName": "...", "lastName": "..." },
+    "match": { "name": true }
   }
 }
 ```
 
-- `data.match.name: true` → NIN and BVN names are consistent
-- `data.match.dateOfBirth: true` → DOB on BVN matches what was provided
+- `data.match.name: true` → NIN and BVN names are consistent — report this as
+  `nameMatch` in the evidence JSON; it's the real cross-check that NIN and BVN
+  belong to the same person, scored separately from ninVerified/bvnVerified
 - If `data.nin.verified: false` → NIN is invalid or not found
+- No date-of-birth cross-check exists here — nothing in the onboarding flow
+  collects a director's DOB to compare against
 
 ---
 

@@ -1,0 +1,420 @@
+-- | Stage 0 tests: financing provider self-registration, instrument gating,
+--   amendment flow, and rejection.
+module Vetify.Tests.FinancingProviderTests where
+
+import Daml.Script
+import Vetify.Types
+import Vetify.FinancingProvider
+import Vetify.Tests.Fixtures
+
+data FPParties = FPParties with
+  fi        : Party
+  vetify    : Party
+  regulator : Party
+
+setupFPParties : Script FPParties
+setupFPParties = do
+  fi        <- allocateParty "FI"
+  vetify    <- allocateParty "Vetify"
+  regulator <- allocateParty "Regulator"
+  pure FPParties with ..
+
+-- Base helper: creates a Draft FinancingProviderOnboarding.
+draftOnboarding : FPParties -> [FinancingInstrument] -> Script (ContractId FinancingProviderOnboarding)
+draftOnboarding p instruments = submit p.fi do
+  createCmd FinancingProviderOnboarding with
+    financialInstitution = p.fi
+    vetify               = p.vetify
+    providerName         = "Wema Islamic Finance Ltd"
+    address              = "22 Marina, Lagos Island, Lagos"
+    cacRegNumber         = "RC1234567"
+    providerType         = CBNLicensedNIFI
+    regulatoryBody       = Some CBN
+    licenseNumber        = Some "NIFI-2024-001"
+    governingDocRef      = sampleGoverningDocRef
+    declaredInstruments  = instruments
+    status               = Draft
+    submittedAt          = None
+    amendmentCount       = 0
+    agentScore           = None
+    agentRisk            = None
+    agentNote            = None
+    agentVersion         = None
+
+-- Happy path: Draft → UnderReview → ApprovedProvider with approved instruments.
+testHappyPathApproval : Script ()
+testHappyPathApproval = do
+  p    <- setupFPParties
+  onb  <- draftOnboarding p [Murabahah, Ijarah, QardHasan]
+  submitted <- submit p.fi do
+    exerciseCmd onb SubmitProviderForReview
+  Some s <- queryContractId p.vetify submitted
+  assertMsg "status is UnderReview" (s.status == UnderReview)
+  assertMsg "submittedAt is set" (s.submittedAt /= None)
+  apCid <- submit p.vetify do
+    exerciseCmd submitted ApproveProvider with
+      approvedInstruments = [Murabahah, Ijarah]
+      regulator           = Some p.regulator
+  Some ap <- queryContractId p.fi apCid
+  assertMsg "providerName" (ap.providerName == "Wema Islamic Finance Ltd")
+  assertMsg "providerType" (ap.providerType == CBNLicensedNIFI)
+  assertMsg "Murabahah approved" (Murabahah `elem` ap.approvedInstruments)
+  assertMsg "Ijarah approved" (Ijarah `elem` ap.approvedInstruments)
+  assertMsg "QardHasan not approved (subset)" (not (QardHasan `elem` ap.approvedInstruments))
+  -- Regulator can observe ApprovedProvider
+  Some _ <- queryContractId p.regulator apCid
+  -- FinancingProviderOnboarding is archived after approval
+  onbs <- query @FinancingProviderOnboarding p.fi
+  assertMsg "onboarding archived" (null onbs)
+  pure ()
+
+-- Unlicensed provider (Waqf fund) with no license number or regulatory body.
+testUnlicensedProviderOnboarding : Script ()
+testUnlicensedProviderOnboarding = do
+  p   <- setupFPParties
+  onb <- submit p.fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      providerName         = "Al-Baraka Waqf Fund"
+      address              = "14 Wuse Zone 5, Abuja"
+      cacRegNumber         = "RC7654321"
+      providerType         = WaqfFund
+      regulatoryBody       = None
+      licenseNumber        = None
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = [Murabahah, QardHasan]
+      status               = Draft
+      submittedAt          = None
+      amendmentCount       = 0
+      agentScore           = None
+      agentRisk            = None
+      agentNote            = None
+      agentVersion         = None
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  apCid <- submit p.vetify do
+    exerciseCmd submitted ApproveProvider with
+      approvedInstruments = [Murabahah, QardHasan]
+      regulator           = None
+  Some ap <- queryContractId p.fi apCid
+  assertMsg "WaqfFund type" (ap.providerType == WaqfFund)
+  assertMsg "licenseNumber is None" (ap.licenseNumber == None)
+  assertMsg "regulatoryBody is None" (ap.regulatoryBody == None)
+  assertMsg "Murabahah approved for investment Waqf" (Murabahah `elem` ap.approvedInstruments)
+  assertMsg "QardHasan approved" (QardHasan `elem` ap.approvedInstruments)
+  pure ()
+
+-- Vetify approves only QardHasan for a pure philanthropy (not Murabahah).
+testPhilanthropyGetQardHasanOnly : Script ()
+testPhilanthropyGetQardHasanOnly = do
+  p   <- setupFPParties
+  onb <- submit p.fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      providerName         = "Sadaqah Foundation Nigeria"
+      address              = "Kano, Nigeria"
+      cacRegNumber         = "RC2468135"
+      providerType         = Philanthropy
+      regulatoryBody       = None
+      licenseNumber        = None
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = [Murabahah, QardHasan]
+      status               = Draft
+      submittedAt          = None
+      amendmentCount       = 0
+      agentScore           = None
+      agentRisk            = None
+      agentNote            = None
+      agentVersion         = None
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  apCid <- submit p.vetify do
+    exerciseCmd submitted ApproveProvider with
+      approvedInstruments = [QardHasan]   -- Vetify only permits interest-free lending
+      regulator           = None
+  Some ap <- queryContractId p.fi apCid
+  assertMsg "only QardHasan approved" (ap.approvedInstruments == [QardHasan])
+  assertMsg "Murabahah not approved for pure charity" (not (Murabahah `elem` ap.approvedInstruments))
+  pure ()
+
+-- Amendment flow: Vetify requests amendment; FI amends; Vetify approves.
+testAmendmentFlow : Script ()
+testAmendmentFlow = do
+  p        <- setupFPParties
+  onb      <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  amended  <- submit p.vetify do
+    exerciseCmd submitted RequestProviderAmendment with
+      note = "Please provide updated governing document reference"
+  Some a <- queryContractId p.fi amended
+  assertMsg "status is PendingAmendment" (a.status == PendingAmendment)
+  redrafted <- submit p.fi do
+    exerciseCmd amended AmendProvider with
+      updatedProviderName        = "Wema Islamic Finance Ltd"
+      updatedAddress             = "22 Marina, Lagos Island, Lagos"
+      updatedCacRegNumber        = "RC1234567"
+      updatedLicenseNumber       = Some "NIFI-2024-001-UPDATED"
+      updatedGoverningDocRef     = sampleGoverningDocRef
+      updatedDeclaredInstruments = [Murabahah, Ijarah]
+  Some r <- queryContractId p.vetify redrafted
+  assertMsg "back to Draft after amendment" (r.status == Draft)
+  assertMsg "amendmentCount incremented" (r.amendmentCount == 1)
+  assertMsg "new license number stored" (r.licenseNumber == Some "NIFI-2024-001-UPDATED")
+  assertMsg "updated instruments declared" (Ijarah `elem` r.declaredInstruments)
+  pure ()
+
+-- Rejection archives the onboarding; FI may re-register.
+testRejectionArchivesOnboarding : Script ()
+testRejectionArchivesOnboarding = do
+  p        <- setupFPParties
+  onb      <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submit p.vetify do
+    exerciseCmd submitted RejectProvider with
+      reason       = "License number not verifiable in CBN NIFI registry"
+      agentScore   = None
+      agentRisk    = None
+      agentVersion = None
+      policyCid    = None
+  -- Contract archived; no active onboarding remains
+  onbs <- query @FinancingProviderOnboarding p.fi
+  assertMsg "onboarding archived after rejection" (null onbs)
+  pure ()
+
+-- Guard: cannot submit from a non-Draft status.
+testCannotResubmitFromUnderReview : Script ()
+testCannotResubmitFromUnderReview = do
+  p        <- setupFPParties
+  onb      <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submitMustFail p.fi do
+    exerciseCmd submitted SubmitProviderForReview
+  pure ()
+
+-- Guard: empty provider name is rejected at creation.
+testEmptyProviderNameRejected : Script ()
+testEmptyProviderNameRejected = do
+  p <- setupFPParties
+  submitMustFail p.fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      providerName         = ""
+      address              = "22 Marina, Lagos Island, Lagos"
+      cacRegNumber         = "RC1234567"
+      providerType         = CBNLicensedNIFI
+      regulatoryBody       = Some CBN
+      licenseNumber        = Some "NIFI-2024-001"
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = [Murabahah]
+      status               = Draft
+      submittedAt          = None
+      amendmentCount       = 0
+      agentScore           = None
+      agentRisk            = None
+      agentNote            = None
+      agentVersion         = None
+  pure ()
+
+-- Guard: empty instrument list is rejected at creation.
+testEmptyInstrumentsRejected : Script ()
+testEmptyInstrumentsRejected = do
+  p <- setupFPParties
+  submitMustFail p.fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      providerName         = "Some Fund"
+      address              = "Lagos"
+      cacRegNumber         = "RC1112223"
+      providerType         = InvestmentClub
+      regulatoryBody       = None
+      licenseNumber        = None
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = []
+      status               = Draft
+      submittedAt          = None
+      amendmentCount       = 0
+      agentScore           = None
+      agentRisk            = None
+      agentNote            = None
+      agentVersion         = None
+  pure ()
+
+-- Guard: ApproveProvider with empty instrument list is rejected.
+testApproveWithNoInstrumentsRejected : Script ()
+testApproveWithNoInstrumentsRejected = do
+  p        <- setupFPParties
+  onb      <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submitMustFail p.vetify do
+    exerciseCmd submitted ApproveProvider with
+      approvedInstruments = []
+      regulator           = None
+  pure ()
+
+-- Guard: amendment cap of 5 is enforced.
+testAmendmentCapEnforced : Script ()
+testAmendmentCapEnforced = do
+  p <- setupFPParties
+  -- Create onboarding already at the cap
+  atCap <- submit p.fi do
+    createCmd FinancingProviderOnboarding with
+      financialInstitution = p.fi
+      vetify               = p.vetify
+      providerName         = "Wema Islamic Finance Ltd"
+      address              = "22 Marina, Lagos Island, Lagos"
+      cacRegNumber         = "RC1234567"
+      providerType         = CBNLicensedNIFI
+      regulatoryBody       = Some CBN
+      licenseNumber        = Some "NIFI-2024-001"
+      governingDocRef      = sampleGoverningDocRef
+      declaredInstruments  = [Murabahah]
+      status               = PendingAmendment
+      submittedAt          = None
+      amendmentCount       = 5
+      agentScore           = None
+      agentRisk            = None
+      agentNote            = None
+      agentVersion         = None
+  submitMustFail p.fi do
+    exerciseCmd atCap AmendProvider with
+      updatedProviderName        = "Wema Islamic Finance Ltd"
+      updatedAddress             = "22 Marina, Lagos Island, Lagos"
+      updatedCacRegNumber        = "RC1234567"
+      updatedLicenseNumber       = Some "NIFI-2024-001"
+      updatedGoverningDocRef     = sampleGoverningDocRef
+      updatedDeclaredInstruments = [Murabahah]
+  pure ()
+
+-- ─── G-Provider: deterministic Stage 0 scoring (RecordProviderScore /
+--     FlagProviderForManualReview / RejectProvider's self-consistency guard) ──
+
+setupProviderPolicy : FPParties -> Script (ContractId ProviderVerificationPolicy)
+setupProviderPolicy p = do
+  t <- getTime
+  submit p.vetify do
+    createCmd ProviderVerificationPolicy with
+      vetify         = p.vetify
+      policyVersion  = "2026-v1"
+      autoRejectMax  = 49
+      effectiveFrom  = t
+      scoringWeights = sampleProviderVerificationScoringWeights
+
+-- RecordProviderScore leaves status at UnderReview (no auto-approve — instrument
+-- selection stays a manual governing-document judgment call) but does store the
+-- computed score/risk for Vetify to see instead of raw fields alone.
+testRecordProviderScoreStoresScoreWithoutStatusChange : Script ()
+testRecordProviderScoreStoresScoreWithoutStatusChange = do
+  p         <- setupFPParties
+  policyCid <- setupProviderPolicy p
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  scored <- submit p.vetify do
+    exerciseCmd submitted RecordProviderScore with
+      score = 100, risk = Low, note = None, version = "scoring-engine-default-2026-v1"
+      policyCid = Some policyCid
+  Some s <- queryContractId p.vetify scored
+  assertMsg "status stays UnderReview" (s.status == UnderReview)
+  assertMsg "agentScore recorded" (s.agentScore == Some 100)
+  assertMsg "agentRisk recorded" (s.agentRisk == Some Low)
+
+-- Self-consistency guard: a score at or below the active policy's autoRejectMax
+-- cannot be recorded via RecordProviderScore — that band belongs to RejectProvider.
+testRecordProviderScoreFailsAtOrBelowRejectThreshold : Script ()
+testRecordProviderScoreFailsAtOrBelowRejectThreshold = do
+  p         <- setupFPParties
+  policyCid <- setupProviderPolicy p
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submitMustFail p.vetify do
+    exerciseCmd submitted RecordProviderScore with
+      score = 49, risk = High, note = None, version = "scoring-engine-default-2026-v1"
+      policyCid = Some policyCid
+  pure ()
+
+-- With no active policy (policyCid = None, caller-supplied since SDK 3.4.11 /
+-- Daml-LF 2.1/2.2 does not support contract keys), the guard is skipped
+-- entirely — RecordProviderScore succeeds regardless of score, same fallback
+-- behaviour as every other policy-gated choice in this codebase.
+testRecordProviderScoreSucceedsWithNoActivePolicy : Script ()
+testRecordProviderScoreSucceedsWithNoActivePolicy = do
+  p   <- setupFPParties
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  scored <- submit p.vetify do
+    exerciseCmd submitted RecordProviderScore with
+      score = 5, risk = High, note = None, version = "scoring-engine-default-2026-v1"
+      policyCid = None
+  Some s <- queryContractId p.vetify scored
+  assertMsg "agentScore recorded even without a policy" (s.agentScore == Some 5)
+
+-- FlagProviderForManualReview transitions to ManualReview and stores the
+-- scorer's reasoning — mirrors FlagForManualReview on BusinessOnboarding.
+testFlagProviderForManualReviewTransitionsStatus : Script ()
+testFlagProviderForManualReviewTransitionsStatus = do
+  p   <- setupFPParties
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  flagged <- submit p.vetify do
+    exerciseCmd submitted FlagProviderForManualReview with
+      score = 65, risk = Medium
+      note = "CAC-registered legal name does not match the submitted provider name."
+      version = "scoring-engine-default-2026-v1"
+  Some f <- queryContractId p.vetify flagged
+  assertMsg "status is ManualReview" (f.status == ManualReview)
+  assertMsg "agentScore recorded" (f.agentScore == Some 65)
+  assertMsg "agentNote recorded" (f.agentNote /= None)
+  -- ApproveProvider still works from ManualReview, same as the pre-existing guard.
+  apCid <- submit p.vetify do
+    exerciseCmd flagged ApproveProvider with
+      approvedInstruments = [Murabahah]
+      regulator           = None
+  Some _ <- queryContractId p.fi apCid
+  pure ()
+
+-- Self-consistency guard on the automated-rejection path: an agentScore above
+-- the active policy's autoRejectMax is not a genuine "reject" outcome.
+testRejectProviderAutoGuardFailsAboveThreshold : Script ()
+testRejectProviderAutoGuardFailsAboveThreshold = do
+  p         <- setupFPParties
+  policyCid <- setupProviderPolicy p
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submitMustFail p.vetify do
+    exerciseCmd submitted RejectProvider with
+      reason = "Risk score falls in the High-risk band."
+      agentScore = Some 80, agentRisk = Some Low, agentVersion = Some "scoring-engine-default-2026-v1"
+      policyCid = Some policyCid
+  pure ()
+
+-- The matching success case: a genuinely low score auto-rejects cleanly.
+testRejectProviderAutoGuardSucceedsAtOrBelowThreshold : Script ()
+testRejectProviderAutoGuardSucceedsAtOrBelowThreshold = do
+  p         <- setupFPParties
+  policyCid <- setupProviderPolicy p
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submit p.vetify do
+    exerciseCmd submitted RejectProvider with
+      reason = "CAC registration number not found."
+      agentScore = Some 0, agentRisk = Some High, agentVersion = Some "scoring-engine-default-2026-v1"
+      policyCid = Some policyCid
+  onbs <- query @FinancingProviderOnboarding p.fi
+  assertMsg "onboarding archived after auto-reject" (null onbs)
+
+-- A human rejection from ManualReview carries no agentScore — the guard is
+-- skipped entirely (case None), same as no-policy-active.
+testRejectProviderHumanRejectionSkipsGuard : Script ()
+testRejectProviderHumanRejectionSkipsGuard = do
+  p         <- setupFPParties
+  policyCid <- setupProviderPolicy p
+  onb <- draftOnboarding p [Murabahah]
+  submitted <- submit p.fi do exerciseCmd onb SubmitProviderForReview
+  submit p.vetify do
+    exerciseCmd submitted RejectProvider with
+      reason = "License number not verifiable in CBN NIFI registry."
+      agentScore = None, agentRisk = None, agentVersion = None
+      policyCid = Some policyCid
+  onbs <- query @FinancingProviderOnboarding p.fi
+  assertMsg "onboarding archived after human rejection" (null onbs)

@@ -218,7 +218,7 @@ needs), and `POST/GET /api/providers/officers` + deactivate/reactivate for the
 `AuthorizedOfficer` RBAC registry. `financing.ts`'s `/approve` route now forwards
 `approvedProviderCid`/`approvingOfficerId` (previously silently dropped, so this route could
 never have succeeded against a real ledger) plus the remaining optional fields
-(`approvedByName`, `underwriterName`, `reasonCode`, `decisionFactors`, `approvalSignature`,
+(`approvedByName`, `assessorName`, `reasonCode`, `decisionFactors`, `approvalSignature`,
 `decisionDocuments`, `offerExpiresAt`). **Verified live**: registered a provider, submitted it,
 approved it (confirmed the resulting `ApprovedProvider` contract via its HTTP response),
 registered a `CreditOfficer` — all against a real sandbox. `ApproveFunding`'s own choice logic

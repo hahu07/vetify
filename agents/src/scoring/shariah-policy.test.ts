@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { classifyShariahCompliance } from "./shariah-policy.js";
+import { classifyShariahCompliance, classifyFinancingPurpose } from "./shariah-policy.js";
 
 test("alcohol sector is always NON_COMPLIANT", () => {
   const result = classifyShariahCompliance("Alcohol distribution", "Beer wholesale", "Inventory purchase");
@@ -64,4 +64,32 @@ test("classification is deterministic — same input always produces the same ou
   const a = classifyShariahCompliance("Halal food retail", "Grocery store", "Inventory purchase");
   const b = classifyShariahCompliance("Halal food retail", "Grocery store", "Inventory purchase");
   assert.deepEqual(a, b);
+});
+
+// ─── classifyFinancingPurpose — the Stage 6 purpose-only re-screen (G4) ─────
+
+test("purpose screen: refinancing is caught as a prohibited structure", () => {
+  const hit = classifyFinancingPurpose("Refinancing our existing bank loan");
+  assert.equal(hit?.verdict, "NON_COMPLIANT");
+  assert.match(hit!.citation, /Clause 3\/1/);
+});
+
+test("purpose screen: working capital and cash advance are caught", () => {
+  assert.equal(classifyFinancingPurpose("working capital for operations")?.verdict, "NON_COMPLIANT");
+  assert.equal(classifyFinancingPurpose("short-term cash advance")?.verdict, "NON_COMPLIANT");
+});
+
+test("purpose screen: a prohibited-sector keyword inside the purpose text is caught even when the declared sector was clean", () => {
+  const hit = classifyFinancingPurpose("Purchase of beer inventory for resale");
+  assert.equal(hit?.verdict, "NON_COMPLIANT");
+});
+
+test("purpose screen: a clean asset-purchase purpose passes (returns undefined, pipeline proceeds)", () => {
+  assert.equal(classifyFinancingPurpose("Purchase of 50 metric tonnes of white flour"), undefined);
+});
+
+test("purpose screen: does NOT re-flag mixed-sector keywords in the purpose — sector review already happened at Stage 3", () => {
+  // "restaurant" is a MIXED_REVIEW sector keyword; a purpose mentioning it must
+  // not re-open a case Stage 3 already resolved at the sector level.
+  assert.equal(classifyFinancingPurpose("Kitchen equipment for our restaurant"), undefined);
 });

@@ -84,6 +84,11 @@
     @apply btn text-gray-600 hover:bg-gray-100 focus:ring-gray-200;
   }
 
+  .btn-outline {
+    @apply btn bg-transparent text-primary border-2 border-primary
+           hover:bg-primary hover:text-white focus:ring-primary/30;
+  }
+
   /* Table styles */
   .table {
     @apply w-full text-sm text-left;

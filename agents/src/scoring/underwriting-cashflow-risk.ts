@@ -93,7 +93,7 @@ function buildFlags(
   if (dscr === undefined) {
     flags.push({ code: "DSCR_UNAVAILABLE", description: "Creditworthiness result was not available in time (webhook did not arrive) — DSCR factor not scored and recommended limit capped conservatively" });
   } else if (dscr < w.dscrMediumThreshold) {
-    flags.push({ code: "DSCR_BELOW_ONE", description: `DSCR below ${w.dscrMediumThreshold} — borrower cannot cover proposed installments from current income` });
+    flags.push({ code: "DSCR_BELOW_ONE", description: `DSCR below ${w.dscrMediumThreshold} — business cannot cover proposed installments from current income` });
   }
   if (averageMonthlyNetInflow > 0 && existingMonthlyDebt / averageMonthlyNetInflow > w.debtObligationsModerateThreshold) {
     flags.push({ code: "OVER_LEVERAGED", description: `Existing debt obligations exceed ${w.debtObligationsModerateThreshold * 100}% of monthly inflow — already over-leveraged` });

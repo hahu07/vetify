@@ -1,0 +1,126 @@
+# Vetify CI (review gap G8, docs/platform-review-2026-07.md).
+#
+# The three Node packages are checked on every push/PR: typecheck + unit
+# tests, none of which need a ledger, a database, or provider API keys
+# (backend route tests assert auth gating and error sanitization, which
+# reject before any external dependency is reached).
+#
+# The Daml job is OPT-IN via the repository variable DAML_CI_ENABLED=true and
+# expects a runner with `dpm` preinstalled: Daml SDK 3.5.1 is distributed via
+# dpm (Digital Asset Package Manager), not public GitHub releases, so there
+# is no curl-able installer to run on a stock ubuntu-latest runner. On a
+# self-hosted runner with dpm on PATH, this job builds both packages and runs
+# all 284 Daml Script tests.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: backend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      # Audit finding O-2 (Phase 3 Enterprise Production Readiness Audit,
+      # 2026-07-08): no dependency/SCA scanning existed anywhere in CI.
+      # --audit-level=high fails the build on anything high/critical. As of
+      # 2026-07-08, 3 known moderate findings exist (uuid, via
+      # autocannon->hyperid in loadtest/ — a manually-run devDependency, not
+      # shipped or run in production; fix needs a breaking autocannon
+      # downgrade not worth taking for a load-test-only tool) — the same
+      # kind of tracked, documented exception as frontend's below, not a
+      # silent gap.
+      - run: npm audit --audit-level=high
+
+  agents:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: agents } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: agents/package-lock.json }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+      - run: npm audit --audit-level=high
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: frontend } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: frontend/package-lock.json }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      # The 7 high + 1 moderate dev-tooling findings noted here as of
+      # 2026-07-08 (esbuild's dev-server request forgery, a minimatch ReDoS
+      # inside @typescript-eslint's dependency tree) are now closed — vite
+      # 5→8 and @typescript-eslint 6→8, live-verified (build, lint, typecheck,
+      # and the app itself loaded and exercised in a real browser afterward,
+      # not just "the build succeeded"). --audit-level=high now matches
+      # backend/agents; kept as its own line rather than folded into a shared
+      # threshold in case this package's exception profile diverges again.
+      - run: npm audit --audit-level=high
+
+  daml:
+    # Requires a self-hosted runner with dpm preinstalled — see header comment.
+    if: ${{ vars.DAML_CI_ENABLED == 'true' }}
+    runs-on: [self-hosted, dpm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build templates package
+        run: dpm build
+      - name: Build + test the vetify-tests package
+        working-directory: daml-tests
+        run: |
+          dpm build
+          dpm test
+      # Audit finding M-3 (Phase 3 Enterprise Production Readiness Audit,
+      # 2026-07-08) + docs/daml-upgrade-lineage.md's own "CI wiring" section:
+      # that doc deliberately held off wiring this in while there was only
+      # one version of the package, reasoning that a check with nothing to
+      # compare against would read as "upgrade safety verified" when nothing
+      # was actually checked. This step is that wiring, made safe to add
+      # *before* the first real bump by only doing real work once one has
+      # actually happened: docs/dar-archive/ holds the most recently
+      # archived version's DAR, and this step only invokes dpm upgrade-check
+      # when daml.yaml's current version has moved past whatever's archived
+      # — otherwise it says so and exits 0, exactly the "no false assurance
+      # today" posture the doc asked for. The compiler-level check inside
+      # `dpm build` above already blocks an incompatible change within the
+      # SAME build when daml.yaml's `upgrades:` field is set — this step is
+      # what still catches it if that field was never set for the bump in
+      # the first place, and gives the SCU check its own clearly-named
+      # pass/fail line in CI rather than folding it into a generic "build
+      # failed."
+      #
+      # The day someone bumps daml.yaml's version: archive the DAR being
+      # superseded under docs/dar-archive/ (commit it — see .gitignore's
+      # explicit exception for this directory) before or alongside that PR,
+      # per the checklist in docs/daml-upgrade-lineage.md.
+      - name: Daml SCU compatibility check against the archived baseline
+        run: |
+          set -euo pipefail
+          archived="$(ls docs/dar-archive/*.dar 2>/dev/null | head -1)"
+          if [ -z "$archived" ]; then
+            echo "No archived baseline DAR in docs/dar-archive/ — nothing to check yet."
+            exit 0
+          fi
+          current_version="$(grep '^version:' daml.yaml | awk '{print $2}')"
+          current=".daml/dist/vetify-${current_version}.dar"
+          if [ "$(basename "$archived")" = "$(basename "$current")" ]; then
+            echo "Archived baseline ($archived) matches the current build — no version bump since the last archive, skipping."
+            exit 0
+          fi
+          echo "Checking SCU compatibility: $archived -> $current"
+          dpm upgrade-check --compiler "$archived" "$current"

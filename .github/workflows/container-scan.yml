@@ -1,0 +1,64 @@
+# Container image vulnerability scanning (audit findings §13 DevSecOps /
+# docs/production-readiness-roadmap.md §1) — no image scanning existed
+# anywhere in the pipeline before this. Verified live before writing this
+# workflow (8 Jul 2026): Trivy scans a remote/local image reference directly
+# without needing a running Docker daemon on the scanning side (only the
+# build step needs one, which GitHub-hosted runners provide) — confirmed
+# against this project's actual base images, node:22-alpine (2 HIGH, in
+# npm's own bundled deps) and nginx:alpine (3 HIGH, in libexpat), 0 CRITICAL
+# in either at time of writing.
+#
+# Two severity thresholds, matching the same reasoning already used for
+# npm audit in ci.yml: full HIGH+CRITICAL results are always uploaded to
+# GitHub's Security tab for visibility (non-blocking — these three images'
+# base-layer findings are outside this repo's direct control and will shift
+# as upstream base images are rebuilt), while only CRITICAL fails the build.
+# Weekly schedule alongside push/PR, since a base image can grow a new
+# vulnerability with no code change here at all.
+name: container-scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 4 * * 1"
+
+jobs:
+  scan:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [backend, agents, frontend]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.image }} image
+        run: docker build -t vetify-${{ matrix.image }}:ci ${{ matrix.image }}
+
+      - name: Scan (report all HIGH/CRITICAL to the Security tab)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: vetify-${{ matrix.image }}:ci
+          format: sarif
+          output: trivy-${{ matrix.image }}.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+
+      - name: Upload results to the Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-${{ matrix.image }}.sarif
+          category: trivy-${{ matrix.image }}
+
+      - name: Fail the build on CRITICAL only
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: vetify-${{ matrix.image }}:ci
+          format: table
+          severity: CRITICAL
+          exit-code: "1"

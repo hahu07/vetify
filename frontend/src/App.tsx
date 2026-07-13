@@ -6,11 +6,14 @@ import ProtectedRoute from './auth/ProtectedRoute'
 // Public pages
 import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/LoginPage'
+import SignupPage from './pages/SignupPage'
 
-// Business (borrower) pages
-import BorrowerDashboard from './pages/borrower/BorrowerDashboard'
-import OnboardingForm from './pages/borrower/OnboardingForm'
-import FinancingForm from './pages/borrower/FinancingForm'
+// Business pages
+import BusinessDashboard from './pages/business/BusinessDashboard'
+import OnboardingForm from './pages/business/OnboardingForm'
+import FinancingForm from './pages/business/FinancingForm'
+import BusinessContractDetail from './pages/business/ContractDetail'
+import AcquisitionStatus from './pages/business/AcquisitionStatus'
 
 // FI pages
 import FIDashboard from './pages/fi/FIDashboard'
@@ -18,6 +21,7 @@ import ContractList from './pages/fi/ContractList'
 import ContractDetail from './pages/fi/ContractDetail'
 import UnderwritingQueue from './pages/fi/UnderwritingQueue'
 import ProviderSettings from './pages/fi/ProviderSettings'
+import AcquisitionQueue from './pages/fi/AcquisitionQueue'
 
 // Compliance pages (reused in Vetify portal)
 import ComplianceDashboard from './pages/compliance/ComplianceDashboard'
@@ -26,10 +30,14 @@ import ComplianceReview from './pages/compliance/ComplianceReview'
 // Vetify internal portal pages
 import VetifyDashboard from './pages/vetify/VetifyDashboard'
 import VetifyOnboarding from './pages/vetify/VetifyOnboarding'
+import DelinquencyMonitoring from './pages/vetify/DelinquencyMonitoring'
+import Registries from './pages/vetify/Registries'
+import AssessorQueue from './pages/vetify/AssessorQueue'
 import AgentActivity from './pages/vetify/AgentActivity'
 import VetifyReports from './pages/vetify/VetifyReports'
 import ProviderApprovals from './pages/vetify/ProviderApprovals'
 import PolicyGovernance from './pages/vetify/PolicyGovernance'
+import DevTools from './pages/vetify/DevTools'
 
 // Risk Committee portal
 import RiskCommitteeDashboard from './pages/risk-committee/RiskCommitteeDashboard'
@@ -40,13 +48,14 @@ export default function App() {
       {/* Public routes */}
       <Route path="/" element={<LandingPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignupPage />} />
 
-      {/* Business (borrower) portal */}
+      {/* Business portal */}
       <Route
         path="/business/dashboard"
         element={
           <ProtectedRoute role="business">
-            <BorrowerDashboard />
+            <BusinessDashboard />
           </ProtectedRoute>
         }
       />
@@ -63,6 +72,22 @@ export default function App() {
         element={
           <ProtectedRoute role="business">
             <FinancingForm />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/business/acquisition"
+        element={
+          <ProtectedRoute role="business">
+            <AcquisitionStatus />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/business/contracts/:id"
+        element={
+          <ProtectedRoute role="business">
+            <BusinessContractDetail />
           </ProtectedRoute>
         }
       />
@@ -89,6 +114,14 @@ export default function App() {
         element={
           <ProtectedRoute role="financer">
             <ContractDetail />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/fi/acquisition"
+        element={
+          <ProtectedRoute role="financer">
+            <AcquisitionQueue />
           </ProtectedRoute>
         }
       />
@@ -143,6 +176,30 @@ export default function App() {
         }
       />
       <Route
+        path="/vetify/monitoring"
+        element={
+          <ProtectedRoute role="vetify">
+            <DelinquencyMonitoring />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/vetify/registries"
+        element={
+          <ProtectedRoute role="vetify">
+            <Registries />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/vetify/underwriting"
+        element={
+          <ProtectedRoute role="vetify">
+            <AssessorQueue />
+          </ProtectedRoute>
+        }
+      />
+      <Route
         path="/vetify/agents"
         element={
           <ProtectedRoute role="vetify">
@@ -174,6 +231,20 @@ export default function App() {
           </ProtectedRoute>
         }
       />
+
+      {/* Dev Tools (Stage 2/3 simulation) — dev build only; the backend route
+          it calls is separately hard-gated on NODE_ENV, this just keeps the
+          page itself out of a production bundle's routing table too. */}
+      {import.meta.env.DEV && (
+        <Route
+          path="/vetify/dev-tools"
+          element={
+            <ProtectedRoute role="vetify">
+              <DevTools />
+            </ProtectedRoute>
+          }
+        />
+      )}
 
       {/* Risk Committee portal */}
       <Route

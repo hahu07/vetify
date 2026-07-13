@@ -11,13 +11,24 @@ import {
   XCircle,
   ChevronLeft,
   TrendingDown,
+  ShieldCheck,
+  Coins,
+  HeartHandshake,
+  Lock,
+  AlertOctagon,
 } from 'lucide-react'
 import Layout from '../../components/Layout'
 import StatusBadge from '../../components/StatusBadge'
 import AmountDisplay from '../../components/AmountDisplay'
 import { ErrorState, FullPageLoader } from '../../components/LoadingState'
 import { formatDate, formatNaira } from '../../lib/formatters'
-import { useContract, useContractRepayments, useRecordPayment, useCloseContract } from '../../api/client'
+import {
+  useContract, useContractRepayments, useRecordPayment, useCloseContract, useDefaultContract,
+  useIbraRequests, useGrantIbra, useDeclineIbra,
+  useLatePaymentCharities, useSetCharityAmount,
+  useRahnAgreements, useCreateRahn, useReleaseCollateral, useEnforceCollateral,
+  useAuthorizedOfficers,
+} from '../../api/client'
 
 const paymentSchema = z.object({
   date: z.string().min(1, 'Payment date is required'),
@@ -40,6 +51,38 @@ export default function ContractDetail() {
   const repayments = repaymentsData ?? []
   const recordPayment = useRecordPayment()
   const closeContract = useCloseContract()
+  const defaultContract = useDefaultContract()
+
+  const { data: officers } = useAuthorizedOfficers()
+  const { data: ibraData } = useIbraRequests()
+  const { data: charityData } = useLatePaymentCharities()
+  const { data: rahnData } = useRahnAgreements()
+  const grantIbra = useGrantIbra()
+  const declineIbra = useDeclineIbra()
+  const setCharityAmount = useSetCharityAmount()
+  const createRahn = useCreateRahn()
+  const releaseCollateral = useReleaseCollateral()
+  const enforceCollateral = useEnforceCollateral()
+
+  const [defaultConfirm, setDefaultConfirm] = useState(false)
+  const [defaultReason, setDefaultReason] = useState('')
+  const [defaultOfficerId, setDefaultOfficerId] = useState('')
+  const [defaultError, setDefaultError] = useState<string | null>(null)
+
+  const [ibraOfficerA, setIbraOfficerA] = useState('')
+  const [ibraOfficerB, setIbraOfficerB] = useState('')
+  const [rebateAmount, setRebateAmount] = useState(0)
+  const [ibraError, setIbraError] = useState<string | null>(null)
+
+  const [charityAmountInput, setCharityAmountInput] = useState(0)
+  const [charityError, setCharityError] = useState<string | null>(null)
+
+  const [rahnDescription, setRahnDescription] = useState('')
+  const [rahnValue, setRahnValue] = useState(0)
+  const [rahnError, setRahnError] = useState<string | null>(null)
+  const [collateralOfficerA, setCollateralOfficerA] = useState('')
+  const [collateralOfficerB, setCollateralOfficerB] = useState('')
+  const [collateralError, setCollateralError] = useState<string | null>(null)
 
   const {
     register,
@@ -104,6 +147,119 @@ export default function ContractDetail() {
       setCloseConfirm(false)
     } catch (e) {
       setCloseError(e instanceof Error ? e.message : 'Failed to close contract')
+    }
+  }
+
+  // IbraRequest/RahnAgreement carry facilityRef (MurabahahContract's own business
+  // key, not its contractId). LatePaymentCharity has no facilityRef at all in the
+  // Daml schema — cacNumber is the best available correlation to this contract.
+  const pendingIbra = (ibraData ?? []).filter((i) => i.facilityRef === contract.facilityRef)
+  const unsettledCharities = (charityData ?? []).filter((c) => c.cacNumber === contract.cacNumber && !c.settled)
+  const rahnAgreement = (rahnData ?? []).find((r) => r.facilityRef === contract.facilityRef)
+
+  const handleDefault = async () => {
+    setDefaultError(null)
+    if (defaultReason.trim().length < 5 || !defaultOfficerId) {
+      setDefaultError('Reason and authorizing officer are required')
+      return
+    }
+    try {
+      await defaultContract.mutateAsync({ id: contract.id, reason: defaultReason, defaultedBy: defaultOfficerId })
+      setDefaultConfirm(false)
+    } catch (e) {
+      setDefaultError(e instanceof Error ? e.message : 'Failed to default contract')
+    }
+  }
+
+  const handleGrantIbra = async (ibraId: string) => {
+    setIbraError(null)
+    if (!ibraOfficerA || !ibraOfficerB || rebateAmount <= 0) {
+      setIbraError('Rebate amount and both officers are required')
+      return
+    }
+    try {
+      await grantIbra.mutateAsync({
+        id: ibraId, rebateAmount, proposedByOfficerId: ibraOfficerA, confirmedByOfficerId: ibraOfficerB,
+      })
+    } catch (e) {
+      setIbraError(e instanceof Error ? e.message : 'Failed to grant Ibra')
+    }
+  }
+
+  const handleDeclineIbra = async (ibraId: string) => {
+    setIbraError(null)
+    try {
+      await declineIbra.mutateAsync({ id: ibraId, reason: 'Declined by financial institution' })
+    } catch (e) {
+      setIbraError(e instanceof Error ? e.message : 'Failed to decline Ibra')
+    }
+  }
+
+  const handleSetCharityAmount = async (charityId: string) => {
+    setCharityError(null)
+    if (charityAmountInput <= 0) {
+      setCharityError('Enter a valid charity amount')
+      return
+    }
+    try {
+      await setCharityAmount.mutateAsync({ id: charityId, amount: charityAmountInput })
+    } catch (e) {
+      setCharityError(e instanceof Error ? e.message : 'Failed to set charity amount')
+    }
+  }
+
+  const handlePledgeCollateral = async () => {
+    setRahnError(null)
+    if (!rahnDescription.trim() || rahnValue <= 0) {
+      setRahnError('Description and value are required')
+      return
+    }
+    try {
+      await createRahn.mutateAsync({
+        business: contract.business,
+        facilityRef: contract.facilityRef,
+        businessName: contract.businessName,
+        cacRegNumber: contract.cacNumber,
+        collateralDescription: rahnDescription,
+        collateralValue: rahnValue,
+        collateralStatus: 'CollateralActive',
+      })
+      setRahnDescription('')
+      setRahnValue(0)
+    } catch (e) {
+      setRahnError(e instanceof Error ? e.message : 'Failed to pledge collateral')
+    }
+  }
+
+  const handleReleaseCollateral = async () => {
+    setCollateralError(null)
+    if (!collateralOfficerA || !collateralOfficerB || !rahnAgreement) {
+      setCollateralError('Both officers are required')
+      return
+    }
+    try {
+      await releaseCollateral.mutateAsync({
+        id: rahnAgreement.id, note: 'Released on full repayment',
+        proposedByOfficerId: collateralOfficerA, confirmedByOfficerId: collateralOfficerB,
+      })
+    } catch (e) {
+      setCollateralError(e instanceof Error ? e.message : 'Failed to release collateral')
+    }
+  }
+
+  const handleEnforceCollateral = async () => {
+    setCollateralError(null)
+    if (!collateralOfficerA || !collateralOfficerB || !rahnAgreement) {
+      setCollateralError('Both officers are required')
+      return
+    }
+    try {
+      await enforceCollateral.mutateAsync({
+        id: rahnAgreement.id, reason: 'Enforced on default',
+        proposedByOfficerId: collateralOfficerA, confirmedByOfficerId: collateralOfficerB,
+      })
+    } catch (e) {
+      setCollateralError(e instanceof Error ? e.message : 'Failed to enforce collateral')
     }
   }
 
@@ -203,6 +359,31 @@ export default function ContractDetail() {
                   </span>
                 </div>
               </div>
+            </div>
+
+            {/* G11: Shari'a Supervisory Board certification of the executed terms
+                above — the advisor's per-contract sign-off, distinct from the
+                Stage 3 sector pre-check. Examiner/regulator-facing provenance. */}
+            <div className="card p-5 bg-teal-50/50 border-teal-100">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldCheck size={16} className="text-teal-600" />
+                <h2 className="text-sm font-semibold text-gray-700">Shari'a Certification</h2>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Certification Reference</p>
+                  <p className="text-sm font-mono text-gray-800">{contract.shariahCertificationRef}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500 mb-1">Certified By</p>
+                  <p className="text-sm font-medium text-gray-800">{contract.shariahCertifiedBy}</p>
+                </div>
+              </div>
+              <p className="text-xs text-teal-700 mt-3 leading-relaxed">
+                The disclosed cost, profit, sale price, and tenure above were certified compliant by
+                the Shari'a Supervisory Board (AAOIFI GSIFI No. 1/2) before this contract could be
+                executed.
+              </p>
             </div>
 
             {/* Repayment History */}
@@ -357,21 +538,238 @@ export default function ContractDetail() {
               </div>
             )}
 
-            {/* Delinquent warning */}
+            {/* Delinquent warning + Default action */}
             {contract.status === 'Delinquent' && (
               <div className="card p-4 bg-red-50 border-red-100">
-                <div className="flex items-start gap-2">
+                <div className="flex items-start gap-2 mb-3">
                   <XCircle size={16} className="text-red-500 mt-0.5 flex-shrink-0" />
                   <div>
                     <p className="text-xs font-semibold text-red-800">Delinquent Contract</p>
                     <p className="text-xs text-red-700 mt-0.5 leading-relaxed">
-                      This contract has missed payments. Contact the borrower immediately and escalate
+                      This contract has missed payments. Contact the business immediately and escalate
                       to recovery if needed.
                     </p>
                   </div>
                 </div>
+                {!defaultConfirm ? (
+                  <button
+                    onClick={() => setDefaultConfirm(true)}
+                    className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-red-300 text-red-700 bg-white hover:bg-red-100 text-xs font-medium transition-colors"
+                  >
+                    <AlertOctagon size={13} />
+                    Default Contract
+                  </button>
+                ) : (
+                  <div className="space-y-2 pt-2 border-t border-red-200">
+                    <textarea
+                      rows={2}
+                      value={defaultReason}
+                      onChange={(e) => setDefaultReason(e.target.value)}
+                      className="input text-xs resize-none"
+                      placeholder="Reason for default (write-off)..."
+                    />
+                    <select
+                      value={defaultOfficerId}
+                      onChange={(e) => setDefaultOfficerId(e.target.value)}
+                      className="input text-xs"
+                    >
+                      <option value="">Select authorizing officer…</option>
+                      {(officers ?? []).map((o) => (
+                        <option key={o.id} value={o.officerId}>{o.officerName} ({o.officerId})</option>
+                      ))}
+                    </select>
+                    {defaultError && <p className="text-xs text-red-600">{defaultError}</p>}
+                    <div className="flex gap-2">
+                      <button onClick={() => setDefaultConfirm(false)} className="btn-secondary flex-1 text-xs py-1.5">
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleDefault}
+                        disabled={defaultContract.isPending}
+                        className="flex-1 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700 disabled:opacity-50"
+                      >
+                        {defaultContract.isPending ? 'Defaulting…' : 'Confirm Default'}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
+
+            {/* Ibra' — pending early settlement requests from the business */}
+            {pendingIbra.length > 0 && (
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <Coins size={15} className="text-primary" />
+                  <h2 className="text-sm font-semibold text-gray-700">Early Settlement Request (Ibra')</h2>
+                </div>
+                {pendingIbra.map((req) => (
+                  <div key={req.id} className="space-y-2 pb-3 mb-3 border-b border-gray-100 last:border-0 last:pb-0 last:mb-0">
+                    <p className="text-xs text-gray-600">
+                      {req.settlementType === 'FullIbra' ? 'Full settlement' : `Partial settlement — ${formatNaira(req.requestedAmount ?? 0)}`}
+                      {' '}requested for {formatDate(req.requestedSettlementDate)}
+                    </p>
+                    <p className="text-xs text-gray-400">Outstanding: {formatNaira(req.outstandingBalance)}</p>
+                    <input
+                      type="number"
+                      className="input text-xs font-mono"
+                      placeholder="Rebate amount (₦)"
+                      value={rebateAmount || ''}
+                      onChange={(e) => setRebateAmount(Number(e.target.value))}
+                    />
+                    <select value={ibraOfficerA} onChange={(e) => setIbraOfficerA(e.target.value)} className="input text-xs">
+                      <option value="">Proposed by (Credit Officer)…</option>
+                      {(officers ?? []).map((o) => (
+                        <option key={o.id} value={o.officerId}>{o.officerName} ({o.officerId})</option>
+                      ))}
+                    </select>
+                    <select value={ibraOfficerB} onChange={(e) => setIbraOfficerB(e.target.value)} className="input text-xs">
+                      <option value="">Confirmed by (Risk Officer)…</option>
+                      {(officers ?? []).map((o) => (
+                        <option key={o.id} value={o.officerId}>{o.officerName} ({o.officerId})</option>
+                      ))}
+                    </select>
+                    {req.settlementType !== 'FullIbra' && (
+                      <p className="text-xs text-amber-600">
+                        Partial-settlement rebates aren't supported through the portal yet — decline this
+                        request and ask the business to request a full settlement instead.
+                      </p>
+                    )}
+                    {ibraError && <p className="text-xs text-red-600">{ibraError}</p>}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleDeclineIbra(req.id)}
+                        disabled={declineIbra.isPending}
+                        className="btn-secondary flex-1 text-xs py-1.5 disabled:opacity-50"
+                      >
+                        Decline
+                      </button>
+                      <button
+                        onClick={() => handleGrantIbra(req.id)}
+                        disabled={grantIbra.isPending || req.settlementType !== 'FullIbra'}
+                        title={req.settlementType !== 'FullIbra' ? 'GrantIbra only supports full settlement — GrantPartialIbra is not yet available' : undefined}
+                        className="flex-1 py-1.5 rounded-lg bg-primary text-white text-xs font-medium hover:opacity-90 disabled:opacity-50"
+                      >
+                        {grantIbra.isPending ? 'Granting…' : 'Grant Rebate'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Late Payment Charity — Sadaqah obligations awaiting an FI-set amount */}
+            {unsettledCharities.length > 0 && (
+              <div className="card p-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <HeartHandshake size={15} className="text-primary" />
+                  <h2 className="text-sm font-semibold text-gray-700">Late Payment Charity</h2>
+                </div>
+                {unsettledCharities.map((c) => (
+                  <div key={c.id} className="space-y-2 pb-3 mb-3 border-b border-gray-100 last:border-0 last:pb-0 last:mb-0">
+                    <p className="text-xs text-gray-600">
+                      Installment #{c.installmentNo} — due {formatDate(c.dueDate)}, paid {formatDate(c.paymentDate)}
+                    </p>
+                    {c.charityAmount == null ? (
+                      <>
+                        <input
+                          type="number"
+                          className="input text-xs font-mono"
+                          placeholder="Charity amount (₦)"
+                          value={charityAmountInput || ''}
+                          onChange={(e) => setCharityAmountInput(Number(e.target.value))}
+                        />
+                        {charityError && <p className="text-xs text-red-600">{charityError}</p>}
+                        <button
+                          onClick={() => handleSetCharityAmount(c.id)}
+                          disabled={setCharityAmount.isPending}
+                          className="btn-primary w-full text-xs py-1.5 disabled:opacity-50"
+                        >
+                          {setCharityAmount.isPending ? 'Setting…' : 'Set Charity Amount'}
+                        </button>
+                      </>
+                    ) : (
+                      <p className="text-xs text-amber-700">
+                        Amount set: {formatNaira(c.charityAmount)} — awaiting business confirmation
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Rahn (Collateral) */}
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Lock size={15} className="text-primary" />
+                <h2 className="text-sm font-semibold text-gray-700">Collateral (Rahn)</h2>
+              </div>
+              {rahnAgreement ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-700">{rahnAgreement.collateralDescription}</p>
+                  <p className="text-xs text-gray-500">Value: {formatNaira(rahnAgreement.collateralValue)}</p>
+                  <StatusBadge status={rahnAgreement.collateralStatus} size="sm" />
+                  {rahnAgreement.collateralStatus === 'CollateralActive' && (
+                    <div className="space-y-2 pt-2 border-t border-gray-100">
+                      <select value={collateralOfficerA} onChange={(e) => setCollateralOfficerA(e.target.value)} className="input text-xs">
+                        <option value="">Proposed by…</option>
+                        {(officers ?? []).map((o) => (
+                          <option key={o.id} value={o.officerId}>{o.officerName} ({o.officerId})</option>
+                        ))}
+                      </select>
+                      <select value={collateralOfficerB} onChange={(e) => setCollateralOfficerB(e.target.value)} className="input text-xs">
+                        <option value="">Confirmed by…</option>
+                        {(officers ?? []).map((o) => (
+                          <option key={o.id} value={o.officerId}>{o.officerName} ({o.officerId})</option>
+                        ))}
+                      </select>
+                      {collateralError && <p className="text-xs text-red-600">{collateralError}</p>}
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleReleaseCollateral}
+                          disabled={releaseCollateral.isPending}
+                          className="flex-1 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-medium hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                          Release
+                        </button>
+                        <button
+                          onClick={handleEnforceCollateral}
+                          disabled={enforceCollateral.isPending}
+                          className="flex-1 py-1.5 rounded-lg bg-red-600 text-white text-xs font-medium hover:bg-red-700 disabled:opacity-50"
+                        >
+                          Enforce
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-400 mb-2">No collateral pledged for this facility.</p>
+                  <input
+                    className="input text-xs"
+                    placeholder="Collateral description"
+                    value={rahnDescription}
+                    onChange={(e) => setRahnDescription(e.target.value)}
+                  />
+                  <input
+                    type="number"
+                    className="input text-xs font-mono"
+                    placeholder="Estimated value (₦)"
+                    value={rahnValue || ''}
+                    onChange={(e) => setRahnValue(Number(e.target.value))}
+                  />
+                  {rahnError && <p className="text-xs text-red-600">{rahnError}</p>}
+                  <button
+                    onClick={handlePledgeCollateral}
+                    disabled={createRahn.isPending}
+                    className="btn-secondary w-full text-xs py-1.5 disabled:opacity-50"
+                  >
+                    {createRahn.isPending ? 'Pledging…' : 'Pledge Collateral'}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>

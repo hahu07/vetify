@@ -22,19 +22,20 @@ import type {
 import { DEFAULT_VERIFICATION_POLICY_VERSION, DEFAULT_VERIFICATION_WEIGHTS } from "./types.js";
 import { classifyRisk } from "../types/index.js";
 
-interface IdentityOutcome { points: number; identityVerified: boolean; apiError: boolean }
+interface IdentityOutcome { points: number; identityVerified: boolean; seriousNameMismatch: boolean; apiError: boolean }
 interface CacOutcome { points: number; cacRegistered: boolean; seriousNameMismatch: boolean; apiError: boolean }
 interface TinOutcome { points: number; dataConsistent: boolean; apiError: boolean }
 
 function scoreIdentity(mashup: MashupResult, w: VerificationScoringWeights): IdentityOutcome {
-  if (mashup.kind === "error") return { points: 0, identityVerified: false, apiError: true };
-  const { ninVerified, bvnVerified, dobProvided, dobMatch } = mashup.data;
-  if (!ninVerified) return { points: w.identityNinNotFound, identityVerified: false, apiError: false };
-  if (!bvnVerified) return { points: w.identityBvnNotFound, identityVerified: false, apiError: false };
-  if (!dobProvided) return { points: w.identityDobMissing, identityVerified: true, apiError: false };
-  return dobMatch
-    ? { points: w.identityPerfect, identityVerified: true, apiError: false }
-    : { points: w.identityDobMismatch, identityVerified: true, apiError: false };
+  if (mashup.kind === "error") return { points: 0, identityVerified: false, seriousNameMismatch: false, apiError: true };
+  const { ninVerified, bvnVerified, nameMatch } = mashup.data;
+  if (!ninVerified) return { points: w.identityNinNotFound, identityVerified: false, seriousNameMismatch: false, apiError: false };
+  if (!bvnVerified) return { points: w.identityBvnNotFound, identityVerified: false, seriousNameMismatch: false, apiError: false };
+  // Both individually verified — mirrors scoreCac's "found+active" precedent: a name
+  // mismatch doesn't retract identityVerified (NIN and BVN each genuinely resolved),
+  // it's a separate red flag surfaced via seriousNameMismatch instead.
+  if (!nameMatch) return { points: w.identityNameMismatch, identityVerified: true, seriousNameMismatch: true, apiError: false };
+  return { points: w.identityVerified, identityVerified: true, seriousNameMismatch: false, apiError: false };
 }
 
 function scoreCac(cac: CacResult, w: VerificationScoringWeights): CacOutcome {
@@ -65,8 +66,9 @@ function scoreTin(tin: TinResult, w: VerificationScoringWeights): TinOutcome {
  * out. Mirrors the override rules in risk-scoring-guide.md, applied in this
  * priority order (highest first): a mono.co API error can never lead to an
  * auto-Reject; failing both identity and CAC is an auto-Reject; failing
- * either alone (but not both) or a serious CAC name mismatch always escalates
- * to a human; only then do the plain Model C score bands apply.
+ * either alone (but not both), a serious CAC name mismatch, or a NIN/BVN
+ * name mismatch always escalates to a human; only then do the plain Model C
+ * score bands apply.
  */
 export function scoreVerification(
   mashup: MashupResult,
@@ -93,7 +95,17 @@ export function scoreVerification(
   const checkScores: VerificationCheckScores = {
     identityScore: identity.points,
     cacScore: cacOutcome.points,
-    tinScore: tinOutcome.points,
+    // No document-authenticity evidence source exists in this system (no
+    // OCR/document-verification tool) — never fabricate a confidence value
+    // for a factor with no real data, same principle as Stage 6's PD/LGD/EAD
+    // and Stage 3's CDD purpose-coherence gap. Doesn't feed into riskScore
+    // below (which only ever summed identity/cac/tin points, unchanged).
+    documentScore: 0,
+    // Daml's "cross-source data consistency" field — this is exactly what
+    // the TIN-matches-CAC check verifies (renamed from tinScore, which was
+    // also the wrong field name for the ledger's VerificationCheckScores
+    // record — see that type's doc comment).
+    consistencyScore: tinOutcome.points,
   };
 
   // Includes the TIN check: risk-scoring-guide.md's general override row
@@ -115,6 +127,8 @@ export function scoreVerification(
     decision = { action: "FlagForManualReview", note: "One of identity verification or CAC registration failed — requires manual review." };
   } else if (cacOutcome.seriousNameMismatch) {
     decision = { action: "FlagForManualReview", note: "CAC-registered legal name does not match the submitted business profile name." };
+  } else if (identity.seriousNameMismatch) {
+    decision = { action: "FlagForManualReview", note: "NIN-verified name does not match BVN-verified name — possible identity fraud." };
   } else if (riskLevel === "Low") {
     decision = { action: "Approve", autoDecided: true };
   } else if (riskLevel === "Medium") {

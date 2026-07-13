@@ -16,11 +16,12 @@
  *   underwriting-fraud-detection.ts      — rule-based transaction pattern flags
  *   underwriting-final-decision.ts       — weighted combinator + fraud hard override
  *
- * Unlike scoreVerification/scoreCompliance, there is no Approve/Reject/Flag decision
- * here: BeginUnderwriting always proceeds once evidence is gathered (Stage 7's FI,
- * not this agent, makes the funding decision) — this function's only outputs are the
- * RiskAssessment fields BeginUnderwriting needs, plus the specific risk flags that
- * produced them, for the FI to review.
+ * Mirrors scoreVerification/scoreCompliance's Approve/Reject/Flag decision pattern:
+ * `assessor` is now a real Canton party with its own screening authority (mirrors
+ * verifier screening businesses before Stage 5) — Low risk auto-qualifies
+ * (BeginUnderwriting), Medium risk escalates to a human assessor
+ * (FlagUnderwritingForManualReview), High risk is a hard veto (RejectUnderwriting)
+ * that never reaches the FI. See underwriting-final-decision.ts's `decision` field.
  */
 import type {
   CreditworthinessEvidence,
@@ -54,7 +55,7 @@ export function scoreUnderwriting(
 
   const { averageMonthlyNetInflow } = deriveCashFlowMetrics(transactions, asOf);
 
-  const { assessment, riskFlags } = combineEngines(
+  const { assessment, riskFlags, decision } = combineEngines(
     { financialBehaviour, cashflowRisk, creditworthiness: creditworthinessResult, fraudDetection },
     weights,
     context.requestedAmount,
@@ -62,5 +63,5 @@ export function scoreUnderwriting(
     creditworthiness.dscr,
   );
 
-  return { assessment, riskFlags, scoringPolicyVersion: policyVersion };
+  return { assessment, riskFlags, decision, scoringPolicyVersion: policyVersion };
 }

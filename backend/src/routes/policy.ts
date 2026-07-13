@@ -66,7 +66,7 @@ router.get("/verification/pending", async (_req, res, next) => {
 
 // Propose a new VerificationPolicy — does not take effect until a different,
 // registered PolicyApprover exercises ApprovePolicyChange (below).
-router.post("/verification/propose", async (req, res, next) => {
+router.post("/verification/propose", requireAuth("vetify"), async (req, res, next) => {
   try {
     const {
       vetify, riskCommittee, maxAmendments, slaHours, autoApproveMin, autoRejectMax,
@@ -112,11 +112,26 @@ router.post("/verification/:contractId/endorse", requireAuth("riskCommittee"), a
 // PolicyApprover, and the Risk Committee must have already endorsed
 // (Layer 2) — all asserted on-ledger. approvedBy now comes from the
 // authenticated session (Layer 3), not the request body.
+//
+// approverCid/currentPolicyCid: SDK 3.4.11 / Daml-LF 2.1/2.2 has no contract
+// keys, so ApprovePolicyChange can no longer resolve the active PolicyApprover
+// or VerificationPolicy itself via lookupByKey — this route resolves both via
+// queryContracts (same headcount/singleton-sized ACS query already used
+// elsewhere in this file) and passes their ContractIds explicitly.
 router.post("/verification/:contractId/approve", requireAuth("vetify"), async (req, res, next) => {
   try {
     const { userId, username, displayName, partyRole } = req.authUser!;
+    const approvers = await queryContracts(T_POLICY_APPROVER);
+    const approver = approvers.find((a: any) => a.payload.approverName === displayName);
+    if (!approver) {
+      return res.status(409).json({ error: `${displayName} is not a registered PolicyApprover` });
+    }
+    const activePolicies = await queryContracts(T_VERIFICATION_POLICY);
+    const currentPolicyCid = activePolicies[0]?.contractId ?? null;
     const result = await exerciseChoice(T_PENDING_VERIFICATION_POLICY, req.params.contractId,
-      "ApprovePolicyChange", { approvedBy: displayName }, "vetify");
+      "ApprovePolicyChange",
+      { approvedBy: displayName, approverCid: approver.contractId, currentPolicyCid },
+      "vetify");
     await recordAuditLog({
       userId, username, displayName, partyRole,
       action: "ApprovePolicyChange", contractId: req.params.contractId,
@@ -155,7 +170,7 @@ router.get("/compliance/pending", async (_req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post("/compliance/propose", async (req, res, next) => {
+router.post("/compliance/propose", requireAuth("vetify"), async (req, res, next) => {
   try {
     const {
       vetify, riskCommittee, autoApproveMin, autoRejectMax, escalationSlaHours,
@@ -197,11 +212,22 @@ router.post("/compliance/:contractId/endorse", requireAuth("riskCommittee"), asy
   } catch (e) { next(e); }
 });
 
+// approverCid/currentPolicyCid: see the identical comment on the
+// verification approve route above.
 router.post("/compliance/:contractId/approve", requireAuth("vetify"), async (req, res, next) => {
   try {
     const { userId, username, displayName, partyRole } = req.authUser!;
+    const approvers = await queryContracts(T_POLICY_APPROVER);
+    const approver = approvers.find((a: any) => a.payload.approverName === displayName);
+    if (!approver) {
+      return res.status(409).json({ error: `${displayName} is not a registered PolicyApprover` });
+    }
+    const activePolicies = await queryContracts(T_COMPLIANCE_POLICY);
+    const currentPolicyCid = activePolicies[0]?.contractId ?? null;
     const result = await exerciseChoice(T_PENDING_COMPLIANCE_POLICY, req.params.contractId,
-      "ApprovePolicyChange", { approvedBy: displayName }, "vetify");
+      "ApprovePolicyChange",
+      { approvedBy: displayName, approverCid: approver.contractId, currentPolicyCid },
+      "vetify");
     await recordAuditLog({
       userId, username, displayName, partyRole,
       action: "ApprovePolicyChange", contractId: req.params.contractId,
@@ -235,7 +261,7 @@ router.get("/approvers", async (_req, res, next) => {
 });
 
 // Registers a Risk & Credit Governance Committee member (docs/risk-governance-charter.md §3).
-router.post("/approvers", async (req, res, next) => {
+router.post("/approvers", requireAuth("vetify"), async (req, res, next) => {
   try {
     const { vetify, approverName, role, authorizedBy } = req.body;
     res.status(201).json(await createContract(T_POLICY_APPROVER, {
@@ -249,7 +275,7 @@ router.post("/approvers", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post("/approvers/:contractId/deactivate", async (req, res, next) => {
+router.post("/approvers/:contractId/deactivate", requireAuth("vetify"), async (req, res, next) => {
   try {
     const { reason, performedBy } = req.body;
     res.json(await exerciseChoice(T_POLICY_APPROVER, req.params.contractId,
@@ -257,7 +283,7 @@ router.post("/approvers/:contractId/deactivate", async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-router.post("/approvers/:contractId/reactivate", async (req, res, next) => {
+router.post("/approvers/:contractId/reactivate", requireAuth("vetify"), async (req, res, next) => {
   try {
     const { reason, performedBy } = req.body;
     res.json(await exerciseChoice(T_POLICY_APPROVER, req.params.contractId,

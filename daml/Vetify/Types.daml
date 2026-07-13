@@ -1,24 +1,41 @@
 -- | Shared enumerations and data records for the Vetify Murabahah lifecycle.
---   No templates live here — only value types imported by every domain module.
+--
+-- This module defines no templates — only plain value types imported by every
+-- domain module (Onboarding, Compliance, Financing, Murabahah, Reporting,
+-- FinancingProvider). Keeping these types in one leaf module lets the domain
+-- modules share a common vocabulary without introducing import cycles between
+-- them.
 module Vetify.Types where
 
 -- ─── Enumerations ─────────────────────────────────────────────────────────
 
+-- | The two legal forms of business this platform onboards. Determines which
+-- CAC registration-number prefix is expected ("BN" for sole proprietorships,
+-- "RC" for limited companies) and how many directors are required.
 data BusinessType
   = SoleProprietorship
   | LimitedCompany
   deriving (Eq, Show)
 
+-- | Canonical three-band risk classification used across every AI-assisted
+-- decision stage (Verification, Compliance, Underwriting, Delinquency
+-- Monitoring). The score-to-band mapping is fixed platform-wide: Low >= 80,
+-- Medium 50-79, High < 50.
 data RiskLevel
   = Low
   | Medium
   | High
   deriving (Eq, Show)
 
--- Shared across workflow templates to avoid constructor name conflicts.
--- Carries both lifecycle states (Draft, UnderReview, …) and terminal
--- decisions (Approved, Rejected). Splitting state from decision is a
--- deferred refactor (review finding F15) — high backend/frontend ripple.
+-- | Lifecycle and terminal-decision states shared across every workflow
+-- template (BusinessOnboarding, ComplianceReview, FinancingRequest, ...).
+-- Deliberately one enum rather than a separate status type per template, to
+-- avoid constructor-name collisions between templates that would otherwise
+-- both want a field called e.g. "Pending". Carries both in-flight lifecycle
+-- states (Draft, UnderReview, ManualReview, PendingAmendment) and terminal
+-- decisions (Approved, Rejected) in a single type; splitting the two concerns
+-- apart would be a larger refactor with backend/frontend ripple effects and
+-- isn't required for correctness today.
 data ReviewStatus
   = Draft
   | Pending
@@ -29,47 +46,147 @@ data ReviewStatus
   | Rejected
   deriving (Eq, Show)
 
+-- | Lifecycle of an Enhanced Due Diligence case (EDDCase). Kept as its own
+-- small enum rather than reusing ReviewStatus: an EDD case only ever moves
+-- Open -> Closed, which doesn't map cleanly onto ReviewStatus's richer
+-- Draft/Pending/UnderReview vocabulary.
+data EddCaseStatus = EddOpen | EddClosed
+  deriving (Eq, Show)
+
+-- | Lifecycle of a FinancingRequest (Stage 5-7).
 data FinancingStatus
   = Submitted
+  -- | Flagged by FlagUnderwritingForManualReview; awaiting a human assessor.
+  | UnderwritingManualReview
   | Underwriting
   | FinancingApproved
   | FinancingRejected
-  | Withdrawn  -- F13: borrower voluntarily withdrew the request before FI decision
-  | Expired    -- F18: request archived by vetify after policy SLA elapsed
-  | Cancelled  -- F18: request administratively cancelled by vetify
+  -- | Business voluntarily withdrew the request before the FI decided.
+  | Withdrawn
+  -- | Archived by vetify after the policy-defined SLA elapsed with no decision.
+  | Expired
+  -- | Administratively cancelled by vetify.
+  | Cancelled
   deriving (Eq, Show)
 
+-- | Lifecycle of a MurabahahContract (Stage 8-10).
 data MurabahahStatus
   = Active
   | Delinquent
   | Completed
   | Defaulted
+  -- | An ambiguous delinquency signal — either exactly one missed installment
+  -- (too early to distinguish a real default from a processing delay) or two
+  -- or more apparently-missed installments alongside a bank credit that may be
+  -- an unrecorded payment. Escalated to a human sentinel via
+  -- FlagForDelinquencyReview rather than auto-decided either way. Named
+  -- distinctly from ReviewStatus's "ManualReview" to avoid a constructor
+  -- collision, the same reason FinancingStatus needed
+  -- "UnderwritingManualReview" instead of a bare "ManualReview".
+  | DelinquencyManualReview
   deriving (Eq, Show)
 
--- M8: Distinguishes a full early-settlement Ibra' from a partial one.
+-- | Distinguishes a full early-settlement Ibra' (profit waiver) from a partial
+-- one.
 data IbraSettlementType
   = FullIbra
   | PartialIbra
   deriving (Eq, Show)
 
--- Gap 5: captures whether a human override reversed an agent's approval or rejection.
--- OverrodeApproval  — human approved after the agent flagged or would have rejected.
--- OverrodeRejection — human rejected after the agent approved or would have approved.
+-- | Records which direction a human override reversed an AI agent's decision.
+-- OverrodeApproval: a human approved after the agent flagged the case or would
+-- have rejected it. OverrodeRejection: a human rejected after the agent
+-- approved or would have approved.
 data OverrideType
   = OverrodeApproval
   | OverrodeRejection
   deriving (Eq, Show)
 
--- ApprovedBorrower lifecycle state. Revocation and recertification are consuming
--- choices that archive the contract; these states represent live contracts only.
-data BorrowerStatus
-  = BorrowerActive
-  | BorrowerSuspended
-  | BorrowerExpired   -- Gap 22: approval period ended; vetify exercises ExpireBorrower
+-- | Lifecycle state of an ApprovedBusiness. Revocation and recertification are
+-- consuming choices that archive the contract entirely, so these three states
+-- only ever describe a currently-live contract.
+data BusinessStatus
+  = BusinessActive
+  | BusinessSuspended
+  -- | The approval period has ended; vetify has exercised ExpireBusiness.
+  | BusinessExpired
   deriving (Eq, Show)
+
+-- | Condition of pledged collateral at a physical inspection
+-- (RahnAgreement.RecordInspection).
+data CollateralCondition
+  = Satisfactory
+  | RequiresAttention
+  | Impaired
+  deriving (Eq, Show)
+
+-- | Severity band for a Monitoring Agent alert (MonitoringAlert). Named
+-- distinctly from RiskLevel's Low/Medium/High to avoid a constructor
+-- collision, the same reason FinancingStatus needed
+-- "UnderwritingManualReview" instead of a bare "ManualReview".
+data AlertSeverity
+  = SeverityLow
+  | SeverityMedium
+  | SeverityHigh
+  | SeverityCritical
+  deriving (Eq, Show)
+
+-- | How a supplier failed to deliver (AssetPurchaseRecord.RecordSupplierFailure).
+data SupplierFailureType
+  = SupplierCancelled
+  | SupplierBankrupt
+  | RefundIssued
+  deriving (Eq, Show)
+
+-- | Category of a business-raised dispute (MurabahahContract.RaiseDispute).
+data DisputeType
+  = PaymentDispute
+  | ContractTermsDispute
+  | AssetDefectDispute
+  deriving (Eq, Show)
+
+-- | An arbitrator's finding on an escalated dispute (ArbitrationRequest).
+data ArbitrationOutcome
+  = BusinessPrevails
+  | FIPrevails
+  | SettlementAgreed
+  deriving (Eq, Show)
+
+-- ─── Shared status predicates ──────────────────────────────────────────────
+--
+-- These replace compound `status == A || status == B` boolean expressions
+-- that were previously duplicated verbatim across several choices in the
+-- same template. Unlike Murabahah.isValidMurabahahTransition (a true (from,
+-- to) transition matrix for a status that cycles between several live
+-- states), most ReviewStatus/FinancingStatus choices are terminal exits
+-- rather than same-template recreations, so the duplication that actually
+-- recurs here is in the *eligibility* check, not a full transition graph —
+-- these predicates centralize exactly that.
+
+-- | True while a BusinessOnboarding/ComplianceReview is still open for a
+-- human or agent decision (UnderReview or ManualReview). Used by
+-- Onboarding.Approve/Reject/RequestAmendment and
+-- Compliance.ReassignReview/ApproveCompliance/RejectCompliance.
+isUnderActiveReview : ReviewStatus -> Bool
+isUnderActiveReview s = s == UnderReview || s == ManualReview
+
+-- | True while a FinancingRequest is still open for assessor assignment,
+-- an FI funding decision, withdrawal, expiry, cancellation, or amendment
+-- (Submitted or Underwriting). Used by Financing.AssignAssessor/
+-- RejectFunding/WithdrawRequest/ExpireRequest/CancelRequest/ProposeAmendment.
+isOpenFinancingRequest : FinancingStatus -> Bool
+isOpenFinancingRequest s = s == Submitted || s == Underwriting
+
+-- | True while a FinancingRequest is awaiting an assessor's Stage 6
+-- qualify/reject decision (Submitted or UnderwritingManualReview). Used by
+-- Financing.BeginUnderwriting/RejectUnderwriting.
+isPendingUnderwritingDecision : FinancingStatus -> Bool
+isPendingUnderwritingDecision s = s == Submitted || s == UnderwritingManualReview
 
 -- ─── Data Records ─────────────────────────────────────────────────────────
 
+-- | One director or principal of a business, captured at onboarding for
+-- identity verification (NIN/BVN lookups).
 data BusinessDirector = BusinessDirector
   with
     name        : Text
@@ -80,6 +197,9 @@ data BusinessDirector = BusinessDirector
     email       : Text
   deriving (Eq, Show)
 
+-- | The business's self-declared profile, captured at onboarding and carried
+-- forward (in derived form) onto ComplianceReview / ApprovedBusiness /
+-- FinancingRequest so downstream scoring doesn't need to re-fetch it.
 data BusinessProfile = BusinessProfile
   with
     name              : Text
@@ -90,18 +210,25 @@ data BusinessProfile = BusinessProfile
     website           : Optional Text
     businessType      : BusinessType
     incorporationDate : Date
-    directors         : [BusinessDirector]  -- at least one; BusinessOnboarding ensures length > 0
-    businessActivity  : Text  -- what the business does, e.g. "retail sale of electronics"
-    businessSector    : Text  -- industry classification, e.g. "Retail Trade"; used by Shariah Agent
+    -- | At least one entry; BusinessOnboarding's `ensure` clause enforces a
+    -- non-empty list.
+    directors         : [BusinessDirector]
+    -- | What the business does day-to-day, e.g. "retail sale of electronics".
+    businessActivity  : Text
+    -- | Industry classification, e.g. "Retail Trade" — consumed by the
+    -- Shariah Agent's sector-based screening.
+    businessSector    : Text
   deriving (Eq, Show)
 
+-- | Corporate registration identifiers supplied at onboarding.
 data BusinessKyc = BusinessKyc
   with
     cacRegNumber : Text
     taxId        : Text
   deriving (Eq, Show)
 
--- Populated by the Verification Agent after checking external KYC services
+-- | Boolean results of the Stage 2 identity/KYC checks, populated by the
+-- Verifier Agent (or a human reviewer) after querying mono.co/Youverify.
 data VerificationChecks = VerificationChecks
   with
     identityVerified : Bool
@@ -110,60 +237,101 @@ data VerificationChecks = VerificationChecks
     dataConsistent   : Bool
   deriving (Eq, Show)
 
--- Per-check confidence scores (0–100) produced by the Verification Agent.
--- Stored on VerificationResult for AI decision traceability and audit.
--- None on the human-review path (a human doesn't emit numeric sub-scores).
+-- | Per-check confidence scores (0-100) underlying a VerificationChecks
+-- result. Stored on VerificationResult for AI-decision traceability and
+-- audit. `None` on the human-review path, since a human reviewer doesn't
+-- emit numeric per-check sub-scores.
 data VerificationCheckScores = VerificationCheckScores
   with
-    identityScore    : Int  -- NIN/BVN match confidence via mono.co Lookup
-    cacScore         : Int  -- CAC registry match confidence
-    documentScore    : Int  -- document authenticity confidence
-    consistencyScore : Int  -- cross-source data consistency score
+    -- | NIN/BVN match confidence via mono.co Lookup.
+    identityScore    : Int
+    -- | CAC registry match confidence.
+    cacScore         : Int
+    -- | Document authenticity confidence.
+    documentScore    : Int
+    -- | Cross-source data consistency score.
+    consistencyScore : Int
   deriving (Eq, Show)
 
--- Populated by the Compliance Agent after Shariah, AML/KYC/CDD screening
+-- | Boolean results of the Stage 3 Shariah/AML/KYC/CDD checks, populated by
+-- the Shariah Agent and Verifier Agent.
 data ComplianceCheck = ComplianceCheck
   with
-    shariahCompliant : Bool   -- set by Shariah Agent (Step 0, AAOIFI Standard No. 8 & 28)
-    amlCleared       : Bool   -- set by Compliance Agent via Youverify
-    kycValidated     : Bool   -- set by Compliance Agent via KYB
-    cddCompleted     : Bool   -- set by Compliance Agent after CDD reasoning
+    -- | Set by the Shariah Agent (AAOIFI Std No. 8 & 28).
+    shariahCompliant : Bool
+    -- | Set by the Verifier Agent via Youverify AML screening.
+    amlCleared       : Bool
+    -- | Set by the Verifier Agent via KYB (Know Your Business).
+    kycValidated     : Bool
+    -- | Set by the Verifier Agent after CDD reasoning.
+    cddCompleted     : Bool
   deriving (Eq, Show)
 
--- Immutable references to the external screening records used during a compliance
--- decision. Stored on ComplianceResult for regulatory audit and traceability.
+-- | Immutable references to the external screening records consulted during a
+-- Stage 3 compliance decision. Stored on ComplianceResult for regulatory
+-- audit and traceability. Every field is genuinely optional — populated when
+-- the underlying screening tool returned a real reference, `None` otherwise;
+-- none of these are ever fabricated to fill the record.
 data AmlEvidenceRefs = AmlEvidenceRefs
   with
-    amlScreeningRef      : Optional Text  -- Youverify AML screening reference ID
-    sanctionsCheckRef    : Optional Text  -- sanctions list check reference
-    pepCheckRef          : Optional Text  -- PEP screening reference
-    adverseMediaRef      : Optional Text  -- adverse media check reference
-    shariahScreeningRef  : Optional Text  -- Shariah Agent execution / trace reference
-    sanctionsListVersion : Optional Text  -- Gap 10: sanctions list version/identifier used
-    sanctionsListDate    : Optional Date  -- Gap 10: date of sanctions list (OFAC, UN, CBN)
-    apiResponseHash      : Optional Text  -- Gap 29: SHA-256 of the raw API response payload for tamper-evidence
-    beneficialOwnershipRef : Optional Text  -- UBO verification reference (CAC/Youverify beneficial ownership check)
-    sourceOfFundsRef        : Optional Text  -- source-of-funds verification reference
-    amlRiskScore             : Optional Int   -- composite AML/STR risk score, 0-100
+    amlScreeningRef      : Optional Text  -- ^ Youverify AML screening reference ID.
+    sanctionsCheckRef    : Optional Text  -- ^ Sanctions list check reference.
+    pepCheckRef          : Optional Text  -- ^ PEP screening reference.
+    adverseMediaRef      : Optional Text  -- ^ Adverse media check reference.
+    shariahScreeningRef  : Optional Text  -- ^ Shariah Agent execution / trace reference.
+    sanctionsListVersion : Optional Text  -- ^ Sanctions list version/identifier used.
+    sanctionsListDate    : Optional Date  -- ^ Date of the sanctions list consulted (OFAC, UN, CBN).
+    apiResponseHash      : Optional Text  -- ^ SHA-256 of the raw API response payload, for tamper-evidence.
+    beneficialOwnershipRef : Optional Text  -- ^ UBO verification reference (CAC/Youverify beneficial-ownership check).
+    sourceOfFundsRef        : Optional Text  -- ^ Source-of-funds verification reference.
+    amlRiskScore             : Optional Int   -- ^ Composite AML/STR risk score, 0-100.
   deriving (Eq, Show)
 
--- Gap 27: Structured Shariah screening result from the Shariah Agent (Stage 3 Step 0).
--- Replaces the single shariahCompliant : Bool in ComplianceCheck with auditable detail.
+-- | A structured Enhanced Due Diligence checklist, required when a PEP hit
+-- (as opposed to a sanctions hit, which already trends toward rejection)
+-- leaves a business or director ambiguously flagged. Every field starts
+-- incomplete; CloseEddCase on EDDCase requires all of them filled in before
+-- the case can close, and ApproveCompliance in turn requires the case to be
+-- closed before a PEP-flagged business can be approved.
+data EddChecklist = EddChecklist
+  with
+    sourceOfWealthVerified     : Bool
+    sourceOfWealthNote         : Optional Text
+    enhancedMediaSearchDone    : Bool
+    -- | Name/reference of the sign-off; `None` while not yet done.
+    seniorManagementSignoff    : Optional Text
+    -- | Agreed ongoing monitoring cadence, e.g. "quarterly".
+    monitoringFrequency        : Optional Text
+  deriving (Eq, Show)
+
+-- | Structured Shariah screening result produced by the standalone Shariah
+-- Agent (Stage 3, run before the Verifier Agent's compliance stage). Replaces
+-- a bare `shariahCompliant : Bool` with an auditable record of what was
+-- screened and why.
 data ShariahAssessment = ShariahAssessment
   with
-    verdict              : Text           -- "COMPLIANT", "REQUIRES_REVIEW", "NON_COMPLIANT"
-    activitiesScreened   : [Text]         -- business activities reviewed by the agent
-    prohibitedRevenuePct : Optional Decimal -- estimated % prohibited revenue (mixed-business cases)
-    aaoifiStandards      : [Text]         -- e.g. ["Std No. 8", "Std No. 28", "Std No. 40"]
-    scholarDecision      : Optional Text  -- scholar/committee reference if escalated
-    rationale            : Text           -- human-readable explanation of the verdict
-    screenedAt           : Optional Time  -- when Shariah screening was performed (None if not recorded)
-    agentRef             : Optional Text  -- Shariah Agent execution / LangSmith trace ID
+    -- | "COMPLIANT", "REQUIRES_REVIEW", or "NON_COMPLIANT".
+    verdict              : Text
+    -- | Business activities the agent reviewed.
+    activitiesScreened   : [Text]
+    -- | Estimated percentage of prohibited revenue, for mixed-business cases.
+    prohibitedRevenuePct : Optional Decimal
+    -- | AAOIFI standards cited, e.g. ["Std No. 8", "Std No. 28", "Std No. 40"].
+    aaoifiStandards      : [Text]
+    -- | Scholar/committee reference, when the case was escalated.
+    scholarDecision      : Optional Text
+    -- | Human-readable explanation of the verdict.
+    rationale            : Text
+    -- | When the screening was performed; `None` if not recorded.
+    screenedAt           : Optional Time
+    -- | Shariah Agent execution / LangSmith trace ID.
+    agentRef             : Optional Text
   deriving (Eq, Show)
 
--- Gap 16: Full immutable snapshot of the CompliancePolicy in effect when StartReview
--- was exercised. Stored on ComplianceResult so the exact thresholds that governed a
--- decision can be reconstructed without relying on the current (possibly updated) policy.
+-- | Immutable snapshot of the CompliancePolicy in effect when StartReview was
+-- exercised. Stored on ComplianceResult so the exact thresholds that governed
+-- a past decision can be reconstructed later even if the live policy has
+-- since changed.
 data CompliancePolicySnapshot = CompliancePolicySnapshot
   with
     policyVersion        : Text
@@ -172,273 +340,380 @@ data CompliancePolicySnapshot = CompliancePolicySnapshot
     escalationSlaHours   : Int
     shariahPolicyVersion : Text
     effectiveFrom        : Time
-    capturedAt           : Time  -- ledger time at which StartReview was exercised
-    scoringWeights        : ComplianceScoringWeights  -- Gap 16 extension: point values in effect at StartReview
+    -- | Ledger time at which StartReview was exercised.
+    capturedAt           : Time
+    -- | Per-check point values in effect at StartReview.
+    scoringWeights        : ComplianceScoringWeights
   deriving (Eq, Show)
 
--- Per-check point values for the off-ledger Stage 2 (identity/KYC) scoring engine
--- (agents/src/scoring/verification.ts). Carried on VerificationPolicy so risk/compliance
--- ops can retune weights via a new versioned policy contract, without a code deploy —
--- the same governance the platform already gives autoApproveMin/autoRejectMax/slaHours.
+-- | Per-check point values for the off-ledger Stage 2 (identity/KYC) scoring
+-- engine (agents/src/scoring/verification.ts). Carried on VerificationPolicy
+-- so risk/compliance operations can retune the rubric by creating a new
+-- versioned policy contract, without a code deploy.
 data VerificationScoringWeights = VerificationScoringWeights
   with
-    identityPerfect        : Int  -- NIN + BVN verified, DOB matches
-    identityDobMissing     : Int  -- NIN + BVN verified, no DOB provided to cross-check
-    identityDobMismatch    : Int  -- NIN + BVN verified, DOB does not match
-    identityBvnNotFound    : Int  -- NIN verified, BVN not found
-    identityNinNotFound    : Int  -- NIN not found
-    cacActiveExactMatch    : Int  -- CAC found, status Active, exact legal name match
-    cacActiveCloseMatch    : Int  -- CAC found, status Active, minor spelling difference
-    cacActiveNameMismatch  : Int  -- CAC found, status Active, legal name mismatch (always flags regardless of score)
-    cacPending             : Int  -- CAC found, status Pending
-    cacInactiveOrStruckOff : Int  -- CAC found, status Inactive or Struck Off
-    cacNotFound            : Int  -- CAC registration number not found
-    tinVerifiedMatchesCac  : Int  -- TIN verified and matches the CAC RC number
-    tinVerifiedDifferentEntity : Int  -- TIN verified but filed under a different entity
-    tinNotFound            : Int  -- TIN not found in FIRS records
-    tinApiError            : Int  -- mono.co TIN lookup errored (assume neutral, do not penalise)
+    -- | NIN and BVN both verified, and mono.co's cross-check confirms the
+    -- name on each record matches.
+    identityVerified       : Int
+    -- | NIN and BVN both verified but the names don't match — a real
+    -- identity-fraud signal (someone else's BVN/NIN); always flags
+    -- regardless of score, the same treatment as cacActiveNameMismatch.
+    identityNameMismatch   : Int
+    -- | NIN verified, BVN not found.
+    identityBvnNotFound    : Int
+    -- | NIN not found.
+    identityNinNotFound    : Int
+    -- | CAC found, status Active, exact legal-name match.
+    cacActiveExactMatch    : Int
+    -- | CAC found, status Active, minor spelling difference.
+    cacActiveCloseMatch    : Int
+    -- | CAC found, status Active, legal-name mismatch — always flags
+    -- regardless of score.
+    cacActiveNameMismatch  : Int
+    -- | CAC found, status Pending.
+    cacPending             : Int
+    -- | CAC found, status Inactive or Struck Off.
+    cacInactiveOrStruckOff : Int
+    -- | CAC registration number not found.
+    cacNotFound            : Int
+    -- | TIN verified and matches the CAC RC number.
+    tinVerifiedMatchesCac  : Int
+    -- | TIN verified but filed under a different entity.
+    tinVerifiedDifferentEntity : Int
+    -- | TIN not found in FIRS records.
+    tinNotFound            : Int
+    -- | mono.co TIN lookup errored — treated as neutral, not penalised.
+    tinApiError            : Int
   deriving (Eq, Show)
 
--- Per-check point values for the off-ledger Stage 3 (AML/KYB/CDD) scoring engine
--- (agents/src/scoring/compliance.ts). Carried on CompliancePolicy for the same reason
+-- | Per-check point values for the off-ledger Stage 0 (financing-provider
+-- registration) scoring engine (agents/src/scoring/provider-verification.ts).
+-- Carried on ProviderVerificationPolicy for the same reason
 -- VerificationScoringWeights is carried on VerificationPolicy.
+--
+-- Two independent signals feed the provider-qualification decision: (1) a CAC
+-- registry lookup on the provider's own registration number, mirroring
+-- Stage 2's CAC check; (2) regulatory completeness, which is conditional on
+-- providerType — CBNLicensedNIFI/SECFundManager/PenComPensionManager
+-- genuinely require a regulatoryBody and licenseNumber, while
+-- CooperativeSociety/InvestmentClub/WaqfFund/ZakatFund/Philanthropy are
+-- legitimately lighter-regulated or unregulated, so having neither is not
+-- itself a red flag for those types.
+data ProviderVerificationScoringWeights = ProviderVerificationScoringWeights
+  with
+    -- | CAC found, status Active, exact provider-name match.
+    cacActiveExactMatch     : Int
+    -- | CAC found, status Active, minor spelling difference.
+    cacActiveCloseMatch     : Int
+    -- | CAC found, status Active, but name doesn't match — always flags
+    -- regardless of score, the same treatment as Stage 2's equivalent check.
+    cacActiveNameMismatch   : Int
+    -- | CAC found, status Pending.
+    cacPending               : Int
+    -- | CAC found, status Inactive or Struck Off.
+    cacInactiveOrStruckOff  : Int
+    -- | CAC registration number not found.
+    cacNotFound              : Int
+    -- | providerType requires a regulator, and both regulatoryBody and
+    -- licenseNumber are declared.
+    regulatedWithLicense    : Int
+    -- | providerType requires a regulator but regulatoryBody or
+    -- licenseNumber is missing — always flags regardless of score.
+    regulatedMissingLicense : Int
+    -- | providerType is a legitimately lighter-regulated/unregulated category
+    -- (CooperativeSociety/InvestmentClub/WaqfFund/ZakatFund/Philanthropy);
+    -- absence of a regulator is expected and not penalised.
+    unregulatedDeclared     : Int
+  deriving (Eq, Show)
+
+-- | Per-check point values for the off-ledger Stage 3 (AML/KYB/CDD) scoring
+-- engine (agents/src/scoring/compliance.ts). Carried on CompliancePolicy for
+-- the same reason VerificationScoringWeights is carried on VerificationPolicy.
 data ComplianceScoringWeights = ComplianceScoringWeights
   with
-    amlBothClear                      : Int  -- business and director AML status both "clear"
-    amlOneReviewRequired              : Int  -- either status "review_required" (neither "not_cleared")
-    kybActiveFullMatch                : Int  -- KYB active, name matches, director confirmed
-    kybActiveMinorDiscrepancy         : Int  -- KYB active with minor discrepancies
-    kybInactiveOrMismatch             : Int  -- KYB found but inactive or name mismatch
-    kybNotFound                       : Int  -- business not found in KYB
-    creditClean                       : Int  -- no negative credit history
-    creditMinorResolved               : Int  -- 1-2 minor delinquencies, resolved
-    creditDelinquentOrDefault         : Int  -- multiple delinquencies or active default
-    businessAgeEstablishedBonus       : Int  -- incorporated > 12 months ago
-    businessAgeNewlyRegisteredPenalty : Int  -- incorporated < 3 months ago (negative)
+    -- | Business and director AML status both "clear".
+    amlBothClear                      : Int
+    -- | Either status "review_required" (neither "not_cleared").
+    amlOneReviewRequired              : Int
+    -- | KYB active, name matches, director confirmed.
+    kybActiveFullMatch                : Int
+    -- | KYB active with minor discrepancies.
+    kybActiveMinorDiscrepancy         : Int
+    -- | KYB found but inactive or name mismatch.
+    kybInactiveOrMismatch             : Int
+    -- | Business not found in KYB.
+    kybNotFound                       : Int
+    -- | No negative credit history.
+    creditClean                       : Int
+    -- | One or two minor delinquencies, resolved.
+    creditMinorResolved               : Int
+    -- | Multiple delinquencies or an active default.
+    creditDelinquentOrDefault         : Int
+    -- | Incorporated more than 12 months ago.
+    businessAgeEstablishedBonus       : Int
+    -- | Incorporated less than 3 months ago (negative points).
+    businessAgeNewlyRegisteredPenalty : Int
   deriving (Eq, Show)
 
--- Per-check point values for the off-ledger Stage 6 (underwriting) scoring engine
--- (agents/src/scoring/underwriting.ts). Carried on UnderwritingPolicy for the same
--- reason VerificationScoringWeights/ComplianceScoringWeights are carried on their
--- policies: risk/credit ops can retune the rubric via a new policy version, without
--- a code deploy. Each *High/*Established/*Consistent/*WithinLimit/*Low field is that
--- factor's Low-Risk-band point value; the five max values (dscrHigh + revenueConsistent
--- + businessAgeEstablished + amountWithinLimit + debtObligationsLow) sum to 100.
--- Stage 6 is scored by five independent deterministic engines (agents/src/scoring/
--- underwriting-*.ts), not one flat formula — Financial Behaviour, Cashflow Risk,
--- Creditworthiness, and Fraud Detection each produce their own 0-100 sub-score
--- (RiskAssessment.behaviouralScore/cashflowRiskScore/creditworthinessScore/fraudScore),
--- combined by a Final Decision engine using the four *EngineWeight fields below (must
--- sum to 100). Kept flat (not nested per-engine records) so numifyWeights's shallow
--- string-to-number conversion (agents/src/scoring/types.ts) still works unchanged, and
--- to match VerificationScoringWeights/ComplianceScoringWeights's existing flat shape.
--- amountWithinLimit/amountSlightlyOverLimit/amountOverLimit were removed: amount-vs-limit
--- is now a disclosure comparison (recommendedLimit vs. requestedAmount), not a scored factor.
+-- | Per-check point values for the off-ledger Stage 6 (underwriting) scoring
+-- engine (agents/src/scoring/underwriting*.ts). Carried on UnderwritingPolicy
+-- for the same reason VerificationScoringWeights/ComplianceScoringWeights are
+-- carried on their policies: risk/credit operations can retune the rubric via
+-- a new policy version, without a code deploy.
+--
+-- Stage 6 is scored by five independent deterministic engines (Financial
+-- Behaviour, Cashflow Risk, Creditworthiness, Fraud Detection, and a Final
+-- Decision combinator), not one flat formula — each of the first four
+-- produces its own 0-100 sub-score (RiskAssessment.behaviouralScore /
+-- cashflowRiskScore / creditworthinessScore / fraudScore), and the Final
+-- Decision engine combines them using the four `*EngineWeight` fields below.
+-- Kept flat rather than nested per-engine records so the shared
+-- string-to-number JSON conversion helper (agents/src/scoring/types.ts) keeps
+-- working unchanged, and to match VerificationScoringWeights /
+-- ComplianceScoringWeights's existing flat shape.
 data UnderwritingScoringWeights = UnderwritingScoringWeights
   with
-    -- Cashflow Risk engine
-    dscrHigh                : Int  -- DSCR >= 1.5
-    dscrMedium              : Int  -- DSCR 1.0-1.5
-    dscrLow                 : Int  -- DSCR < 1.0
-    debtObligationsLow      : Int  -- existing debt <= 15% of avg monthly net inflow
-    debtObligationsModerate : Int  -- existing debt 15-30% of avg monthly net inflow
-    debtObligationsHigh     : Int  -- existing debt > 30% of avg monthly net inflow
-    cashReserveStrong       : Int  -- cash reserve >= 2x avg monthly outflow
-    cashReserveAdequate     : Int  -- cash reserve 1-2x avg monthly outflow
-    cashReserveWeak         : Int  -- cash reserve < 1x avg monthly outflow, or unavailable
-    stressTestPassAll       : Int  -- affordability holds under all three haircut scenarios below
-    stressTestPassPartial   : Int  -- affordability holds under at least one haircut scenario
-    stressTestFail          : Int  -- affordability fails under every haircut scenario
-    -- Cashflow Risk band boundaries — the risk-tolerance cutoffs themselves, distinct
-    -- from the point values above. Configurable per FI (unlike the Fraud Detection
-    -- engine's window/multiple constants, which stay hardcoded in
-    -- underwriting-fraud-detection.ts — those calibrate a pattern-matching rule's
-    -- shape, not a business risk-appetite decision).
-    dscrHighThreshold               : Decimal  -- DSCR at/above this bands High (default 1.5)
-    dscrMediumThreshold             : Decimal  -- DSCR at/above this (below High) bands Medium (default 1.0)
-    debtObligationsLowThreshold     : Decimal  -- existing debt / net inflow ratio at/below this bands Low (default 0.15)
-    debtObligationsModerateThreshold : Decimal -- ratio at/below this (above Low) bands Moderate (default 0.30)
-    cashReserveStrongMonths         : Decimal  -- reserve-to-outflow ratio at/above this bands Strong (default 2.0)
-    cashReserveAdequateMonths       : Decimal  -- ratio at/above this (below Strong) bands Adequate (default 1.0)
-    stressTestHaircutMild           : Decimal  -- mildest revenue haircut scenario (default 0.10)
-    stressTestHaircutModerate       : Decimal  -- default 0.25
-    stressTestHaircutSevere         : Decimal  -- harshest revenue haircut scenario (default 0.40)
-    -- Financial Behaviour engine
-    revenueConsistent       : Int  -- variance ratio below revenueConsistentThreshold
-    revenueModerate         : Int  -- variance ratio below revenueModerateThreshold (above Consistent)
-    revenueVolatile         : Int  -- variance ratio at/above revenueModerateThreshold
-    businessAgeEstablished  : Int  -- incorporated at/beyond businessAgeEstablishedMonths ago
-    businessAgeModerate     : Int  -- incorporated at/beyond businessAgeModerateMonths ago (below Established)
-    businessAgeNew          : Int  -- incorporated less than businessAgeModerateMonths ago
-    expenseDisciplineStrong   : Int  -- burn rate at/below expenseDisciplineStrongThreshold
-    expenseDisciplineModerate : Int  -- burn rate at/below expenseDisciplineModerateThreshold (above Strong)
-    expenseDisciplinePoor     : Int  -- burn rate above expenseDisciplineModerateThreshold
-    liquidityStrong         : Int  -- balance-derived buffer at/above liquidityStrongMonths
-    liquidityAdequate       : Int  -- buffer at/above liquidityAdequateMonths (below Strong), or unavailable
-    liquidityWeak           : Int  -- buffer below liquidityAdequateMonths
-    -- Financial Behaviour band boundaries — same rationale as the Cashflow Risk ones above.
-    revenueConsistentThreshold        : Decimal  -- default 0.20
-    revenueModerateThreshold          : Decimal  -- default 0.40
-    businessAgeEstablishedMonths      : Decimal  -- default 24.0
-    businessAgeModerateMonths         : Decimal  -- default 12.0
-    expenseDisciplineStrongThreshold  : Decimal  -- default 0.70
-    expenseDisciplineModerateThreshold : Decimal -- default 0.90
-    liquidityStrongMonths             : Decimal  -- default 2.0
-    liquidityAdequateMonths           : Decimal  -- default 1.0
-    -- Creditworthiness engine
-    creditScoreExcellent    : Int  -- bureau score at/above creditScoreExcellentThreshold
-    creditScoreGood         : Int  -- bureau score at/above creditScoreGoodThreshold (below Excellent)
-    creditScoreFair         : Int  -- bureau score at/above creditScoreFairThreshold (below Good)
-    creditScorePoor         : Int  -- bureau score below creditScoreFairThreshold, or unavailable
-    -- Creditworthiness band boundaries — same rationale as above.
-    creditScoreExcellentThreshold : Int  -- default 700
-    creditScoreGoodThreshold      : Int  -- default 650
-    creditScoreFairThreshold      : Int  -- default 550
-    -- Fraud Detection engine (deduction points; engine starts at 100 and subtracts
-    -- per triggered rule, floored at 0 — these are penalties, not band scores)
+    -- Cashflow Risk engine — point values.
+    dscrHigh                : Int  -- ^ DSCR >= dscrHighThreshold.
+    dscrMedium              : Int  -- ^ DSCR >= dscrMediumThreshold, below High.
+    dscrLow                 : Int  -- ^ DSCR below dscrMediumThreshold.
+    debtObligationsLow      : Int  -- ^ Existing debt at/below debtObligationsLowThreshold of average monthly net inflow.
+    debtObligationsModerate : Int  -- ^ Existing debt at/below debtObligationsModerateThreshold, above Low.
+    debtObligationsHigh     : Int  -- ^ Existing debt above debtObligationsModerateThreshold.
+    cashReserveStrong       : Int  -- ^ Cash reserve at/above cashReserveStrongMonths of average monthly outflow.
+    cashReserveAdequate     : Int  -- ^ Cash reserve at/above cashReserveAdequateMonths, below Strong.
+    cashReserveWeak         : Int  -- ^ Cash reserve below cashReserveAdequateMonths, or unavailable.
+    stressTestPassAll       : Int  -- ^ Affordability holds under all three haircut scenarios below.
+    stressTestPassPartial   : Int  -- ^ Affordability holds under at least one haircut scenario.
+    stressTestFail          : Int  -- ^ Affordability fails under every haircut scenario.
+    -- Cashflow Risk engine — band boundaries (the risk-tolerance cutoffs
+    -- themselves, distinct from the point values above and independently
+    -- configurable per FI).
+    dscrHighThreshold               : Decimal  -- ^ DSCR at/above this bands High (default 1.5).
+    dscrMediumThreshold             : Decimal  -- ^ DSCR at/above this (below High) bands Medium (default 1.0).
+    debtObligationsLowThreshold     : Decimal  -- ^ Debt/net-inflow ratio at/below this bands Low (default 0.15).
+    debtObligationsModerateThreshold : Decimal -- ^ Ratio at/below this (above Low) bands Moderate (default 0.30).
+    cashReserveStrongMonths         : Decimal  -- ^ Reserve-to-outflow ratio at/above this bands Strong (default 2.0).
+    cashReserveAdequateMonths       : Decimal  -- ^ Ratio at/above this (below Strong) bands Adequate (default 1.0).
+    stressTestHaircutMild           : Decimal  -- ^ Mildest revenue-haircut scenario (default 0.10).
+    stressTestHaircutModerate       : Decimal  -- ^ Default 0.25.
+    stressTestHaircutSevere         : Decimal  -- ^ Harshest revenue-haircut scenario (default 0.40).
+    -- Financial Behaviour engine — point values.
+    revenueConsistent       : Int  -- ^ Variance ratio below revenueConsistentThreshold.
+    revenueModerate         : Int  -- ^ Variance ratio below revenueModerateThreshold, above Consistent.
+    revenueVolatile         : Int  -- ^ Variance ratio at/above revenueModerateThreshold.
+    businessAgeEstablished  : Int  -- ^ Incorporated at/beyond businessAgeEstablishedMonths ago.
+    businessAgeModerate     : Int  -- ^ Incorporated at/beyond businessAgeModerateMonths ago, below Established.
+    businessAgeNew          : Int  -- ^ Incorporated less than businessAgeModerateMonths ago.
+    expenseDisciplineStrong   : Int  -- ^ Burn rate at/below expenseDisciplineStrongThreshold.
+    expenseDisciplineModerate : Int  -- ^ Burn rate at/below expenseDisciplineModerateThreshold, above Strong.
+    expenseDisciplinePoor     : Int  -- ^ Burn rate above expenseDisciplineModerateThreshold.
+    liquidityStrong         : Int  -- ^ Balance-derived buffer at/above liquidityStrongMonths.
+    liquidityAdequate       : Int  -- ^ Buffer at/above liquidityAdequateMonths, below Strong, or unavailable.
+    liquidityWeak           : Int  -- ^ Buffer below liquidityAdequateMonths.
+    -- Financial Behaviour engine — band boundaries.
+    revenueConsistentThreshold        : Decimal  -- ^ Default 0.20.
+    revenueModerateThreshold          : Decimal  -- ^ Default 0.40.
+    businessAgeEstablishedMonths      : Decimal  -- ^ Default 24.0.
+    businessAgeModerateMonths         : Decimal  -- ^ Default 12.0.
+    expenseDisciplineStrongThreshold  : Decimal  -- ^ Default 0.70.
+    expenseDisciplineModerateThreshold : Decimal -- ^ Default 0.90.
+    liquidityStrongMonths             : Decimal  -- ^ Default 2.0.
+    liquidityAdequateMonths           : Decimal  -- ^ Default 1.0.
+    -- Creditworthiness engine — point values.
+    creditScoreExcellent    : Int  -- ^ Bureau score at/above creditScoreExcellentThreshold.
+    creditScoreGood         : Int  -- ^ Bureau score at/above creditScoreGoodThreshold, below Excellent.
+    creditScoreFair         : Int  -- ^ Bureau score at/above creditScoreFairThreshold, below Good.
+    creditScorePoor         : Int  -- ^ Bureau score below creditScoreFairThreshold, or unavailable.
+    -- Creditworthiness engine — band boundaries.
+    creditScoreExcellentThreshold : Int  -- ^ Default 700.
+    creditScoreGoodThreshold      : Int  -- ^ Default 650.
+    creditScoreFairThreshold      : Int  -- ^ Default 550.
+    -- Fraud Detection engine — deduction points. The engine starts at 100 and
+    -- subtracts per triggered rule, floored at 0: these are penalties, not
+    -- band scores. The rule shapes themselves (time windows, "round amount"
+    -- thresholds) are calibration constants in
+    -- underwriting-fraud-detection.ts, not policy-configurable — only these
+    -- point values are.
     fraudStructuringPenalty      : Int
     fraudRoundTrippingPenalty    : Int
     fraudIncomeSpikePenalty      : Int
     fraudVelocityAnomalyPenalty  : Int
-    -- Final Decision engine — combination weights across the four engines above;
-    -- must sum to 100 (enforced in UnderwritingPolicy's ensure clause)
+    -- | Final Decision engine — combination weights across the four engines
+    -- above; must sum to 100 (enforced by UnderwritingPolicy's `ensure`).
     financialBehaviourEngineWeight : Int
     cashflowRiskEngineWeight        : Int
     creditworthinessEngineWeight    : Int
     fraudDetectionEngineWeight      : Int
-    -- Fraud score below this (0-100) forces riskCategory to High regardless of the
-    -- weighted composite — per-institution, since risk tolerance for a rule-based
-    -- (non-ML) fraud signal is a genuine FI-specific judgment call, not a universal
-    -- constant
+    -- | A Fraud Detection score below this (0-100) forces riskCategory to
+    -- High regardless of the weighted composite. Per-institution, since risk
+    -- tolerance for a rule-based (non-ML) fraud signal is a genuine
+    -- FI-specific judgment call, not a universal constant.
     fraudReviewThreshold : Int
   deriving (Eq, Show)
 
--- Borrower's financing request details (Stage 5).
--- Invariants are enforced on the templates that carry this record
--- (FinancingRequest.ensure) — data records cannot have `ensure` clauses.
+-- | The business's financing request details (Stage 5). Invariants are
+-- enforced on the templates that carry this record via `ensure` (data records
+-- cannot themselves have `ensure` clauses).
 data FinancingTerms = FinancingTerms
   with
-    amount        : Decimal  -- requested financing amount in NGN
-    purpose       : Text     -- stated purpose, e.g. "purchase of inventory"
-    tenureMonths  : Int      -- repayment period
+    -- | Requested financing amount, in NGN.
+    amount        : Decimal
+    -- | Stated purpose, e.g. "purchase of inventory".
+    purpose       : Text
+    -- | Repayment period, in months.
+    tenureMonths  : Int
   deriving (Eq, Show)
 
--- Underwriting Agent risk assessment output (Stage 6)
+-- | The Underwriting Agent's risk-assessment output (Stage 6).
 data RiskAssessment = RiskAssessment
   with
-    score              : Int      -- 0–100 composite risk score
+    -- | 0-100 composite risk score.
+    score              : Int
     riskCategory       : RiskLevel
-    recommendedLimit   : Decimal  -- maximum financing amount the agent recommends
-    recommendation     : Text     -- human-readable reasoning summary
-    -- PD/LGD/EAD stay unpopulated by design: no calibrated model or historical
-    -- loan-outcome data exists yet to responsibly produce these Basel-style figures
-    -- (same reasoning as the CDD "purpose & profile coherence" gap in scoring/compliance.ts —
-    -- never fabricate a formula for a factor with no real data source).
-    probabilityOfDefault : Optional Decimal  -- PD, 0.0-1.0
-    lossGivenDefault      : Optional Decimal  -- LGD, 0.0-1.0
-    exposureAtDefault     : Optional Decimal  -- EAD in NGN
-    -- The four sub-scores below are each produced by an independent deterministic
-    -- engine (agents/src/scoring/underwriting-*.ts) and combined by a Final Decision
-    -- engine into the composite `score` above — see that module for the full breakdown.
-    behaviouralScore      : Optional Int      -- 0-100, Financial Behaviour engine (income stability, expense discipline, liquidity, revenue consistency)
-    cashflowRiskScore     : Optional Int      -- 0-100, Cashflow Risk engine (net cashflow, DSCR, cash reserve months, stress-test scenarios)
-    creditworthinessScore : Optional Int      -- 0-100, Creditworthiness engine (bureau credit score)
-    fraudScore            : Optional Int      -- 0-100, Fraud Detection engine (rule-based transaction pattern flags — not ML)
+    -- | Maximum financing amount the assessment recommends.
+    recommendedLimit   : Decimal
+    -- | Human-readable reasoning summary.
+    recommendation     : Text
+    -- | Basel-style Probability of Default, Loss Given Default, and Exposure
+    -- at Default. Left unpopulated by design: no calibrated model or
+    -- historical loan-outcome data exists yet to responsibly produce these
+    -- figures, so they are never fabricated.
+    probabilityOfDefault : Optional Decimal
+    lossGivenDefault      : Optional Decimal
+    exposureAtDefault     : Optional Decimal
+    -- | The four sub-scores below are each produced by an independent
+    -- deterministic engine and combined into the composite `score` above by
+    -- the Final Decision engine (see UnderwritingScoringWeights).
+    behaviouralScore      : Optional Int      -- ^ Financial Behaviour engine: income stability, expense discipline, liquidity, revenue consistency.
+    cashflowRiskScore     : Optional Int      -- ^ Cashflow Risk engine: net cashflow, DSCR, cash-reserve months, stress-test scenarios.
+    creditworthinessScore : Optional Int      -- ^ Creditworthiness engine: bureau credit score.
+    fraudScore            : Optional Int      -- ^ Fraud Detection engine: rule-based transaction-pattern flags — heuristic, not ML.
   deriving (Eq, Show)
 
--- Murabahah financing contract terms agreed by the financial institution (Stage 8).
+-- | Murabahah financing terms agreed by the financial institution (Stage 8).
 -- The disclosed-profit invariant (salePrice == assetCost + profitAmount) is
 -- enforced on MurabahahProposal/MurabahahContract via `ensure`.
 data MurabahahTerms = MurabahahTerms
   with
-    assetCost          : Decimal          -- total acquisition cost disclosed to borrower (AAOIFI §3/3)
-    profitAmount       : Decimal          -- disclosed profit charged to borrower
-    salePrice          : Decimal          -- total amount borrower owes (assetCost + profitAmount)
-    installmentAmount  : Decimal          -- per-period repayment amount
+    -- | Total acquisition cost disclosed to the business (AAOIFI Std No. 8, §3/3).
+    assetCost          : Decimal
+    -- | Disclosed profit charged to the business.
+    profitAmount       : Decimal
+    -- | Total amount the business owes: assetCost + profitAmount.
+    salePrice          : Decimal
+    -- | Per-period repayment amount.
+    installmentAmount  : Decimal
     tenureMonths       : Int
-    profitRate         : Optional Decimal -- annualised profit rate, e.g. 0.15 for 15% (CBN NIFI disclosure)
-    effectiveRate      : Optional Decimal -- APR equivalent (inclusive of ancillary costs)
+    -- | Annualised profit rate, e.g. 0.15 for 15% (CBN NIFI disclosure requirement).
+    profitRate         : Optional Decimal
+    -- | APR equivalent, inclusive of ancillary costs.
+    effectiveRate      : Optional Decimal
   deriving (Eq, Show)
 
--- The specific asset being financed — captured at Wa'd stage and carried
+-- | The specific asset being financed, captured at the Wa'd stage and carried
 -- through to MurabahahContract for full disclosure (AAOIFI Std No. 8, §3/1).
 data AssetDetails = AssetDetails
   with
-    description   : Text     -- e.g. "50 metric tonnes of white flour"
-    supplier      : Text     -- vendor/seller name
-    supplierRef   : Text     -- supplier invoice or purchase order reference
-    estimatedCost : Decimal  -- borrower's quoted purchase price before FI confirms
+    -- | E.g. "50 metric tonnes of white flour".
+    description   : Text
+    -- | Vendor/seller name.
+    supplier      : Text
+    -- | Supplier invoice or purchase-order reference.
+    supplierRef   : Text
+    -- | Business's quoted purchase price, before the FI confirms actual cost.
+    estimatedCost : Decimal
   deriving (Eq, Show)
 
--- M1: Structured supplier identity carried on AssetPurchaseRecord and SupplierPaymentRecord.
--- Enables regulator and audit to verify the FI actually transacted with an identified supplier.
+-- | Structured supplier identity, carried on AssetPurchaseRecord and
+-- SupplierPaymentRecord so a regulator or auditor can verify the FI actually
+-- transacted with an identified supplier.
 data SupplierDetails = SupplierDetails
   with
     supplierName      : Text
     supplierAddress   : Text
-    supplierRegNumber : Optional Text  -- CAC or foreign business registration number
+    -- | CAC or foreign business registration number.
+    supplierRegNumber : Optional Text
     contactEmail      : Optional Text
-    bankAccountRef    : Optional Text  -- FI's internal reference to the payment instruction
+    -- | The FI's internal reference to the payment instruction.
+    bankAccountRef    : Optional Text
   deriving (Eq, Show)
 
--- M9: One asset within a multi-asset or multi-supplier financing transaction.
--- AssetPurchaseRecord carries additionalAssets : [AssetLineItem] alongside the primary asset.
+-- | One asset within a multi-asset or multi-supplier financing transaction.
+-- AssetPurchaseRecord carries a list of these (`additionalAssets`) alongside
+-- its primary asset fields.
 data AssetLineItem = AssetLineItem
   with
     description     : Text
     supplierName    : Text
-    supplierRef     : Text              -- invoice or purchase-order reference
+    -- | Invoice or purchase-order reference.
+    supplierRef     : Text
     estimatedCost   : Decimal
-    actualCost      : Optional Decimal  -- set when the asset is purchased and confirmed
+    -- | Set once the asset is purchased and its actual cost confirmed.
+    actualCost      : Optional Decimal
     supplierDetails : Optional SupplierDetails
   deriving (Eq, Show)
 
--- One row in the contractual repayment schedule.
--- RecordPayment validates installment number and detects lateness against dueDate.
+-- | One row in the contractual repayment schedule. RecordPayment validates
+-- the installment number against this schedule and detects lateness by
+-- comparing against `dueDate`.
 data PaymentScheduleEntry = PaymentScheduleEntry
   with
     installmentNo      : Int
     dueDate            : Date
     dueAmount          : Decimal
-    principalComponent : Optional Decimal  -- Ras al-Mal portion of this installment
-    profitComponent    : Optional Decimal  -- Ribh (profit) portion of this installment
+    -- | Ras al-Mal (principal) portion of this installment.
+    principalComponent : Optional Decimal
+    -- | Ribh (profit) portion of this installment.
+    profitComponent    : Optional Decimal
   deriving (Eq, Show)
 
--- M6: Per-installment payment allocation breakdown.
--- Optional on RepaymentRecord — omit when the FI records a lump-sum with no explicit split.
+-- | Per-installment payment allocation breakdown. Optional on RepaymentRecord
+-- — omitted when the FI records a lump sum with no explicit component split.
 data PaymentAllocation = PaymentAllocation
   with
-    principalComponent : Decimal  -- cost (Ras al-Mal) portion recovered this installment
-    profitComponent    : Decimal  -- profit (Ribh) portion recovered this installment
-    feesCharged        : Decimal  -- any permissible service or admin fee
-    charityProvision   : Decimal  -- amount earmarked for Sadaqah (late-payment obligation)
+    -- | Cost (Ras al-Mal) portion recovered by this installment.
+    principalComponent : Decimal
+    -- | Profit (Ribh) portion recovered by this installment.
+    profitComponent    : Decimal
+    -- | Any permissible service or admin fee.
+    feesCharged        : Decimal
+    -- | Amount earmarked for Sadaqah (the late-payment charity obligation).
+    charityProvision   : Decimal
   deriving (Eq, Show)
 
--- M10: Bank account or wallet used to make or receive a repayment.
+-- | A bank account or wallet used to make or receive a repayment.
 data SettlementAccount = SettlementAccount
   with
-    bankName       : Text           -- e.g. "Access Bank", "OPay"
-    accountRef     : Text           -- NUBAN, IBAN, or wallet address
-    accountType    : Text           -- "NUBAN", "WALLET", "NOSTRO"
-    currency       : Text           -- "NGN", "USD"
-    beneficiaryRef : Optional Text  -- FI's internal beneficiary identifier
+    -- | E.g. "Access Bank", "OPay".
+    bankName       : Text
+    -- | NUBAN, IBAN, or wallet address.
+    accountRef     : Text
+    -- | "NUBAN", "WALLET", "NOSTRO".
+    accountType    : Text
+    -- | "NGN", "USD".
+    currency       : Text
+    -- | The FI's internal beneficiary identifier.
+    beneficiaryRef : Optional Text
   deriving (Eq, Show)
 
--- Type of financing provider — determines onboarding scrutiny and regulatory context.
--- Used on FinancingProviderOnboarding and ApprovedProvider.
+-- | Type of financing provider — determines onboarding scrutiny and
+-- regulatory context. Used on FinancingProviderOnboarding and
+-- ApprovedProvider.
 data ProviderType
-  = CBNLicensedNIFI        -- CBN-licensed Islamic bank or Non-Interest Finance Company
-  | SECFundManager         -- SEC-regulated fund manager
-  | PenComPensionManager   -- PenCom-regulated pension fund
-  | CooperativeSociety     -- CAC / state cooperative registry
-  | InvestmentClub         -- Lightly regulated private group
-  | WaqfFund               -- Islamic endowment (charitable or investment Waqf Istithmari)
-  | ZakatFund              -- Zakat collection and distribution body
-  | Philanthropy           -- Foundation, NGO, or family office
+  = CBNLicensedNIFI        -- ^ CBN-licensed Islamic bank or Non-Interest Finance Company.
+  | SECFundManager         -- ^ SEC-regulated fund manager.
+  | PenComPensionManager   -- ^ PenCom-regulated pension fund.
+  | CooperativeSociety     -- ^ CAC / state cooperative registry.
+  | InvestmentClub         -- ^ Lightly regulated private group.
+  | WaqfFund               -- ^ Islamic endowment (charitable or investment Waqf Istithmari).
+  | ZakatFund              -- ^ Zakat collection and distribution body.
+  | Philanthropy           -- ^ Foundation, NGO, or family office.
   deriving (Eq, Show)
 
--- Regulatory body that licenses or registers the financing provider.
--- None for providers with no external regulator (investment clubs, family Waqf).
+-- | Regulatory body that licenses or registers the financing provider. `None`
+-- (represented by `Unregulated`/`SelfGoverned`) for providers with no
+-- external regulator, e.g. investment clubs or family Waqf.
 data RegulatoryBody
   = CBN
   | SEC
@@ -449,51 +724,54 @@ data RegulatoryBody
   | Unregulated
   deriving (Eq, Show)
 
--- Financing instruments a provider is permitted to offer.
--- Vetify approves a subset at onboarding; the ledger gates ApproveFunding
--- to this approved set. Kept minimal for MVP — equity/partnership structures deferred.
+-- | Financing instruments a provider is permitted to offer. Vetify approves a
+-- subset per provider at onboarding; the ledger gates ApproveFunding to this
+-- approved set. Kept minimal for the current product scope — equity and
+-- partnership structures are out of scope.
 data FinancingInstrument
-  = Murabahah   -- cost-plus sale; profit-bearing; the core MVP product
-  | Ijarah      -- lease-based financing; asset use without ownership transfer
-  | QardHasan   -- benevolent interest-free loan; for philanthropies and Zakat funds
+  = Murabahah   -- ^ Cost-plus sale; profit-bearing; the core product.
+  | Ijarah      -- ^ Lease-based financing; asset use without ownership transfer.
+  | QardHasan   -- ^ Benevolent interest-free loan; for philanthropies and Zakat funds.
   deriving (Eq, Show)
 
+-- | Lifecycle of a collateral pledge (RahnAgreement).
 data CollateralStatus
   = CollateralActive
   | CollateralReleased
   | CollateralEnforced
   deriving (Eq, Show)
 
+-- | Lifecycle of a guarantee (GuaranteeAgreement).
 data GuaranteeStatus
   = GuaranteeActive
   | GuaranteeReleased
   | GuaranteeEnforced
   deriving (Eq, Show)
 
--- F-1: Status of a Hamish al-Jiddiyyah (security deposit) held by the FI.
+-- | Status of a Hamish al-Jiddiyyah (security deposit) held by the FI.
 data HamishStatus
-  = HamishHeld       -- deposit held by FI; Wa'd not yet executed or withdrawn
-  | HamishReturned   -- FI returned deposit after Wa'd executed and asset delivered
-  | HamishForfeited  -- FI applied deposit to actual losses after borrower withdrew Wa'd
+  = HamishHeld       -- ^ Deposit held by the FI; Wa'd not yet executed or withdrawn.
+  | HamishReturned   -- ^ FI returned the deposit after the Wa'd was executed and the asset delivered.
+  | HamishForfeited  -- ^ FI applied the deposit to actual losses after the business withdrew its Wa'd.
   deriving (Eq, Show)
 
--- F-2: Lifecycle status of a FI Purchase Order to the supplier.
+-- | Lifecycle of an FI purchase order sent to a supplier.
 data POStatus
-  = POIssued              -- PO sent to supplier; awaiting confirmation
-  | POConfirmed           -- supplier confirmed the order
-  | POPartiallyFulfilled  -- some items delivered; order still open
-  | POFulfilled           -- all items delivered; order complete
-  | POCancelled           -- PO cancelled (e.g. supplier unavailable, Wa'd withdrawn)
+  = POIssued              -- ^ PO sent to supplier; awaiting confirmation.
+  | POConfirmed           -- ^ Supplier confirmed the order.
+  | POPartiallyFulfilled  -- ^ Some items delivered; order still open.
+  | POFulfilled           -- ^ All items delivered; order complete.
+  | POCancelled           -- ^ PO cancelled, e.g. supplier unavailable or Wa'd withdrawn.
   deriving (Eq, Show)
 
--- M12: Severity of a Shariah non-compliance incident.
+-- | Severity of a recorded Shariah non-compliance incident.
 data ShariahExceptionSeverity
   = MinorException
   | MajorException
   | CriticalException
   deriving (Eq, Show)
 
--- R6: Category of an AI continuous-monitoring alert raised by the Monitoring Agent.
+-- | Category of a continuous-monitoring alert raised by the Monitoring Agent.
 data MonitoringAlertType
   = DelinquencyRisk
   | CollateralDeterioration
@@ -501,77 +779,107 @@ data MonitoringAlertType
   | FraudSignal
   | SupplierRisk
   | EarlyWarningSignal
-  | MandateCancellation   -- H-1: borrower's Direct Debit mandate cancelled without FI consent
-  | GSMExhausted          -- H-1: GSM sweeps exhausted; outstanding balance remains; escalate to Rahn
+  -- | Business's Direct Debit mandate was cancelled without FI consent.
+  | MandateCancellation
+  -- | GSM sweeps exhausted; outstanding balance remains — escalate to Rahn.
+  | GSMExhausted
   deriving (Eq, Show)
 
--- H-1: Status of a mono.co Direct Debit mandate for automated installment collection.
+-- | Status of a mono.co Direct Debit mandate used for automated installment
+-- collection.
 data DirectDebitStatus
   = MandateActive
   | MandateSuspended
   | MandateCancelled
   deriving (Eq, Show)
 
--- H-1: Status of a CBN/NIBSS Global Standing Mandate invocation.
+-- | Status of a CBN/NIBSS Global Standing Mandate (GSM) invocation.
 data GSMStatus
   = GSMActive
   | GSMSettled
   | GSMCancelled
   deriving (Eq, Show)
 
--- Immutable reference to a document submitted off-ledger.
--- The ledger carries the hash for tamper-evidence; the file lives in object storage.
--- docType uses CAC-standard labels: "CAC_CERTIFICATE", "MEMORANDUM_OF_ASSOCIATION",
--- "TAX_CLEARANCE", "UTILITY_BILL", "PASSPORT", "NIN_SLIP", etc.
+-- | Immutable reference to a document submitted off-ledger. The ledger stores
+-- only the content hash for tamper-evidence; the file itself lives in object
+-- storage. `docType` uses CAC-standard labels: "CAC_CERTIFICATE",
+-- "MEMORANDUM_OF_ASSOCIATION", "TAX_CLEARANCE", "UTILITY_BILL", "PASSPORT",
+-- "NIN_SLIP", etc.
 data DocumentRef = DocumentRef
   with
-    docType            : Text           -- document category label
-    contentHash        : Text           -- lowercase hex SHA-256 of the file
-    storageRef         : Text           -- e.g. "s3://vetify-docs/<cacRegNumber>/cac-cert.pdf"
-    mimeType           : Optional Text  -- Gap 7: e.g. "application/pdf"; None if not captured
-    malwareScanStatus  : Optional Text  -- Gap 7: "CLEAN", "FLAGGED", "PENDING"; None = not yet scanned
-    fileSize           : Optional Int   -- Gap 5: file size in bytes; None if not captured at upload
-    checksumAlgorithm  : Optional Text  -- Gap 5: e.g. "sha256"; makes contentHash interpretation explicit
-    malwareScanAt      : Optional Time  -- Gap 5: UTC timestamp of the last malware scan result
-    digitalSignature   : Optional Text  -- M14: hex-encoded signature over contentHash
-    signatureAlgorithm : Optional Text  -- M14: e.g. "RSA-SHA256", "ECDSA-P256"
-    signatoryRef       : Optional Text  -- M14: officer name or party identifier who signed
-    signedAt           : Optional Time  -- M14: UTC time the signature was applied
+    -- | Document category label.
+    docType            : Text
+    -- | Lowercase hex SHA-256 of the file.
+    contentHash        : Text
+    -- | E.g. "s3://vetify-docs/<cacRegNumber>/cac-cert.pdf".
+    storageRef         : Text
+    -- | E.g. "application/pdf"; `None` if not captured.
+    mimeType           : Optional Text
+    -- | "CLEAN", "FLAGGED", "PENDING"; `None` = not yet scanned.
+    malwareScanStatus  : Optional Text
+    -- | File size in bytes; `None` if not captured at upload.
+    fileSize           : Optional Int
+    -- | E.g. "sha256"; makes the `contentHash` interpretation explicit.
+    checksumAlgorithm  : Optional Text
+    -- | UTC timestamp of the last malware-scan result.
+    malwareScanAt      : Optional Time
+    -- | Hex-encoded signature over `contentHash`.
+    digitalSignature   : Optional Text
+    -- | E.g. "RSA-SHA256", "ECDSA-P256".
+    signatureAlgorithm : Optional Text
+    -- | Officer name or party identifier who signed.
+    signatoryRef       : Optional Text
+    -- | UTC time the signature was applied.
+    signedAt           : Optional Time
   deriving (Eq, Show)
 
--- Provenance record for every AI auto-decision (autoDecided = True).
--- None on the human-review path — humans do not emit machine-readable provenance.
--- Stored on VerificationResult to enable full audit replay and model governance.
+-- | Provenance record for every AI auto-decision (`autoDecided = True`).
+-- `None` on the human-review path, since a human doesn't emit machine-readable
+-- provenance. Stored on VerificationResult (and its siblings) to enable full
+-- audit replay and model governance.
 data AIDecisionMetadata = AIDecisionMetadata
   with
-    agentName    : Text            -- registered agent name, e.g. "vetify-verification"
-    modelVersion : Text            -- deployed version string, e.g. "vetify-verification-v1.0"
-    executionId  : Text            -- observability trace / LangSmith run ID
-    reasonCode   : Text            -- machine-readable decision code, e.g. "LOW_RISK_AUTO_APPROVE"
-    confidence   : Decimal         -- composite confidence, 0.0–1.0
-    explanation  : Optional Text   -- Gap 3: human-readable explanation of the decision rationale
-    inputFeatures : [Text]         -- AI governance: named input features/signals the decision was based on
+    -- | Registered agent name, e.g. "vetify-verification".
+    agentName    : Text
+    -- | Deployed version string, e.g. "vetify-verification-v1.0".
+    modelVersion : Text
+    -- | Observability trace / LangSmith run ID.
+    executionId  : Text
+    -- | Machine-readable decision code, e.g. "LOW_RISK_AUTO_APPROVE".
+    reasonCode   : Text
+    -- | Composite confidence, 0.0-1.0.
+    confidence   : Decimal
+    -- | Human-readable explanation of the decision rationale.
+    explanation  : Optional Text
+    -- | Named input features/signals the decision was based on, for AI
+    -- governance review.
+    inputFeatures : [Text]
   deriving (Eq, Show)
 
--- F16: Immutable snapshot of the UnderwritingPolicy in effect when BeginUnderwriting
--- was exercised. Stored on UnderwritingResult so the exact thresholds governing the
--- decision can be reconstructed without relying on the current (possibly updated) policy.
+-- | Immutable snapshot of the UnderwritingPolicy in effect when
+-- BeginUnderwriting was exercised. Stored on UnderwritingResult so the exact
+-- thresholds governing a past decision can be reconstructed even if the live
+-- policy has since changed.
 data UnderwritingPolicySnapshot = UnderwritingPolicySnapshot
   with
     policyVersion     : Text
     autoApproveMin    : Int
     autoRejectMax     : Int
     minDscrRatio      : Optional Decimal
+    minLoanAmount     : Optional Decimal
     maxLoanAmount     : Optional Decimal
+    indicativeProfitMarginPct : Optional Decimal
     requestSlaHours   : Int
     offerValidityDays : Int
     effectiveFrom     : Time
-    capturedAt        : Time  -- ledger time at which BeginUnderwriting was exercised
-    scoringWeights    : UnderwritingScoringWeights  -- point values in effect at BeginUnderwriting
+    -- | Ledger time at which BeginUnderwriting was exercised.
+    capturedAt        : Time
+    -- | Per-check point values in effect at BeginUnderwriting.
+    scoringWeights    : UnderwritingScoringWeights
   deriving (Eq, Show)
 
--- F22: Digital signature evidence for a funding approval decision.
--- signedAt is Optional because static test fixtures cannot call getTime.
+-- | Digital-signature evidence for a funding approval decision. `signedAt` is
+-- Optional because static test fixtures cannot call `getTime`.
 data ApprovalSignature = ApprovalSignature
   with
     digitalSignature : Text
@@ -580,15 +888,23 @@ data ApprovalSignature = ApprovalSignature
     signedByName     : Text
   deriving (Eq, Show)
 
--- R5: Portfolio-level risk metrics snapshot produced by the Reporting Agent.
+-- | Portfolio-level risk metrics snapshot produced by the Reporting Agent.
 data PortfolioRiskMetrics = PortfolioRiskMetrics
   with
-    probabilityOfDefault : Decimal  -- PD: estimated default probability (0.0–1.0)
-    lossGivenDefault     : Decimal  -- LGD: fraction lost on default (0.0–1.0)
-    expectedLoss         : Decimal  -- EL = PD × LGD × EAD, in NGN
-    exposureAtDefault    : Decimal  -- EAD: total outstanding balance across portfolio (NGN)
-    concentrationRisk    : Decimal  -- Herfindahl-style index (0.0–1.0)
-    sectorConcentration  : Text     -- dominant sector driving concentration risk
-    delinquencyRate      : Decimal  -- fraction of active contracts with overdue installments (0.0–1.0)
-    activeContractCount  : Int      -- number of live MurabahahContracts at report date
+    -- | Estimated default probability (PD), 0.0-1.0.
+    probabilityOfDefault : Decimal
+    -- | Fraction lost on default (LGD), 0.0-1.0.
+    lossGivenDefault     : Decimal
+    -- | Expected loss = PD x LGD x EAD, in NGN.
+    expectedLoss         : Decimal
+    -- | Total outstanding balance across the portfolio (EAD), in NGN.
+    exposureAtDefault    : Decimal
+    -- | Herfindahl-style concentration index, 0.0-1.0.
+    concentrationRisk    : Decimal
+    -- | Dominant sector driving concentration risk.
+    sectorConcentration  : Text
+    -- | Fraction of active contracts with overdue installments, 0.0-1.0.
+    delinquencyRate      : Decimal
+    -- | Number of live MurabahahContracts at the report date.
+    activeContractCount  : Int
   deriving (Eq, Show)

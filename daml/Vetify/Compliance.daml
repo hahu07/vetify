@@ -1,46 +1,65 @@
--- | Stage 3–4: Compliance review (Shariah + AML/KYC/CDD) and the resulting
---   ApprovedBorrower. Depends on Vetify.Financing because RequestFinancing
---   creates a FinancingRequest.
+-- | Stage 3-4: compliance review (Shariah pre-check + AML/KYC/CDD) and the
+-- resulting ApprovedBusiness. Depends on Vetify.Financing because
+-- ApprovedBusiness's RequestFinancing choice creates a FinancingRequest.
 module Vetify.Compliance where
 
 import DA.Time (hours, addRelTime)
 import Vetify.Types
-import Vetify.Governance (requireActivePolicyApprover)
+import Vetify.Governance (PolicyApprover, AuthorizedAdvisor, requireActivePolicyApprover, requireActiveAdvisor)
 import Vetify.Financing (FinancingRequest(..))
 
--- Platform-wide compliance policy — Model C risk-gating thresholds, escalation
--- SLA, and Shariah standard version. Signed by vetify; singleton per platform
--- (key = vetify). Used in StartReview (to record the effective policy version)
--- and in FlagComplianceForManualReview (to validate the agent's score band).
--- ApproveCompliance/RejectCompliance are controlled by verifier, which
--- cannot fetch this vetify-signed contract; the policy version is instead read
--- by vetify in StartReview and stored on ComplianceReview for downstream use.
+-- | Platform-wide compliance policy: Model C risk-gating thresholds,
+-- escalation SLA, and Shariah standard version. Signed by vetify; intended
+-- as a singleton per platform, though SDK 3.4.11 / Daml-LF 2.1/2.2 has no
+-- contract keys to enforce that — see the template's own comment below.
+-- Read in `StartReview` (to record the effective policy version and
+-- snapshot) and in `FlagComplianceForManualReview` (to validate the agent's
+-- score band), both via a caller-supplied ContractId.
+-- ApproveCompliance/RejectCompliance are controlled by `verifier`, which
+-- cannot fetch this vetify-signed contract directly; the policy version is
+-- instead read by vetify in StartReview and stored on ComplianceReview for
+-- downstream use.
 --
--- Gap 11: effectiveFrom / effectiveTo support historical policy reconstruction
--- (note: not enforced as a staging gate — lookupByKey always uses whichever
--- CompliancePolicy is currently the active singleton, regardless of these
--- timestamps; they are recorded for audit only).
+-- `effectiveFrom`/`effectiveTo` support historical policy reconstruction but
+-- are not enforced as a staging gate: whichever CompliancePolicy ContractId
+-- the caller supplies is used as-is, regardless of these timestamps — they
+-- are recorded for audit only.
 --
 -- Maker-checker: do not update this by creating a new CompliancePolicy
--- directly — go through PendingCompliancePolicy.ApprovePolicyChange instead.
--- See PendingCompliancePolicy's own comment for the full rationale and the
--- known limitation (Daml cannot force two distinct individuals under one
--- Canton party to jointly authorize a raw `create`).
+-- directly — go through PendingCompliancePolicy.ApprovePolicyChange
+-- instead. See PendingCompliancePolicy's own comment for the full rationale
+-- and its known limitation (Daml cannot force two distinct individuals
+-- under one Canton party to jointly authorize a raw `create`).
 template CompliancePolicy
   with
     vetify               : Party
-    autoApproveMin       : Int    -- score >= this permits agent auto-approval
-    autoRejectMax        : Int    -- score < this permits agent auto-rejection
-    escalationSlaHours   : Int    -- SLA hours before manual review escalation
-    shariahPolicyVersion : Text   -- AAOIFI standard reference, e.g. "AAOIFI-2023-Std8"
-    policyVersion        : Text   -- platform policy version, e.g. "2026-v1"
-    effectiveFrom        : Time   -- Gap 11: when this policy version takes effect
-    effectiveTo          : Optional Time  -- Gap 11: when superseded (None = currently active)
-    scoringWeights        : ComplianceScoringWeights  -- off-ledger Stage 3 scoring engine point values
+    -- | Score at/above which the agent may auto-approve.
+    autoApproveMin       : Int
+    -- | Score below which the agent may auto-reject.
+    autoRejectMax        : Int
+    -- | SLA hours before manual-review escalation.
+    escalationSlaHours   : Int
+    -- | AAOIFI standard reference, e.g. "AAOIFI-2023-Std8".
+    shariahPolicyVersion : Text
+    -- | Platform policy version, e.g. "2026-v1".
+    policyVersion        : Text
+    -- | When this policy version takes effect.
+    effectiveFrom        : Time
+    -- | When superseded; `None` = currently active.
+    effectiveTo          : Optional Time
+    -- | Off-ledger Stage 3 scoring engine point values.
+    scoringWeights        : ComplianceScoringWeights
   where
     signatory vetify
-    key vetify : Party
-    maintainer key
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): callers can no longer `lookupByKey @CompliancePolicy
+    -- vetify` — they must query PQS for the active row and pass its
+    -- ContractId into any choice that reads this policy
+    -- (ComplianceReview.StartReview/EscalateOverdue/
+    -- FlagComplianceForManualReview, PendingCompliancePolicy.
+    -- ApprovePolicyChange). "Only one policy is active" is now an
+    -- application-layer convention, not a ledger-enforced invariant — same
+    -- caveat as VerificationPolicy's.
     ensure autoApproveMin > autoRejectMax
         && autoApproveMin >= 0 && autoApproveMin <= 100
         && autoRejectMax >= 0 && autoRejectMax <= 100
@@ -48,7 +67,8 @@ template CompliancePolicy
         && shariahPolicyVersion /= ""
         && policyVersion /= ""
         && (case effectiveTo of Some et -> effectiveFrom < et; None -> True)
-        -- Sanity bounds on the scoring weights, same rationale as VerificationPolicy.
+        -- Sanity bounds on the scoring weights, same rationale as
+        -- VerificationPolicy.
         && scoringWeights.amlBothClear              >= 0
         && scoringWeights.amlOneReviewRequired       >= 0
         && scoringWeights.kybActiveFullMatch         >= 0
@@ -60,19 +80,20 @@ template CompliancePolicy
         && scoringWeights.creditDelinquentOrDefault  >= 0
         && (scoringWeights.amlBothClear + scoringWeights.kybActiveFullMatch + scoringWeights.creditClean) <= 80
 
--- Maker-checker gate for CompliancePolicy changes — same rationale as
--- PendingVerificationPolicy (Onboarding.daml): vetify proposes a new policy
--- version with a reason and the proposer's name; a DIFFERENT named individual
--- must exercise ApprovePolicyChange before it replaces the active
--- CompliancePolicy. Same known limitation applies: this is an
+-- | Maker-checker gate for CompliancePolicy changes — same rationale as
+-- PendingVerificationPolicy (Vetify.Onboarding): vetify proposes a new
+-- policy version with a reason and the proposer's name; a different named
+-- individual must exercise ApprovePolicyChange before it replaces the
+-- active CompliancePolicy. Same known limitation applies: this is an
 -- application-layer convention (never expose a raw create-CompliancePolicy
--- capability), not something Daml can force at the template level the way a
--- multi-controller choice forces joint authorization for an exercise.
+-- capability), not something Daml can force at the template level the way
+-- a multi-controller choice forces joint authorization for an exercise.
 template PendingCompliancePolicy
   with
     vetify               : Party
-    riskCommittee        : Party  -- Layer 2: a distinct Canton party from vetify, held by the
-                                   -- Risk & Credit Governance Committee (docs/risk-governance-charter.md)
+    -- | A distinct Canton party from vetify, held by the Risk & Credit
+    -- Governance Committee (docs/risk-governance-charter.md).
+    riskCommittee        : Party
     autoApproveMin       : Int
     autoRejectMax        : Int
     escalationSlaHours   : Int
@@ -81,16 +102,18 @@ template PendingCompliancePolicy
     effectiveFrom        : Time
     effectiveTo          : Optional Time
     scoringWeights       : ComplianceScoringWeights
-    proposedBy           : Text  -- name of the individual proposing this change
-    reason               : Text  -- why this change is being made
+    -- | Name of the individual proposing this change.
+    proposedBy           : Text
+    -- | Why this change is being made.
+    reason               : Text
     proposedAt           : Time
-    riskCommitteeEndorsedBy : Optional Text  -- Layer 2: set by EndorseByRiskCommittee
+    -- | Set by EndorseByRiskCommittee.
+    riskCommitteeEndorsedBy : Optional Text
     riskCommitteeEndorsedAt : Optional Time
   where
     signatory vetify
     observer riskCommittee
-    key vetify : Party
-    maintainer key
+    -- No contract key — see CompliancePolicy's comment above.
     ensure autoApproveMin > autoRejectMax
         && autoApproveMin >= 0 && autoApproveMin <= 100
         && autoRejectMax >= 0 && autoRejectMax <= 100
@@ -111,10 +134,12 @@ template PendingCompliancePolicy
         && scoringWeights.creditDelinquentOrDefault  >= 0
         && (scoringWeights.amlBothClear + scoringWeights.kybActiveFullMatch + scoringWeights.creditClean) <= 80
 
-    -- Layer 2 of the Policy-Approval Security Roadmap — see the identical
-    -- reasoning on PendingVerificationPolicy.EndorseByRiskCommittee for why
-    -- this is a separate riskCommittee-only choice rather than adding
-    -- riskCommittee as a second controller on ApprovePolicyChange directly.
+    -- | A genuinely distinct Canton party (riskCommittee) must independently
+    -- sign its own transaction endorsing this proposal before vetify may
+    -- finalize it — see the identical reasoning on
+    -- PendingVerificationPolicy.EndorseByRiskCommittee for why this is a
+    -- separate riskCommittee-only choice rather than adding riskCommittee as
+    -- a second controller on ApprovePolicyChange directly.
     choice EndorseByRiskCommittee : ContractId PendingCompliancePolicy
       with
         endorsedBy : Text
@@ -127,25 +152,31 @@ template PendingCompliancePolicy
           riskCommitteeEndorsedBy = Some endorsedBy
           riskCommitteeEndorsedAt = Some t
 
-    -- Activates this proposal: archives whichever CompliancePolicy is
+    -- | Activates this proposal: archives whichever CompliancePolicy is
     -- currently active (if any) and creates the new one in its place.
+    --
+    -- `currentPolicyCid`/`approverCid` are caller-supplied ContractIds — see
+    -- Onboarding.PendingVerificationPolicy.ApprovePolicyChange's identical
+    -- comment for why (no contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2) and
+    -- the same accepted residual risk (a concurrent-approval race, mitigated
+    -- by the registered-approver + Risk-Committee-endorsement friction).
     choice ApprovePolicyChange : ContractId CompliancePolicy
       with
-        approvedBy : Text
+        approvedBy       : Text
+        approverCid      : ContractId PolicyApprover
+        currentPolicyCid : Optional (ContractId CompliancePolicy)
       controller vetify
       do
         assertMsg "approvedBy must not be empty" (approvedBy /= "")
         assertMsg "Approver must differ from proposer (maker-checker)" (approvedBy /= proposedBy)
-        -- Layer 1 of the Policy-Approval Security Roadmap: approvedBy must
-        -- name a real, currently-active registered PolicyApprover, not just
-        -- any Text that differs from proposedBy.
-        requireActivePolicyApprover vetify approvedBy
-        -- Layer 2: the Risk Committee's own separately-signed endorsement
+        -- approvedBy must name a real, currently-active registered
+        -- PolicyApprover, not just any Text that differs from proposedBy.
+        requireActivePolicyApprover vetify approvedBy approverCid
+        -- The Risk Committee's own separately-signed endorsement
         -- transaction must have already occurred (see EndorseByRiskCommittee).
-        assertMsg "Layer 2: Risk Committee must endorse this change before vetify can approve it"
+        assertMsg "Risk Committee must endorse this change before vetify can approve it"
           (riskCommitteeEndorsedBy /= None)
-        mCurrentCid <- lookupByKey @CompliancePolicy vetify
-        case mCurrentCid of
+        case currentPolicyCid of
           Some cid -> archive cid
           None -> pure ()
         create CompliancePolicy with
@@ -159,7 +190,7 @@ template PendingCompliancePolicy
           effectiveTo
           scoringWeights
 
-    -- Withdraws/declines this proposal without it ever taking effect.
+    -- | Withdraws/declines this proposal without it ever taking effect.
     -- Self-rejection is fine, unlike self-approval — see
     -- PendingVerificationPolicy.RejectPolicyChange for the same reasoning.
     choice RejectPolicyChange : ()
@@ -172,21 +203,25 @@ template PendingCompliancePolicy
         assertMsg "rejectionReason must not be empty" (rejectionReason /= "")
         pure ()
 
--- Gap 15: Authorization registry — maps a verifier to their active role.
--- vetify creates one per officer; ApproveCompliance/RejectCompliance gate on it.
+-- | Authorization registry mapping a verifier to their active role. vetify
+-- creates one per officer; ApproveCompliance/RejectCompliance gate on it.
 -- Deauthorize archives the record, immediately removing approval rights.
 template AuthorizedReviewer
   with
     vetify       : Party
     verifier     : Party
-    authorizedBy : Text   -- name of the vetify employee who granted authorization
+    -- | Name of the vetify employee who granted authorization.
+    authorizedBy : Text
     authorizedAt : Time
-    role         : Text   -- e.g. "Senior Compliance Officer"
+    -- | E.g. "Senior Compliance Officer".
+    role         : Text
   where
     signatory vetify
     observer verifier
-    key (vetify, verifier) : (Party, Party)
-    maintainer key._1
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ApproveCompliance/RejectCompliance now take an
+    -- explicit `reviewerAuthCid : ContractId AuthorizedReviewer` argument
+    -- instead of `lookupByKey @AuthorizedReviewer (vetify, verifier)`.
     ensure authorizedBy /= "" && role /= ""
 
     choice Deauthorize : ()
@@ -196,54 +231,78 @@ template AuthorizedReviewer
         assertMsg "Reason must not be empty" (reason /= "")
         return ()
 
--- Stage 3: Compliance review — AML screening, KYC validation, CDD.
--- Created by vetify after a VerificationResult with outcome = Approved.
+-- | Stage 3 compliance review: AML screening, KYC validation, CDD. Created
+-- by vetify after a VerificationResult with `outcome = Approved`.
 template ComplianceReview
   with
-    borrower                : Party
+    business                : Party
     vetify                  : Party
     verifier                : Party
     businessName            : Text
     cacRegNumber            : Text
-    businessSector          : Text  -- carried over from BusinessOnboarding.business; used by the
-                                     -- Shariah Agent for AAOIFI sector screening (previously
-                                     -- unavailable here — the Shariah classifier had to fall back
-                                     -- to businessName as a weak proxy)
-    businessActivity        : Text  -- carried over from BusinessOnboarding.business; same rationale
-    incorporationDate       : Date  -- carried over from BusinessOnboarding.business; used for
-                                     -- business-age scoring in scoreCompliance
-    verificationRef         : Text           -- link to the triggering VerificationResult
-    complianceRef           : Text           -- unique review reference, e.g. "COM-2026-000001"
+    -- | Carried over from BusinessOnboarding.profile; used by the Shariah
+    -- Agent for AAOIFI sector screening.
+    businessSector          : Text
+    -- | Carried over from BusinessOnboarding.profile; same rationale as
+    -- businessSector.
+    businessActivity        : Text
+    -- | Carried over from BusinessOnboarding.profile; used for business-age
+    -- scoring in scoreCompliance.
+    incorporationDate       : Date
+    -- | Link to the triggering VerificationResult.
+    verificationRef         : Text
+    -- | Unique review reference, e.g. "COM-2026-000001".
+    complianceRef           : Text
     status                  : ReviewStatus
     checks                  : Optional ComplianceCheck
     agentScore              : Optional Int
     agentRisk               : Optional RiskLevel
-    agentNote               : Optional Text  -- agent's rationale at flagging time
-    agentVersion            : Optional Text  -- agent model version that flagged
-    createdAt               : Optional Time  -- when the review was created
-    reviewStartedAt         : Optional Time  -- when StartReview was exercised
-    compliancePolicyVersion : Optional Text  -- policy version at review start (backward compat)
-    policySnapshot          : Optional CompliancePolicySnapshot  -- Gap 16: full policy snapshot
-    createdBy               : Optional Text  -- Gap 14: name of person/process that opened this review
-    shariahVerdict          : Optional ShariahAssessment  -- Shariah pre-check verdict, recorded by
-                                                           -- the decoupled Shariah Agent before the
-                                                           -- Verifier's compliance-stage entry runs
+    -- | Agent's rationale at flagging time.
+    agentNote               : Optional Text
+    -- | Agent model version that flagged.
+    agentVersion            : Optional Text
+    -- | When the review was created.
+    createdAt               : Optional Time
+    -- | When StartReview was exercised.
+    reviewStartedAt         : Optional Time
+    -- | Policy version at review start (kept for backward compatibility
+    -- with records predating the full policySnapshot below).
+    compliancePolicyVersion : Optional Text
+    -- | Full CompliancePolicy snapshot captured at StartReview.
+    policySnapshot          : Optional CompliancePolicySnapshot
+    -- | Name of the person/process that opened this review.
+    createdBy               : Optional Text
+    -- | Shariah pre-check verdict, recorded by the decoupled Shariah Agent
+    -- before the Verifier Agent's compliance-stage entry runs.
+    shariahVerdict          : Optional ShariahAssessment
+    -- | The genuinely independent Shari'a Supervisory Board party (AAOIFI
+    -- governance standards require independence from management — the same
+    -- trust model as riskCommittee, not "vetify's own team" the way
+    -- verifier/assessor/sentinel are framed). Makes the real
+    -- RecordShariahPreCheck call and can SupersedeShariahVerdict.
+    advisor            : Party
   where
     signatory vetify
-    observer verifier, borrower
-    key (vetify, cacRegNumber) : (Party, Text)
-    maintainer key._1
+    observer verifier, business, advisor
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of (vetify, cacRegNumber)
+    -- is no longer guaranteed.
     ensure verificationRef /= "" && complianceRef /= "" &&
            businessSector /= "" && businessActivity /= ""
 
-    -- Vetify opens the review; captures start timestamp and full policy snapshot.
+    -- | vetify opens the review: captures the start timestamp and a full
+    -- CompliancePolicy snapshot for later reconstruction.
     choice StartReview : ContractId ComplianceReview
+      with
+        -- | The active CompliancePolicy's ContractId, if one exists —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        policyCid : Optional (ContractId CompliancePolicy)
       controller vetify
       do
         assertMsg "Can only start a Pending review" (status == Pending)
         t <- getTime
-        mPolicyCid <- lookupByKey @CompliancePolicy vetify
-        (policyVersionSnap, snap) <- case mPolicyCid of
+        (policyVersionSnap, snap) <- case policyCid of
           Some cid -> do
             policy <- fetch cid
             return (Some policy.policyVersion, Some CompliancePolicySnapshot with
@@ -262,21 +321,68 @@ template ComplianceReview
           compliancePolicyVersion = policyVersionSnap
           policySnapshot          = snap
 
-    -- Records the decoupled Shariah Agent's verdict before the review is picked
-    -- up for AML/KYB/CDD. Does not transition status — StartReview remains the
-    -- first thing the compliance stage itself does, unchanged. Controller vetify
-    -- is trivially authorized: ComplianceReview's own signatory is already vetify.
+    -- | Records the decoupled Shariah Agent's verdict before the review is
+    -- picked up for AML/KYB/CDD. Does not transition status — StartReview
+    -- remains the first thing the compliance stage itself does, unchanged.
+    --
+    -- Dual controller `advisor, vetify`: advisor makes the real call (the
+    -- deterministic keyword table's output, or a human advisor's judgment
+    -- on a table miss); vetify co-signs so `create this` is authorized
+    -- (ComplianceReview's own signatory is vetify alone — advisor's
+    -- controllership alone wouldn't cover that). Gated by
+    -- `requireActiveAdvisor` (fails closed if unregistered/deactivated).
     choice RecordShariahPreCheck : ContractId ComplianceReview
       with
-        verdict : ShariahAssessment
-      controller vetify
+        verdict     : ShariahAssessment
+        -- | The registered AuthorizedAdvisor entry for `advisor` —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        advisorCid  : ContractId AuthorizedAdvisor
+      controller advisor, vetify
       do
+        requireActiveAdvisor vetify advisor advisorCid
         assertMsg "Can only record a Shariah pre-check on a Pending review" (status == Pending)
         assertMsg "Shariah pre-check already recorded for this review" (shariahVerdict == None)
         create this with shariahVerdict = Some verdict
 
-    -- Gap 20: Assign a specific officer to a Pending review (initial assignment).
-    -- Use when the review was created with a placeholder officer or an unassigned queue.
+    -- | Post-hoc audit correction for an erroneous Shariah verdict — mirrors
+    -- Supersede on VerificationResult/ComplianceResult exactly, including
+    -- the deliberate choice of controller vetify alone: the party that made
+    -- the original call (advisor) should not unilaterally correct its own
+    -- past decision; a separate authority must sign off. Usable regardless
+    -- of `status`, same scope as the existing Supersede choices: a
+    -- documented correction for the record, not a reversal of whatever
+    -- already happened downstream from the original verdict.
+    nonconsuming choice SupersedeShariahVerdict : (ContractId ComplianceReview, ContractId ShariahVerdictCorrection)
+      with
+        correctionRef : Text
+        newVerdict    : ShariahAssessment
+        reason        : Text
+        correctedBy   : Text
+      controller vetify
+      do
+        assertMsg "Correction reference must not be empty" (correctionRef /= "")
+        assertMsg "Correction reason must not be empty" (reason /= "")
+        assertMsg "correctedBy must not be empty" (correctedBy /= "")
+        originalVerdict <- case shariahVerdict of
+          Some v -> pure v
+          None -> assertFail "Cannot supersede a Shariah verdict that was never recorded"
+        t <- getTime
+        updated <- create this with shariahVerdict = Some newVerdict
+        correction <- create ShariahVerdictCorrection with
+          vetify; business; verifier; advisor
+          businessName; cacRegNumber; complianceRef
+          originalVerdict
+          correctionRef
+          correctedVerdict = newVerdict
+          reason
+          correctedBy
+          correctedAt = t
+        return (updated, correction)
+
+    -- | Assigns a specific officer to a Pending review — the initial
+    -- assignment, for when the review was created with a placeholder
+    -- officer or an unassigned queue.
     choice AssignReview : ContractId ComplianceReview
       with
         newOfficer     : Party
@@ -287,8 +393,8 @@ template ComplianceReview
         assertMsg "assignedByName must not be empty" (assignedByName /= "")
         create this with verifier = newOfficer
 
-    -- Gap 21: Reassign an in-progress review to a different officer.
-    -- Covers leave, resignation, or workload balancing.
+    -- | Reassigns an in-progress review to a different officer — covers
+    -- leave, resignation, or workload balancing.
     choice ReassignReview : ContractId ComplianceReview
       with
         newOfficer : Party
@@ -296,22 +402,26 @@ template ComplianceReview
       controller vetify
       do
         assertMsg "Can only reassign an UnderReview or ManualReview"
-          (status == UnderReview || status == ManualReview)
+          (isUnderActiveReview status)
         assertMsg "New officer must differ from current officer" (newOfficer /= verifier)
         assertMsg "Reason must not be empty" (reason /= "")
         create this with verifier = newOfficer
 
-    -- SLA enforcement: escalates an overdue UnderReview application to ManualReview.
-    -- Uses CompliancePolicy.escalationSlaHours when active; falls back to fallbackSlaHours.
+    -- | SLA enforcement: escalates an overdue UnderReview application to
+    -- ManualReview. Uses `CompliancePolicy.escalationSlaHours` when active;
+    -- falls back to `fallbackSlaHours` otherwise.
     choice EscalateOverdue : ContractId ComplianceReview
       with
         fallbackSlaHours : Int
+        -- | The active CompliancePolicy's ContractId, if one exists —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        policyCid        : Optional (ContractId CompliancePolicy)
       controller vetify
       do
         assertMsg "Can only escalate an UnderReview application" (status == UnderReview)
         assertMsg "fallbackSlaHours must be positive" (fallbackSlaHours > 0)
-        mPolicyCid <- lookupByKey @CompliancePolicy vetify
-        effectiveSlaHours <- case mPolicyCid of
+        effectiveSlaHours <- case policyCid of
           Some cid -> do
             policy <- fetch cid
             return policy.escalationSlaHours
@@ -324,8 +434,9 @@ template ComplianceReview
             assertMsg "SLA window has not yet expired" (now > deadline)
             create this with status = ManualReview
 
-    -- Compliance Agent (Low risk) or human verifier (after ManualReview) approves.
-    choice ApproveCompliance : (ContractId ApprovedBorrower, ContractId ComplianceResult)
+    -- | The Verifier Agent (Low risk) or a human verifier (after
+    -- ManualReview) approves.
+    choice ApproveCompliance : (ContractId ApprovedBusiness, ContractId ComplianceResult)
       with
         completedChecks       : ComplianceCheck
         riskScore             : Int
@@ -339,12 +450,29 @@ template ComplianceReview
         reviewNotes           : Optional Text
         overrideType          : Optional OverrideType
         amlEvidence           : Optional AmlEvidenceRefs
-        complianceDocuments   : [DocumentRef]               -- Gap 25: docs used during review
-        shariahAssessment     : Optional ShariahAssessment  -- Gap 27: Shariah Agent output
+        -- | Documents used during this review.
+        complianceDocuments   : [DocumentRef]
+        -- | Shariah Agent output.
+        shariahAssessment     : Optional ShariahAssessment
+        -- | Required when a PEP hit opened an EDDCase for this review.
+        eddCaseCid            : Optional (ContractId EDDCase)
+        -- | The registered AuthorizedReviewer entry for `(vetify,
+        -- verifier)` — caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2
+        -- does not support contract keys.
+        reviewerAuthCid       : ContractId AuthorizedReviewer
       controller verifier
       do
         assertMsg "Can only approve from UnderReview or ManualReview"
-          (status == UnderReview || status == ManualReview)
+          (isUnderActiveReview status)
+        -- A PEP hit's EDD case must be Closed (every checklist item
+        -- complete) before approval — None is fine for the vast majority
+        -- of reviews where OpenEddCase was never exercised at all.
+        case eddCaseCid of
+          None -> return ()
+          Some cid -> do
+            eddCase <- fetch cid
+            assertMsg "EDD case is for a different compliance review" (eddCase.complianceReviewCid == self)
+            assertMsg "EDD case must be Closed before approval" (eddCase.status == EddClosed)
         assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
         assertMsg "Risk score is inconsistent with risk level"
           (case riskLevel of
@@ -353,9 +481,9 @@ template ComplianceReview
             High   -> riskScore < 50)
         assertMsg "Human decisions require a reviewer party (reviewerParty)"
           (autoDecided || reviewerParty /= None)
-        -- Gap 13: reviewer cannot be the borrower
+        -- The reviewer cannot be the business.
         case reviewerParty of
-          Some rp -> assertMsg "Reviewer cannot be the borrower" (rp /= borrower)
+          Some rp -> assertMsg "Reviewer cannot be the business" (rp /= business)
           None    -> return ()
         case (agentVersion, aiMetadata) of
           (Some v, Some m) ->
@@ -363,7 +491,7 @@ template ComplianceReview
           _ -> return ()
         assertMsg "High-risk applications cannot be auto-approved; human review required"
           (not (autoDecided && riskLevel == High))
-        -- Gap 9: auto-decided path must provide AML evidence references
+        -- The auto-decided path must provide AML evidence references.
         case (autoDecided, amlEvidence) of
           (True, None) -> assertFail "Auto-decided approvals require AML evidence references (amlEvidence)"
           _ -> return ()
@@ -376,17 +504,20 @@ template ComplianceReview
             assertMsg "Override justification required when human decides after agent review"
               (overrideJustification /= None)
           _ -> return ()
-        -- Gap 15: officer must be in the authorized reviewer registry
-        mAuthCid <- lookupByKey @AuthorizedReviewer (vetify, verifier)
-        assertMsg "Verifier is not in the authorized reviewer registry" (mAuthCid /= None)
-        -- Gap 14: four-eyes — reviewer cannot be the person who created this review
+        -- The officer must be in the authorized reviewer registry.
+        reviewerAuth <- fetch reviewerAuthCid
+        assertMsg "AuthorizedReviewer ContractId does not belong to this vetify party"
+          (reviewerAuth.vetify == vetify)
+        assertMsg "AuthorizedReviewer ContractId does not match the reviewing verifier"
+          (reviewerAuth.verifier == verifier)
+        -- Four-eyes: the reviewer cannot be the person who created this review.
         case (createdBy, reviewedBy) of
           (Some cb, Some rb) ->
             assertMsg "Reviewer cannot be the same person who created the review (four-eyes)" (rb /= cb)
           _ -> return ()
         t <- getTime
-        approved <- create ApprovedBorrower with
-          borrower
+        approved <- create ApprovedBusiness with
+          business
           vetify
           businessName
           cacRegNumber
@@ -396,14 +527,14 @@ template ComplianceReview
           verificationRef
           complianceRef
           approvedAt       = t
-          status           = BorrowerActive
+          status           = BusinessActive
           expiresAt        = None
           suspendedAt      = None
           suspendedReason  = None
           reinstatedAt     = None
           reinstatedReason = None
         result <- create ComplianceResult with
-          borrower
+          business
           vetify
           verifier
           businessName
@@ -434,7 +565,7 @@ template ComplianceReview
           decidedAt             = t
         return (approved, result)
 
-    -- Compliance Agent (High risk) or human verifier rejects.
+    -- | The Verifier Agent (High risk) or a human verifier rejects.
     choice RejectCompliance : ContractId ComplianceResult
       with
         completedChecks       : ComplianceCheck
@@ -450,12 +581,16 @@ template ComplianceReview
         reviewNotes           : Optional Text
         overrideType          : Optional OverrideType
         amlEvidence           : Optional AmlEvidenceRefs
-        complianceDocuments   : [DocumentRef]               -- Gap 25
-        shariahAssessment     : Optional ShariahAssessment  -- Gap 27
+        complianceDocuments   : [DocumentRef]
+        shariahAssessment     : Optional ShariahAssessment
+        -- | The registered AuthorizedReviewer entry for `(vetify,
+        -- verifier)` — caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2
+        -- does not support contract keys.
+        reviewerAuthCid       : ContractId AuthorizedReviewer
       controller verifier
       do
         assertMsg "Can only reject from UnderReview or ManualReview"
-          (status == UnderReview || status == ManualReview)
+          (isUnderActiveReview status)
         assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
         assertMsg "Rejection reason must not be empty" (reason /= "")
         assertMsg "Risk score is inconsistent with risk level"
@@ -465,15 +600,15 @@ template ComplianceReview
             High   -> riskScore < 50)
         assertMsg "Human decisions require a reviewer party (reviewerParty)"
           (autoDecided || reviewerParty /= None)
-        -- Gap 13: reviewer cannot be the borrower
+        -- The reviewer cannot be the business.
         case reviewerParty of
-          Some rp -> assertMsg "Reviewer cannot be the borrower" (rp /= borrower)
+          Some rp -> assertMsg "Reviewer cannot be the business" (rp /= business)
           None    -> return ()
         case (agentVersion, aiMetadata) of
           (Some v, Some m) ->
             assertMsg "agentVersion must match aiMetadata.modelVersion" (v == m.modelVersion)
           _ -> return ()
-        -- Gap 9: auto-decided path must provide AML evidence references
+        -- The auto-decided path must provide AML evidence references.
         case (autoDecided, amlEvidence) of
           (True, None) -> assertFail "Auto-decided rejections require AML evidence references (amlEvidence)"
           _ -> return ()
@@ -482,17 +617,20 @@ template ComplianceReview
             assertMsg "Override justification required when human decides after agent review"
               (overrideJustification /= None)
           _ -> return ()
-        -- Gap 15: officer must be in the authorized reviewer registry
-        mAuthCid <- lookupByKey @AuthorizedReviewer (vetify, verifier)
-        assertMsg "Verifier is not in the authorized reviewer registry" (mAuthCid /= None)
-        -- Gap 14: four-eyes — reviewer cannot be the person who created this review
+        -- The officer must be in the authorized reviewer registry.
+        reviewerAuth <- fetch reviewerAuthCid
+        assertMsg "AuthorizedReviewer ContractId does not belong to this vetify party"
+          (reviewerAuth.vetify == vetify)
+        assertMsg "AuthorizedReviewer ContractId does not match the reviewing verifier"
+          (reviewerAuth.verifier == verifier)
+        -- Four-eyes: the reviewer cannot be the person who created this review.
         case (createdBy, reviewedBy) of
           (Some cb, Some rb) ->
             assertMsg "Reviewer cannot be the same person who created the review (four-eyes)" (rb /= cb)
           _ -> return ()
         t <- getTime
         create ComplianceResult with
-          borrower
+          business
           vetify
           verifier
           businessName
@@ -522,19 +660,23 @@ template ComplianceReview
           shariahAssessment     = shariahAssessment
           decidedAt             = t
 
-    -- Compliance Agent: Medium risk → pause and escalate to human verifier.
+    -- | The Verifier Agent's Medium-risk path: pauses the review and
+    -- escalates it to a human verifier.
     choice FlagComplianceForManualReview : ContractId ComplianceReview
       with
         riskScore    : Int
         riskLevel    : RiskLevel
         agentVersion : Text
         note         : Text
+        -- | The active CompliancePolicy's ContractId, if one exists —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        policyCid    : Optional (ContractId CompliancePolicy)
       controller vetify
       do
         assertMsg "Can only flag from UnderReview" (status == UnderReview)
         assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
-        mPolicyCid <- lookupByKey @CompliancePolicy vetify
-        case mPolicyCid of
+        case policyCid of
           Some cid -> do
             policy <- fetch cid
             assertMsg ("Score " <> show riskScore <> " is at or above autoApproveMin "
@@ -551,14 +693,119 @@ template ComplianceReview
           agentNote    = Some note
           agentVersion = Some agentVersion
 
--- Stage 3 output: immutable audit record of the compliance decision.
--- Gap 3:  reviewStartedAt carried from ComplianceReview enables duration computation.
--- Gap 16: policySnapshot stores the full policy in effect at decision time.
--- Gap 25: complianceDocuments links all documents reviewed during this decision.
--- Gap 27: shariahAssessment stores the structured Shariah Agent output.
+    -- | Opens a structured Enhanced Due Diligence case, distinct from the
+    -- generic ManualReview flag above — specifically for a PEP hit (AAOIFI/
+    -- CBN NIFI expects documented source-of-wealth verification, enhanced
+    -- media search, and senior-management sign-off for PEP relationships,
+    -- not just a compliance officer's ad-hoc note). Nonconsuming: does not
+    -- itself change `ComplianceReview.status` — the agent's
+    -- FlagComplianceForManualReview call alongside this still does that.
+    -- See ApproveCompliance's `eddCaseCid` gate.
+    nonconsuming choice OpenEddCase : ContractId EDDCase
+      with
+        triggerReason : Text
+      controller vetify
+      do
+        assertMsg "Trigger reason must not be empty" (triggerReason /= "")
+        t <- getTime
+        create EDDCase with
+          vetify
+          verifier
+          business
+          complianceReviewCid = self
+          businessName
+          cacRegNumber
+          triggerReason
+          checklist = EddChecklist with
+            sourceOfWealthVerified  = False
+            sourceOfWealthNote      = None
+            enhancedMediaSearchDone = False
+            seniorManagementSignoff = None
+            monitoringFrequency     = None
+          status   = EddOpen
+          openedAt = t
+          closedAt = None
+          closedBy = None
+
+-- | Enhanced Due Diligence case: a structured checklist distinct from the
+-- generic ManualReview queue, opened via OpenEddCase on a ComplianceReview
+-- specifically for a PEP hit. ApproveCompliance hard-gates on this case
+-- (when referenced) being Closed, so a PEP relationship cannot be approved
+-- on the strength of a bare human note the way an ordinary ManualReview
+-- case can.
+template EDDCase
+  with
+    vetify              : Party
+    verifier            : Party
+    business            : Party
+    complianceReviewCid : ContractId ComplianceReview
+    businessName        : Text
+    cacRegNumber        : Text
+    triggerReason       : Text
+    checklist           : EddChecklist
+    status              : EddCaseStatus
+    openedAt            : Time
+    closedAt            : Optional Time
+    closedBy            : Optional Text
+  where
+    signatory vetify
+    observer verifier, business
+
+    -- | The verifier progressively fills in checklist items as the EDD
+    -- review proceeds.
+    nonconsuming choice UpdateEddChecklist : ContractId EDDCase
+      with
+        sourceOfWealthVerified  : Optional Bool
+        sourceOfWealthNote      : Optional Text
+        enhancedMediaSearchDone : Optional Bool
+        seniorManagementSignoff : Optional Text
+        monitoringFrequency     : Optional Text
+      controller verifier
+      do
+        assertMsg "Can only update an Open EDD case" (status == EddOpen)
+        create this with
+          checklist = EddChecklist with
+            sourceOfWealthVerified  = case sourceOfWealthVerified of
+                                        Some v -> v
+                                        None   -> checklist.sourceOfWealthVerified
+            sourceOfWealthNote      = case sourceOfWealthNote of
+                                        Some _ -> sourceOfWealthNote
+                                        None   -> checklist.sourceOfWealthNote
+            enhancedMediaSearchDone = case enhancedMediaSearchDone of
+                                        Some v -> v
+                                        None   -> checklist.enhancedMediaSearchDone
+            seniorManagementSignoff = case seniorManagementSignoff of
+                                        Some _ -> seniorManagementSignoff
+                                        None   -> checklist.seniorManagementSignoff
+            monitoringFrequency    = case monitoringFrequency of
+                                        Some _ -> monitoringFrequency
+                                        None   -> checklist.monitoringFrequency
+
+    -- | Closes the case once every checklist item is complete —
+    -- ApproveCompliance's gate is only satisfiable via this choice, so an
+    -- incomplete EDD review cannot be waved through by closing the case
+    -- early.
+    choice CloseEddCase : ContractId EDDCase
+      with
+        closedBy_ : Text
+      controller verifier
+      do
+        assertMsg "Can only close an Open EDD case" (status == EddOpen)
+        assertMsg "closedBy must not be empty" (closedBy_ /= "")
+        assertMsg "Source of wealth must be verified before closing" checklist.sourceOfWealthVerified
+        assertMsg "Enhanced media search must be done before closing" checklist.enhancedMediaSearchDone
+        assertMsg "Senior management sign-off is required before closing" (checklist.seniorManagementSignoff /= None)
+        assertMsg "Ongoing monitoring frequency must be set before closing" (checklist.monitoringFrequency /= None)
+        t <- getTime
+        create this with
+          status   = EddClosed
+          closedAt = Some t
+          closedBy = Some closedBy_
+
+-- | Stage 3 output: immutable audit record of the compliance decision.
 template ComplianceResult
   with
-    borrower                : Party
+    business                : Party
     vetify                  : Party
     verifier                : Party
     businessName            : Text
@@ -579,17 +826,22 @@ template ComplianceResult
     reviewNotes             : Optional Text
     overrideType            : Optional OverrideType
     amlEvidence             : Optional AmlEvidenceRefs
-    reviewStartedAt         : Optional Time   -- Gap 3: for SLA duration reporting
+    -- | Carried from ComplianceReview; enables SLA duration reporting.
+    reviewStartedAt         : Optional Time
     compliancePolicyVersion : Text
-    policySnapshot          : Optional CompliancePolicySnapshot  -- Gap 16
-    complianceDocuments     : [DocumentRef]                     -- Gap 25
-    shariahAssessment       : Optional ShariahAssessment        -- Gap 27
+    -- | The full CompliancePolicy in effect at decision time.
+    policySnapshot          : Optional CompliancePolicySnapshot
+    -- | All documents reviewed during this decision.
+    complianceDocuments     : [DocumentRef]
+    -- | The structured Shariah Agent output for this decision.
+    shariahAssessment       : Optional ShariahAssessment
     decidedAt               : Time
   where
     signatory vetify
-    observer verifier, borrower
-    key (vetify, complianceRef) : (Party, Text)
-    maintainer key._1
+    observer verifier, business
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of
+    -- (vetify, complianceRef) is no longer guaranteed.
     ensure (outcome == Approved || outcome == Rejected)
         && riskScore >= 0 && riskScore <= 100
         && complianceRef /= ""
@@ -599,8 +851,10 @@ template ComplianceResult
               Medium -> riskScore >= 50 && riskScore < 80
               High   -> riskScore < 50)
 
-    -- Gap 1 (Maker-Checker): Supersede an incorrect result without archiving it.
-    -- The corrector cannot be the same person as the original human reviewer.
+    -- | Supersedes an incorrect result without archiving it — both the
+    -- original and the correction coexist for a full audit trail. The
+    -- corrector cannot be the same person as the original human reviewer
+    -- (maker-checker).
     nonconsuming choice Supersede : ContractId ComplianceCorrection
       with
         correctionRef    : Text
@@ -613,7 +867,7 @@ template ComplianceResult
         assertMsg "Reason must not be empty" (reason /= "")
         assertMsg "Corrected outcome must be Approved or Rejected"
           (correctedOutcome == Approved || correctedOutcome == Rejected)
-        -- Gap 1: maker-checker — corrector cannot be the original human reviewer
+        -- Maker-checker: the corrector cannot be the original human reviewer.
         case reviewedBy of
           Some rb -> assertMsg "Corrector cannot be the same as the original human reviewer"
                        (correctedBy /= rb)
@@ -622,7 +876,7 @@ template ComplianceResult
         create ComplianceCorrection with
           vetify
           verifier
-          borrower
+          business
           businessName
           cacRegNumber
           verificationRef
@@ -634,14 +888,15 @@ template ComplianceResult
           correctedBy
           correctedAt           = t
 
--- Immutable record that supersedes an incorrect ComplianceResult.
--- The original ComplianceResult is NOT archived — both coexist for audit trail.
--- Key (vetify, originalComplianceRef) enforces exactly one correction per result.
+-- | Immutable record that supersedes an incorrect ComplianceResult. The
+-- original ComplianceResult is not archived — both coexist for the audit
+-- trail. Keyed on `(vetify, originalComplianceRef)`, enforcing exactly one
+-- correction per result.
 template ComplianceCorrection
   with
     vetify                : Party
     verifier              : Party
-    borrower              : Party
+    business              : Party
     businessName          : Text
     cacRegNumber          : Text
     verificationRef       : Text
@@ -654,67 +909,107 @@ template ComplianceCorrection
     correctedAt           : Time
   where
     signatory vetify
-    observer verifier, borrower
-    key (vetify, originalComplianceRef) : (Party, Text)
-    maintainer key._1
+    observer verifier, business
+    -- No contract key — see ComplianceResult's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, originalComplianceRef).
     ensure correctionRef /= ""
         && reason /= ""
         && (correctedOutcome == Approved || correctedOutcome == Rejected)
 
--- Stage 4: Borrower has passed verification and compliance; eligible to request financing.
--- Gap 4:   expiresAt enables approval expiry enforcement in RequestFinancing.
--- Gap 5/6: suspension/reinstatement reason and timestamp stored for audit.
--- Gap 22:  ExpireBorrower explicitly transitions to BorrowerExpired status.
-template ApprovedBorrower
+-- | Audit record for SupersedeShariahVerdict — mirrors ComplianceCorrection's
+-- field-for-field shape, substituting the ShariahAssessment before/after for
+-- ReviewStatus's Approved/Rejected outcome.
+template ShariahVerdictCorrection
   with
-    borrower         : Party
+    vetify           : Party
+    verifier         : Party
+    advisor     : Party
+    business         : Party
+    businessName     : Text
+    cacRegNumber     : Text
+    complianceRef    : Text
+    originalVerdict  : ShariahAssessment
+    correctionRef    : Text
+    correctedVerdict : ShariahAssessment
+    reason           : Text
+    correctedBy      : Text
+    correctedAt      : Time
+  where
+    signatory vetify
+    observer verifier, business, advisor
+    -- No contract key — see ComplianceResult's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, correctionRef).
+    ensure correctionRef /= "" && reason /= "" && correctedBy /= ""
+
+-- | Stage 4: the business has passed verification and compliance, and is
+-- eligible to request financing.
+template ApprovedBusiness
+  with
+    business         : Party
     vetify           : Party
     businessName     : Text
     cacRegNumber     : Text
-    businessSector   : Text  -- carried over from ComplianceReview, so RequestRecertification
-                              -- can pass these through to the next compliance cycle
+    -- | Carried over from ComplianceReview, so RequestRecertification can
+    -- pass these through to the next compliance cycle.
+    businessSector   : Text
     businessActivity : Text
     incorporationDate : Date
     verificationRef  : Text
     complianceRef    : Text
     approvedAt       : Time
-    status           : BorrowerStatus
-    expiresAt        : Optional Time   -- Gap 4: None = no expiry
-    suspendedAt      : Optional Time   -- Gap 5: when last suspended
-    suspendedReason  : Optional Text   -- Gap 5: reason for last suspension
-    reinstatedAt     : Optional Time   -- Gap 6: when last reinstated
-    reinstatedReason : Optional Text   -- Gap 6: reason for last reinstatement
+    status           : BusinessStatus
+    -- | `None` = no expiry.
+    expiresAt        : Optional Time
+    -- | When last suspended.
+    suspendedAt      : Optional Time
+    -- | Reason for last suspension.
+    suspendedReason  : Optional Text
+    -- | When last reinstated.
+    reinstatedAt     : Optional Time
+    -- | Reason for last reinstatement.
+    reinstatedReason : Optional Text
   where
     signatory vetify
-    observer borrower
-    key (vetify, cacRegNumber) : (Party, Text)
-    maintainer key._1
+    observer business
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of (vetify, cacRegNumber)
+    -- is no longer guaranteed.
 
-    -- Approved borrower initiates a financing request.
-    -- nonconsuming: repeat facilities are allowed from the same ApprovedBorrower.
-    -- Gap 4: only Active, non-expired borrowers may request financing.
+    -- | The approved business initiates a financing request. Nonconsuming
+    -- — repeat facilities are allowed from the same ApprovedBusiness. Only
+    -- Active, non-expired businesses may request financing.
     nonconsuming choice RequestFinancing : ContractId FinancingRequest
       with
         financialInstitution : Party
+        -- | vetify's own underwriting-team party (the Stage 6 gatekeeper).
+        assessor          : Party
         terms                : FinancingTerms
-        financingRef         : Text           -- F17: mandatory unique reference; becomes contract key
-        verificationRef      : Optional Text  -- F1: links to the VerificationResult for this borrower
-        complianceRef        : Optional Text  -- F1: links to this ApprovedBorrower / ComplianceResult
-        supportingDocuments  : [DocumentRef]  -- F14: financial statements, invoices, quotations
-        businessSector       : Text           -- Gap F12: checked against UnderwritingPolicy.permittedSectors in BeginUnderwriting
-      controller borrower
+        -- | Mandatory unique reference; becomes the FinancingRequest's
+        -- contract key.
+        financingRef         : Text
+        -- | Links to the VerificationResult for this business.
+        verificationRef      : Optional Text
+        -- | Links to this ApprovedBusiness / ComplianceResult.
+        complianceRef        : Optional Text
+        -- | Financial statements, invoices, quotations.
+        supportingDocuments  : [DocumentRef]
+        -- | Checked against UnderwritingPolicy.permittedSectors in
+        -- BeginUnderwriting.
+        businessSector       : Text
+      controller business
       do
-        assertMsg "Borrower must be Active to request financing" (status == BorrowerActive)
+        assertMsg "Business must be Active to request financing" (status == BusinessActive)
         assertMsg "financingRef must not be empty" (financingRef /= "")
         assertMsg "businessSector must not be empty" (businessSector /= "")
         now <- getTime
         case expiresAt of
           Some expiry ->
-            assertMsg "Borrower approval has expired — recertification required" (now <= expiry)
+            assertMsg "Business approval has expired — recertification required" (now <= expiry)
           None -> return ()
         create FinancingRequest with
-          borrower
+          business
           vetify
+          assessor
           financialInstitution
           businessName
           cacRegNumber
@@ -730,56 +1025,63 @@ template ApprovedBorrower
           expiresAt            = None
           termHistory          = []
           amendmentCount       = 0
-          assignedUnderwriterId   = None
-          assignedUnderwriterName = None
+          assignedAssessorId   = None
+          assignedAssessorName = None
           assignedAt              = None
+          agentScore              = None
+          agentRisk               = None
+          agentNote               = None
+          agentVersion            = None
 
-    -- Gap 5: Vetify suspends a borrower — reason and timestamp stored for audit.
-    choice Suspend : ContractId ApprovedBorrower
+    -- | vetify suspends a business; reason and timestamp are stored for audit.
+    choice Suspend : ContractId ApprovedBusiness
       with
         reason : Text
       controller vetify
       do
-        assertMsg "Can only suspend an Active borrower" (status == BorrowerActive)
+        assertMsg "Can only suspend an Active business" (status == BusinessActive)
         assertMsg "Reason must not be empty" (reason /= "")
         t <- getTime
         create this with
-          status          = BorrowerSuspended
+          status          = BusinessSuspended
           suspendedAt     = Some t
           suspendedReason = Some reason
 
-    -- Gap 6: Vetify reinstates a suspended borrower — reason and timestamp stored.
-    choice Reinstate : ContractId ApprovedBorrower
+    -- | vetify reinstates a suspended business; reason and timestamp are
+    -- stored for audit.
+    choice Reinstate : ContractId ApprovedBusiness
       with
         reason : Text
       controller vetify
       do
-        assertMsg "Can only reinstate a Suspended borrower" (status == BorrowerSuspended)
+        assertMsg "Can only reinstate a Suspended business" (status == BusinessSuspended)
         assertMsg "Reason must not be empty" (reason /= "")
         t <- getTime
         create this with
-          status           = BorrowerActive
+          status           = BusinessActive
           reinstatedAt     = Some t
           reinstatedReason = Some reason
 
-    -- Gap 22: Vetify explicitly expires a borrower after the approval period ends.
-    -- The check in RequestFinancing catches the expiry implicitly; this choice makes
-    -- the BorrowerExpired state explicit on-ledger for audit and dashboard purposes.
-    choice ExpireBorrower : ContractId ApprovedBorrower
+    -- | vetify explicitly expires a business after its approval period
+    -- ends. RequestFinancing's own expiry check already blocks new
+    -- requests implicitly; this choice makes the BusinessExpired state
+    -- explicit on-ledger for audit and dashboard purposes.
+    choice ExpireBusiness : ContractId ApprovedBusiness
       with
         reason : Text
       controller vetify
       do
-        assertMsg "Can only expire an Active borrower" (status == BorrowerActive)
+        assertMsg "Can only expire an Active business" (status == BusinessActive)
         assertMsg "Reason must not be empty" (reason /= "")
         case expiresAt of
-          None -> assertFail "Borrower has no expiry date — use Revoke or Suspend instead"
+          None -> assertFail "Business has no expiry date — use Revoke or Suspend instead"
           Some expiry -> do
             now <- getTime
             assertMsg "Approval has not yet expired" (now > expiry)
-        create this with status = BorrowerExpired
+        create this with status = BusinessExpired
 
-    -- Gap 7: Vetify permanently revokes eligibility — creates an immutable RevocationRecord.
+    -- | vetify permanently revokes eligibility, creating an immutable
+    -- RevocationRecord.
     choice Revoke : ContractId RevocationRecord
       with
         reason    : Text
@@ -791,7 +1093,7 @@ template ApprovedBorrower
         t <- getTime
         create RevocationRecord with
           vetify
-          borrower
+          business
           businessName
           cacRegNumber
           verificationRef
@@ -800,21 +1102,28 @@ template ApprovedBorrower
           revokedBy
           revokedAt = t
 
-    -- Gap 5 (periodic review): Vetify triggers recertification (CBN NIFI Framework).
-    -- Consuming: archives the current ApprovedBorrower and creates a fresh ComplianceReview.
+    -- | vetify triggers periodic recertification (CBN NIFI Framework):
+    -- consuming — archives the current ApprovedBusiness and creates a fresh
+    -- ComplianceReview. `advisor` is a choice argument rather than an
+    -- ApprovedBusiness field (the same reasoning as AcceptProposal's
+    -- `sentinel` argument in Vetify.Murabahah) — supplied by the backend
+    -- from server config, not threaded through this template, since it's an
+    -- internal party the recertification caller has no organic reason to
+    -- know.
     choice RequestRecertification : ContractId ComplianceReview
       with
         verifier         : Party
+        advisor     : Party
         newComplianceRef : Text
         reason           : Text
       controller vetify
       do
-        assertMsg "Can only recertify an Active borrower" (status == BorrowerActive)
+        assertMsg "Can only recertify an Active business" (status == BusinessActive)
         assertMsg "newComplianceRef must not be empty" (newComplianceRef /= "")
         assertMsg "Reason must not be empty" (reason /= "")
         t <- getTime
         create ComplianceReview with
-          borrower
+          business
           vetify
           verifier
           businessName
@@ -836,14 +1145,16 @@ template ApprovedBorrower
           policySnapshot          = None
           createdBy               = Some "Recertification"
           shariahVerdict          = None
+          advisor
 
--- Gap 7: Immutable record of a borrower revocation — created by Revoke, never archived.
--- Key (vetify, complianceRef) is unique per approval cycle, allowing a revoked borrower
--- to later complete a new compliance cycle (new complianceRef) without key conflict.
+-- | Immutable record of a business revocation — created by Revoke, never
+-- archived. Keyed on `(vetify, complianceRef)`, unique per approval cycle,
+-- so a revoked business can later complete a new compliance cycle (with a
+-- new `complianceRef`) without a key conflict.
 template RevocationRecord
   with
     vetify          : Party
-    borrower        : Party
+    business        : Party
     businessName    : Text
     cacRegNumber    : Text
     verificationRef : Text
@@ -853,7 +1164,7 @@ template RevocationRecord
     revokedAt       : Time
   where
     signatory vetify
-    observer borrower
-    key (vetify, complianceRef) : (Party, Text)
-    maintainer key._1
+    observer business
+    -- No contract key — see ComplianceResult's comment above; same
+    -- residual-uniqueness caveat applies to (vetify, complianceRef).
     ensure reason /= "" && revokedBy /= ""

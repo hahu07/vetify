@@ -1,13 +1,16 @@
--- | Ongoing: regulatory portfolio reporting. Leaf module — depends only on
---   Vetify.Types. Created off-ledger by the Reporting Agent for regulator visibility.
+-- | Ongoing regulatory portfolio reporting. Leaf module — depends only on
+-- Vetify.Types. Created off-ledger by the Reporting Agent (all metrics
+-- computed deterministically from the queried MurabahahContract set; the
+-- agent's LLM only writes `summary`), for FI and regulator visibility.
 module Vetify.Reporting where
 
--- Regulatory portfolio report. Field set reconciled with the backend
--- getPortfolioSummary aggregation (review finding F11 added defaultedCount).
+-- | A snapshot of one FI's Murabahah portfolio at `reportDate`. Field set
+-- mirrors the backend's `getPortfolioSummary` aggregation.
 template PortfolioReport
   with
     vetify               : Party
     financialInstitution : Party
+    -- | Read-only supervisory observer; `None` if this FI has none.
     regulator            : Optional Party
     reportDate           : Date
     totalActiveContracts : Int
@@ -16,6 +19,8 @@ template PortfolioReport
     delinquentCount      : Int
     completedCount       : Int
     defaultedCount       : Int
+    -- | Human-readable narrative, LLM-authored from the pre-computed
+    -- metrics above.
     summary              : Text
   where
     signatory vetify

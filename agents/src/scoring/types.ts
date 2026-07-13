@@ -14,10 +14,10 @@ export type ApiOutcome<T> = { kind: "ok"; data: T } | { kind: "error"; httpStatu
 export interface MashupEvidence {
   ninVerified: boolean;
   bvnVerified: boolean;
-  /** Whether the onboarding contract supplied a DOB to cross-check against BVN. */
-  dobProvided: boolean;
-  /** Only meaningful when dobProvided is true. */
-  dobMatch: boolean;
+  /** mono.co's data.match.name — whether the name on the NIN record and the
+   * name on the BVN record are consistent (a real identity cross-check,
+   * only meaningful once both are independently verified). */
+  nameMatch: boolean;
 }
 export type MashupResult = ApiOutcome<MashupEvidence>;
 
@@ -70,10 +70,22 @@ export interface VerificationChecks {
   dataConsistent: boolean;
 }
 
+// Mirrors Vetify.Types.VerificationCheckScores (Daml) field-for-field — this
+// record is sent verbatim to Onboarding.daml's Approve/Reject choices, so its
+// shape must match exactly (a prior version had {identityScore, cacScore,
+// tinScore}, which the ledger rejected outright with "Missing non-optional
+// fields: Set(documentScore, consistencyScore)" — found via live testing,
+// 2026-07-08). consistencyScore is the TIN-matches-CAC cross-source check
+// (Daml's "cross-source data consistency score" is exactly what that check
+// verifies). documentScore has no real evidence source in this system (no
+// OCR/document-authenticity tool exists) — see verification.ts's doc comment
+// on why it's always 0, same never-fabricate-a-factor principle used
+// elsewhere (Stage 6's PD/LGD/EAD, Stage 3's CDD purpose-coherence gap).
 export interface VerificationCheckScores {
   identityScore: number;
   cacScore: number;
-  tinScore: number;
+  documentScore: number;
+  consistencyScore: number;
 }
 
 export type VerificationDecision =
@@ -96,9 +108,15 @@ export interface VerificationScoringResult {
  * per-check point table for Stage 2, now carried on the on-ledger VerificationPolicy so
  * risk/compliance ops can retune it via a new policy version, without a code deploy. */
 export interface VerificationScoringWeights {
-  identityPerfect: number;
-  identityDobMissing: number;
-  identityDobMismatch: number;
+  /** NIN + BVN both verified AND mono.co's cross-check confirms the name on
+   * each record is consistent. No DOB is collected anywhere in onboarding to
+   * additionally cross-check against, so this is the best achievable
+   * identity-check outcome. */
+  identityVerified: number;
+  /** NIN + BVN both verified but the names don't match — a real identity-fraud
+   * signal (someone else's BVN/NIN); always flags regardless of score, same
+   * treatment as cacActiveNameMismatch. */
+  identityNameMismatch: number;
   identityBvnNotFound: number;
   identityNinNotFound: number;
   cacActiveExactMatch: number;
@@ -116,9 +134,8 @@ export interface VerificationScoringWeights {
 /** Fallback used only when no VerificationPolicy is active on the ledger — matches the
  * point table in risk-scoring-guide.md exactly. */
 export const DEFAULT_VERIFICATION_WEIGHTS: VerificationScoringWeights = {
-  identityPerfect: 40,
-  identityDobMissing: 30,
-  identityDobMismatch: 20,
+  identityVerified: 40,
+  identityNameMismatch: 10,
   identityBvnNotFound: 15,
   identityNinNotFound: 0,
   cacActiveExactMatch: 35,
@@ -199,6 +216,63 @@ export const DEFAULT_COMPLIANCE_WEIGHTS: ComplianceScoringWeights = {
 };
 export const DEFAULT_COMPLIANCE_POLICY_VERSION = "scoring-engine-default-2026-v1";
 
+// ─── Stage 0: Financing Provider Registration ──────────────────────────────
+// Reuses mono.co lookup_cac (same tool/evidence shape as Stage 2's CacResult)
+// against the provider's own cacRegNumber — genuinely the same check, just a
+// different entity. See agents/src/scoring/provider-verification.ts.
+
+export type ProviderType =
+  | "CBNLicensedNIFI"
+  | "SECFundManager"
+  | "PenComPensionManager"
+  | "CooperativeSociety"
+  | "InvestmentClub"
+  | "WaqfFund"
+  | "ZakatFund"
+  | "Philanthropy";
+
+/** Mirrors Vetify.Types.ProviderVerificationScoringWeights (Daml) field-for-field. */
+export interface ProviderVerificationScoringWeights {
+  cacActiveExactMatch: number;
+  cacActiveCloseMatch: number;
+  cacActiveNameMismatch: number;
+  cacPending: number;
+  cacInactiveOrStruckOff: number;
+  cacNotFound: number;
+  regulatedWithLicense: number;
+  regulatedMissingLicense: number;
+  unregulatedDeclared: number;
+}
+
+/** Fallback used only when no ProviderVerificationPolicy is active on the ledger. */
+export const DEFAULT_PROVIDER_VERIFICATION_WEIGHTS: ProviderVerificationScoringWeights = {
+  cacActiveExactMatch: 60,
+  cacActiveCloseMatch: 48,
+  cacActiveNameMismatch: 20,
+  cacPending: 35,
+  cacInactiveOrStruckOff: 15,
+  cacNotFound: 0,
+  regulatedWithLicense: 40,
+  regulatedMissingLicense: 10,
+  unregulatedDeclared: 40,
+};
+export const DEFAULT_PROVIDER_VERIFICATION_POLICY_VERSION = "scoring-engine-default-2026-v1";
+
+export type ProviderVerificationDecision =
+  | { action: "Reject"; autoDecided: true; reason: string }
+  | { action: "FlagForManualReview"; note: string }
+  // Low risk, no serious flags — approvedInstruments is still a governing-document
+  // judgment call no automated check can make, so this only records the score
+  // (RecordProviderScore) rather than fully auto-approving.
+  | { action: "RecordScore" };
+
+export interface ProviderVerificationScoringResult {
+  riskScore: number;
+  riskLevel: RiskLevel;
+  decision: ProviderVerificationDecision;
+  scoringPolicyVersion: string;
+}
+
 // ─── Stage 6: mono.co Connect (transactions) + Creditworthiness (DSCR) ─────
 
 /** A single bank transaction, normalized from whatever raw shape mono.co's
@@ -271,7 +345,7 @@ export interface UnderwritingRequestContext {
    * including profit margin, isn't set until Stage 8). Optional for test ergonomics;
    * the stress test skips (contributes 0, flags STRESS_TEST_UNAVAILABLE) if absent. */
   tenureMonths?: number;
-  /** FinancingRequest.incorporationDate, carried over from ApprovedBorrower at
+  /** FinancingRequest.incorporationDate, carried over from ApprovedBusiness at
    * RequestFinancing time. Optional defensively — contracts created before this
    * field existed won't have it; the business-age factor contributes 0 and flags
    * BUSINESS_AGE_UNKNOWN rather than fabricating an age. */
@@ -312,9 +386,22 @@ export interface UnderwritingRiskFlag {
   description: string;
 }
 
+/** Mirrors VerificationDecision/ComplianceDecision exactly — Low risk auto-qualifies
+ * (BeginUnderwriting), Medium risk escalates to a human assessor
+ * (FlagUnderwritingForManualReview), High risk is a hard veto
+ * (RejectUnderwriting) that never reaches the FI. The Fraud Detection hard
+ * override (see underwriting-final-decision.ts) forces High regardless of the
+ * weighted composite, which naturally routes here to RejectUnderwriting instead
+ * of just a flag in the assessment text. */
+export type UnderwritingDecision =
+  | { action: "BeginUnderwriting"; autoDecided: true }
+  | { action: "RejectUnderwriting"; autoDecided: true; reason: string }
+  | { action: "FlagUnderwritingForManualReview"; note: string };
+
 export interface UnderwritingScoringResult {
   assessment: UnderwritingAssessment;
   riskFlags: UnderwritingRiskFlag[];
+  decision: UnderwritingDecision;
   /** policyVersion of whichever UnderwritingPolicy's scoringWeights were actually used
    * (or the built-in default's version string if no policy was active). */
   scoringPolicyVersion: string;
@@ -401,7 +488,7 @@ export interface UnderwritingScoringWeights {
 }
 
 /** Fallback used only when no UnderwritingPolicy carries scoringWeights — matches
- * daml/Vetify/Tests/Fixtures.daml's sampleUnderwritingScoringWeights exactly. */
+ * daml-tests/daml/Vetify/Tests/Fixtures.daml's sampleUnderwritingScoringWeights exactly. */
 export const DEFAULT_UNDERWRITING_WEIGHTS: UnderwritingScoringWeights = {
   dscrHigh: 40,
   dscrMedium: 22,
@@ -480,4 +567,32 @@ export const DEFAULT_UNDERWRITING_POLICY_VERSION = "scoring-engine-default-2026-
  */
 export function numifyWeights<T>(raw: Record<string, unknown>): T {
   return Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, Number(v)])) as T;
+}
+
+// ─── Stage 9: delinquency monitoring ────────────────────────────────────────
+
+/** Snapshot of the fields scoreDelinquency needs from a MurabahahContract payload. */
+export interface MonitoringContractSnapshot {
+  status: "Active" | "Delinquent" | "DelinquencyManualReview" | "Completed" | "Defaulted";
+  /** ISO 8601 date the facility started. */
+  startDate: string;
+  tenureMonths: number;
+  installmentAmount: number;
+  /** Installments recorded on-ledger via RecordPayment. */
+  installmentsPaid: number;
+}
+
+/** Mirrors VerificationDecision/ComplianceDecision's discriminated-union shape.
+ * Unlike those two, a "NoOp" case is real and common here — most poll cycles
+ * find a current, already-handled, or out-of-scope (Completed/Defaulted)
+ * contract and nothing should happen. */
+export type MonitoringDecision =
+  | { action: "NoOp" }
+  | { action: "ResumeActive"; note: string }
+  | { action: "FlagDelinquent"; reason: string }
+  | { action: "FlagForDelinquencyReview"; note: string };
+
+export interface MonitoringScoringResult {
+  missedCount: number;
+  decision: MonitoringDecision;
 }

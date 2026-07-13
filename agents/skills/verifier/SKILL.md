@@ -30,14 +30,14 @@ this skill's Stage 3 evidence gathering does not touch it at all.
 ## Stage 2 — Verification evidence (BusinessOnboarding, status UnderReview)
 
 Call, in order:
-1. `lookup_mashup` — the director's `ninNumber`, `bvn`, and date of birth if available
+1. `lookup_mashup` — the director's `ninNumber` and `bvn`
 2. `lookup_cac` — the CAC registration number (`BusinessKyc.cacRegNumber`)
 3. `lookup_tin` — the tax ID, `channel: "cac"`
 
 Then reply with **only** this JSON object — no other text before or after it:
 ```json
 {
-  "mashup": { "ninVerified": true, "bvnVerified": true, "dobProvided": true, "dobMatch": true },
+  "mashup": { "ninVerified": true, "bvnVerified": true },
   "cac": { "found": true, "status": "Active", "nameMatch": "exact" },
   "tin": { "outcome": "verifiedMatchesCac" }
 }

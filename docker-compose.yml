@@ -14,7 +14,12 @@ services:
       POSTGRES_PASSWORD: vetify
       POSTGRES_DB: vetify
     ports:
-      - "5432:5432"
+      # Configurable because host port 5432 is frequently already bound by a
+      # system-level Postgres on dev machines (`ss -ltnp | grep 5432` to
+      # check). Set POSTGRES_HOST_PORT in a root .env file if so, and keep
+      # backend/.env's PQS_POSTGRES_PORT/APP_POSTGRES_PORT in sync — see
+      # docs/local-dev-startup.md.
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -28,36 +33,46 @@ services:
   # Subscribes to Canton ledger transaction stream and mirrors contract data
   # into PostgreSQL via the active() SQL function.
   pqs:
-    image: europe-docker.pkg.dev/da-images/public/docker/scribe:3.5.1
+    image: europe-docker.pkg.dev/da-images/public/docker/scribe:3.4.1
     container_name: vetify-pqs
     command:
       - "pipeline"
       - "ledger"
       - "postgres-document"
+    # `host.docker.internal` is what actually reaches the host-only-bound
+    # `dpm sandbox` gRPC port (:6865) from inside a container. The
+    # `host-gateway` special value makes this resolve on native Linux Docker
+    # Engine (20.10+) too, not just Docker Desktop, where it's built in.
+    # A prior `network_mode: host` attempt here does NOT work when Docker
+    # itself runs as Docker Desktop (a VM, e.g. `linuxkit` kernel — check
+    # `docker info | grep "Operating System"`): "host" networking is then
+    # scoped to the VM's network namespace, not the real host, so the
+    # sandbox process on the actual host stays unreachable (verified live —
+    # confirmed via `docker info` showing `Operating System: Docker Desktop`
+    # and a raw TCP probe to host.docker.internal:6865 succeeding while
+    # network_mode: host's localhost:6865 got connection-refused). Plain
+    # native `dockerd` (no Desktop VM) shares the host network namespace for
+    # real under `network_mode: host`, so that mode isn't wrong everywhere —
+    # just not portable across both setups, whereas host.docker.internal is.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
-      # Canton sandbox gRPC Ledger API — running on the host via `dpm sandbox`.
-      # Verified against a real sandbox: `dpm sandbox`'s Ledger API has no
-      # bind-address flag and listens on 127.0.0.1 only (confirmed via
-      # `ss -tlnp`), not 0.0.0.0 — host.docker.internal/extra_hosts cannot
-      # reach a host-only-bound port from a container on the bridge network
-      # (connection times out). Using `network_mode: host` below instead, so
-      # this container shares the host's network namespace directly.
-      SCRIBE_SOURCE_LEDGER_HOST: localhost
+      SCRIBE_SOURCE_LEDGER_HOST: host.docker.internal
       SCRIBE_SOURCE_LEDGER_PORT: "6865"
       # No auth for local sandbox (dpm sandbox runs without auth by default).
       # Verified against a real Scribe 0.6.11 container: only "NoAuth" or
       # "OAuth" are accepted — "Unsafe" is rejected at startup with a format
       # error ("--source-ledger-auth ... constant string 'NoAuth'/'OAuth'").
       SCRIBE_SOURCE_LEDGER_AUTH: NoAuth
-      # PostgreSQL target — reached via the host-published port (below)
-      # rather than the "postgres" service name, since network_mode: host
-      # takes this container out of the compose bridge network entirely.
-      SCRIBE_TARGET_POSTGRES_HOST: localhost
+      # Reached via the compose-internal service name/port, not the
+      # host-published port above — this is deliberately immune to whatever
+      # POSTGRES_HOST_PORT is set to, since both containers share the
+      # default bridge network's internal DNS.
+      SCRIBE_TARGET_POSTGRES_HOST: postgres
       SCRIBE_TARGET_POSTGRES_PORT: "5432"
       SCRIBE_TARGET_POSTGRES_USERNAME: vetify
       SCRIBE_TARGET_POSTGRES_PASSWORD: vetify
       SCRIBE_TARGET_POSTGRES_DATABASE: vetify-pqs
-    network_mode: host
     depends_on:
       postgres:
         condition: service_healthy

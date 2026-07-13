@@ -1,0 +1,1712 @@
+-- | Stage 3–4 tests: compliance approve/reject, AI governance, correction workflow,
+--   policy version derivation, validation guards, and repeat financing requests.
+module Vetify.Tests.ComplianceTests where
+
+import DA.Time (hours, addRelTime)
+import Daml.Script
+import Vetify.Types
+import Vetify.Compliance
+import Vetify.Governance
+import Vetify.Financing (FinancingRequest)
+import Vetify.Tests.Fixtures
+
+data CParties = CParties with
+  business          : Party
+  vetify            : Party
+  verifier : Party
+  assessor       : Party
+  fi                : Party
+  riskCommittee     : Party
+  advisor      : Party
+  -- | The registered AuthorizedReviewer entry for (vetify, verifier) —
+  -- caller-supplied since SDK 3.4.11 / Daml-LF 2.1/2.2 has no contract keys;
+  -- ApproveCompliance/RejectCompliance now take this as an explicit argument.
+  reviewerAuthCid : ContractId AuthorizedReviewer
+  -- | The registered AuthorizedAdvisor entry for advisor — same rationale,
+  -- required by RecordShariahPreCheck.
+  advisorCid      : ContractId AuthorizedAdvisor
+
+setupCParties : Script CParties
+setupCParties = do
+  business          <- allocateParty "Business"
+  vetify            <- allocateParty "Vetify"
+  verifier <- allocateParty "Verifier"
+  assessor       <- allocateParty "Assessor"
+  fi                <- allocateParty "FI"
+  riskCommittee     <- allocateParty "RiskCommittee"
+  advisor      <- allocateParty "Advisor"
+  -- Gap 15: authorize the compliance officer so ApproveCompliance/RejectCompliance pass
+  t <- getTime
+  reviewerAuthCid <- submit vetify do
+    createCmd AuthorizedReviewer with
+      vetify            = vetify
+      verifier = verifier
+      authorizedBy      = "Vetify Admin"
+      authorizedAt      = t
+      role              = "Senior Compliance Officer"
+  advisorCid <- submit vetify do
+    createCmd AuthorizedAdvisor with
+      vetify
+      advisor
+      role         = "Shari'a Supervisory Board — Fiqh Scholar"
+      authorizedBy = "Vetify Admin"
+      authorizedAt = t
+      active       = True
+  pure CParties with ..
+
+-- Helper: Pending ComplianceReview with all audit fields populated
+pendingReview : CParties -> Script (ContractId ComplianceReview)
+pendingReview p = do
+  t <- getTime
+  submit p.vetify do
+    createCmd ComplianceReview with
+      business                = p.business
+      vetify                  = p.vetify
+      verifier                = p.verifier
+      businessName            = sampleProfile.name
+      cacRegNumber            = sampleKyc.cacRegNumber
+      businessSector          = sampleProfile.businessSector
+      businessActivity        = sampleProfile.businessActivity
+      incorporationDate       = sampleProfile.incorporationDate
+      verificationRef         = "VER-2026-000001"
+      complianceRef           = "COM-2026-000001"
+      status                  = Pending
+      checks                  = None
+      agentScore              = None
+      agentRisk               = None
+      agentNote               = None
+      agentVersion            = None
+      createdAt               = Some t
+      reviewStartedAt         = None
+      compliancePolicyVersion = None
+      policySnapshot          = None
+      createdBy               = None
+      shariahVerdict          = None
+      advisor            = p.advisor
+
+-- Helper: agent auto-approves on the happy path
+agentApproveCompliance : ContractId ComplianceReview -> ComplianceCheck -> Int -> RiskLevel -> ContractId AuthorizedReviewer -> Commands (ContractId ApprovedBusiness, ContractId ComplianceResult)
+agentApproveCompliance cid checks score level reviewerAuthCid =
+  exerciseCmd cid ApproveCompliance with
+    completedChecks       = checks
+    riskScore             = score
+    riskLevel             = level
+    autoDecided           = True
+    reviewerParty         = None
+    reviewedBy            = None
+    agentVersion          = Some "vetify-compliance-v1.0"
+    aiMetadata            = Some sampleComplianceAIMetadata
+    overrideJustification = None
+    reviewNotes           = None
+    overrideType          = None
+    amlEvidence           = Some sampleAmlEvidence
+    complianceDocuments   = []
+    shariahAssessment     = None
+    eddCaseCid            = None
+    reviewerAuthCid       = reviewerAuthCid
+
+-- ─── Shariah pre-check decoupling ────────────────────────────────────────────
+
+-- RecordShariahPreCheck persists the decoupled Shariah Agent's verdict on the
+-- review without transitioning status — StartReview still runs afterward.
+testRecordShariahPreCheck : Script ()
+testRecordShariahPreCheck = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  recorded <- submit (actAs [p.advisor, p.vetify]) do
+    exerciseCmd rv RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+  Some r <- queryContractId p.vetify recorded
+  assertMsg "shariahVerdict recorded" (r.shariahVerdict == Some sampleShariahAssessment)
+  assertMsg "status still Pending — StartReview not yet run" (r.status == Pending)
+  -- StartReview still works normally afterward
+  ur <- submit p.vetify do exerciseCmd recorded StartReview with policyCid = None
+  Some ur' <- queryContractId p.vetify ur
+  assertMsg "shariahVerdict carried through StartReview" (ur'.shariahVerdict == Some sampleShariahAssessment)
+  assertMsg "status is UnderReview after StartReview" (ur'.status == UnderReview)
+
+-- RecordShariahPreCheck cannot be recorded twice for the same review.
+testCannotRecordShariahPreCheckTwice : Script ()
+testCannotRecordShariahPreCheckTwice = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  recorded <- submit (actAs [p.advisor, p.vetify]) do
+    exerciseCmd rv RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+  submitMustFail (actAs [p.advisor, p.vetify]) do
+    exerciseCmd recorded RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+  pure ()
+
+-- Registry gate: an unregistered advisor cannot record a pre-check,
+-- mirroring testFlagDelinquentBlockedWithoutRegisteredSentinel (MurabahahTests.daml).
+testRecordShariahPreCheckBlockedWithoutRegisteredBoardMember : Script ()
+testRecordShariahPreCheckBlockedWithoutRegisteredBoardMember = do
+  p0 <- setupCParties
+  unregisteredBoard <- allocateParty "UnregisteredAdvisor"
+  let p = p0 with advisor = unregisteredBoard
+  rv <- pendingReview p
+  submitMustFail (actAs [p.advisor, p.vetify]) do
+    exerciseCmd rv RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+
+-- SupersedeShariahVerdict corrects an erroneous verdict and creates an audit record.
+-- Controller vetify alone (Option A) — advisor, who made the original call,
+-- cannot unilaterally correct its own past decision.
+testSupersedeShariahVerdict : Script ()
+testSupersedeShariahVerdict = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  recorded <- submit (actAs [p.advisor, p.vetify]) do
+    exerciseCmd rv RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+  let correctedVerdict = sampleShariahAssessment with
+        verdict  = "REQUIRES_REVIEW"
+        rationale = "Re-examined: mixed business activity requires committee escalation"
+  (updated, correction) <- submit p.vetify do
+    exerciseCmd recorded SupersedeShariahVerdict with
+      correctionRef = "SHR-COR-2026-000001"
+      newVerdict    = correctedVerdict
+      reason        = "Original table match was too coarse for this business's actual activity mix"
+      correctedBy   = "Shaykh Ahmad Bello"
+  Some ur <- queryContractId p.vetify updated
+  assertMsg "shariahVerdict updated" (ur.shariahVerdict == Some correctedVerdict)
+  Some corr <- queryContractId p.vetify correction
+  assertMsg "original verdict preserved on the audit record" (corr.originalVerdict == sampleShariahAssessment)
+  assertMsg "corrected verdict recorded on the audit record" (corr.correctedVerdict == correctedVerdict)
+  assertMsg "correctedBy recorded" (corr.correctedBy == "Shaykh Ahmad Bello")
+
+-- advisor cannot supersede its own verdict — controller vetify alone.
+testAdvisorCannotSupersedeOwnVerdict : Script ()
+testAdvisorCannotSupersedeOwnVerdict = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  recorded <- submit (actAs [p.advisor, p.vetify]) do
+    exerciseCmd rv RecordShariahPreCheck with verdict = sampleShariahAssessment, advisorCid = p.advisorCid
+  submitMustFail p.advisor do
+    exerciseCmd recorded SupersedeShariahVerdict with
+      correctionRef = "SHR-COR-2026-000002"
+      newVerdict    = sampleShariahAssessment
+      reason        = "Attempted self-correction"
+      correctedBy   = "Shariah Board"
+
+-- ─── Happy path ──────────────────────────────────────────────────────────────
+
+testApproveCompliance : Script ()
+testApproveCompliance = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, result) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  Some ab <- queryContractId p.vetify approved
+  assertMsg "cacRegNumber on ApprovedBusiness" (ab.cacRegNumber == "RC123456")
+  assertMsg "verificationRef on ApprovedBusiness" (ab.verificationRef == "VER-2026-000001")
+  assertMsg "complianceRef on ApprovedBusiness" (ab.complianceRef == "COM-2026-000001")
+  Some cr <- queryContractId p.vetify result
+  assertMsg "outcome is Approved" (cr.outcome == Approved)
+  assertMsg "agentVersion on result" (cr.agentVersion == Some "vetify-compliance-v1.0")
+  assertMsg "aiMetadata on result" (cr.aiMetadata /= None)
+  pure ()
+
+-- Review finding F6: a rejection persists as an on-ledger ComplianceResult.
+testRejectComplianceIsRecorded : Script ()
+testRejectComplianceIsRecorded = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  result <- submit p.verifier do
+    exerciseCmd ur RejectCompliance with
+      completedChecks       = passingCompliance with amlCleared = False
+      riskScore             = 20
+      riskLevel             = High
+      autoDecided           = True
+      reason                = "Adverse media match — sanctions list"
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-compliance-v1.0"
+      aiMetadata            = Some sampleComplianceAIMetadata
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "outcome is Rejected" (cr.outcome == Rejected)
+  assertMsg "reason on-ledger" (cr.reason == Some "Adverse media match — sanctions list")
+  assertMsg "complianceRef carried to result" (cr.complianceRef == "COM-2026-000001")
+  pure ()
+
+-- Review finding F3: ApprovedBusiness is nonconsuming — repeat facilities allowed.
+testRepeatFinancingRequests : Script ()
+testRepeatFinancingRequests = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  _ <- submit p.business do
+    exerciseCmd approved RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms
+      financingRef         = "FIN-COMP-001-A"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  _ <- submit p.business do
+    exerciseCmd approved RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms with amount = 500_000.0, purpose = "Working capital"
+      financingRef         = "FIN-COMP-001-B"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  reqs <- query @FinancingRequest p.business
+  assertMsg "two financing requests" (length reqs == 2)
+  pure ()
+
+-- Authorization: only the compliance officer can approve
+testOnlyOfficerCanApprove : Script ()
+testOnlyOfficerCanApprove = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.vetify do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 3: Policy version derivation ────────────────────────────────────────
+
+-- When a CompliancePolicy is active, StartReview snapshots its policyVersion.
+-- ApproveCompliance uses that snapshot on the result — not a caller parameter.
+testPolicyVersionDerivedInStartReview : Script ()
+testPolicyVersionDerivedInStartReview = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v2"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = Some policyCid
+  -- Verify the snapshot was stored on the review
+  Some ur' <- queryContractId p.vetify ur
+  assertMsg "compliancePolicyVersion snapshotted at StartReview"
+    (ur'.compliancePolicyVersion == Some "2026-v2")
+  (_, result) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "ComplianceResult carries the snapshotted policyVersion"
+    (cr.compliancePolicyVersion == "2026-v2")
+  pure ()
+
+-- ─── Gap 4: Validation ───────────────────────────────────────────────────────
+
+-- All four compliance checks must pass before approval is permitted.
+testCannotApproveWithFailedAmlCheck : Script ()
+testCannotApproveWithFailedAmlCheck = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    agentApproveCompliance ur (passingCompliance with amlCleared = False) 88 Low p.reviewerAuthCid
+  pure ()
+
+-- Score/level consistency: Low risk must have score >= 80.
+testScoreLevelMismatchBlocked : Script ()
+testScoreLevelMismatchBlocked = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  -- Score 65 is Medium range (50–79) but riskLevel claims Low
+  submitMustFail p.verifier do
+    agentApproveCompliance ur passingCompliance 65 Low p.reviewerAuthCid
+  pure ()
+
+-- Human decisions must identify the reviewing party (reviewerParty).
+testHumanDecisionRequiresReviewerParty : Script ()
+testHumanDecisionRequiresReviewerParty = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False   -- human decision
+      reviewerParty         = None    -- but no reviewer party → fails
+      reviewedBy            = None
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- High-risk cannot be auto-approved; must go to human review.
+testHighRiskCannotBeAutoApproved : Script ()
+testHighRiskCannotBeAutoApproved = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    agentApproveCompliance ur passingCompliance 30 High p.reviewerAuthCid
+  pure ()
+
+-- Override justification required when human decides after agent flagged.
+testOverrideJustificationRequired : Script ()
+testOverrideJustificationRequired = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  flagged <- submit p.vetify do
+    exerciseCmd ur FlagComplianceForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-compliance-v1.0"
+      note         = "Borderline AML match — refer to human"
+      policyCid    = None
+  -- Human approves without justification after agent flagged → fails
+  submitMustFail p.verifier do
+    exerciseCmd flagged ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None   -- missing → fails
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 1 + Gap 5: AI governance and manual review audit ────────────────────
+
+-- agentNote and agentVersion are persisted on ComplianceReview at flag time.
+testFlagPreservesAgentAudit : Script ()
+testFlagPreservesAgentAudit = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  flagged <- submit p.vetify do
+    exerciseCmd ur FlagComplianceForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-compliance-v1.0"
+      note         = "Borderline NIN match — refer to human"
+      policyCid    = None
+  Some f <- queryContractId p.vetify flagged
+  assertMsg "agentNote persisted" (f.agentNote == Some "Borderline NIN match — refer to human")
+  assertMsg "agentVersion persisted" (f.agentVersion == Some "vetify-compliance-v1.0")
+  assertMsg "agentScore persisted" (f.agentScore == Some 65)
+  pure ()
+
+-- Human approval after agent flag: overrideType and reviewNotes are recorded.
+testHumanOverrideAuditTrail : Script ()
+testHumanOverrideAuditTrail = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  flagged <- submit p.vetify do
+    exerciseCmd ur FlagComplianceForManualReview with
+      riskScore    = 65
+      riskLevel    = Medium
+      agentVersion = "vetify-compliance-v1.0"
+      note         = "Borderline AML match"
+      policyCid    = None
+  (_, result) <- submit p.verifier do
+    exerciseCmd flagged ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = Some "Full manual re-check: AML match was a false positive (name collision)"
+      reviewNotes           = Some "Verified against CBN exclusion list; not the same entity"
+      overrideType          = Some OverrodeApproval
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "reviewerParty recorded" (cr.reviewerParty == Some p.verifier)
+  assertMsg "reviewedBy recorded" (cr.reviewedBy == Some "Fatima Al-Hassan")
+  assertMsg "overrideJustification recorded" (cr.overrideJustification /= None)
+  assertMsg "reviewNotes recorded" (cr.reviewNotes /= None)
+  assertMsg "overrideType recorded" (cr.overrideType == Some OverrodeApproval)
+  pure ()
+
+-- ─── Gap 2: Correction workflow ──────────────────────────────────────────────
+
+-- Supersede creates a ComplianceCorrection leaving the original result intact.
+testSupersede : Script ()
+testSupersede = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (_, result) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  -- Vetify supersedes the incorrect Approved result with a Rejected correction
+  correction <- submit p.vetify do
+    exerciseCmd result Supersede with
+      correctionRef    = "COR-2026-000001"
+      correctedOutcome = Rejected
+      reason           = "Agent misclassified — AML positive on re-run confirmed as true positive"
+      correctedBy      = "Compliance Team"
+  Some cc <- queryContractId p.vetify correction
+  assertMsg "originalComplianceRef" (cc.originalComplianceRef == "COM-2026-000001")
+  assertMsg "originalOutcome is Approved" (cc.originalOutcome == Approved)
+  assertMsg "correctedOutcome is Rejected" (cc.correctedOutcome == Rejected)
+  -- Original result still active
+  Some cr <- queryContractId p.vetify result
+  assertMsg "original result still active (immutable audit trail)" (cr.outcome == Approved)
+  pure ()
+
+-- ─── Gap 2: CompliancePolicy band enforcement ────────────────────────────────
+
+testFlagBandEnforced : Script ()
+testFlagBandEnforced = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v1"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  rv1 <- pendingReview p
+  ur1 <- submit p.vetify do exerciseCmd rv1 StartReview with policyCid = Some policyCid
+  -- Score 85 >= autoApproveMin 80: should have auto-approved, not flagged
+  submitMustFail p.vetify do
+    exerciseCmd ur1 FlagComplianceForManualReview with
+      riskScore = 85, riskLevel = Low, agentVersion = "v1.0", note = "test", policyCid = Some policyCid
+  -- Score 40 < autoRejectMax 50: should have auto-rejected, not flagged
+  submitMustFail p.vetify do
+    exerciseCmd ur1 FlagComplianceForManualReview with
+      riskScore = 40, riskLevel = High, agentVersion = "v1.0", note = "test", policyCid = Some policyCid
+  -- Score 65 in band [50, 80): correct medium risk → succeeds
+  flagged <- submit p.vetify do
+    exerciseCmd ur1 FlagComplianceForManualReview with
+      riskScore = 65, riskLevel = Medium, agentVersion = "vetify-compliance-v1.0"
+      note = "Borderline NIN match — refer to human", policyCid = Some policyCid
+  Some f <- queryContractId p.vetify flagged
+  assertMsg "status is ManualReview" (f.status == ManualReview)
+  assertMsg "agentScore recorded" (f.agentScore == Some 65)
+  pure ()
+
+-- ─── Gap 4 + Gap 1: timestamps and review lifecycle ──────────────────────────
+
+testTimestampsAndAuditChain : Script ()
+testTimestampsAndAuditChain = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  Some rv' <- queryContractId p.vetify rv
+  assertMsg "createdAt is set at creation" (rv'.createdAt /= None)
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  Some ur' <- queryContractId p.vetify ur
+  assertMsg "reviewStartedAt set by StartReview" (ur'.reviewStartedAt /= None)
+  (approved, result) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "verificationRef on result" (cr.verificationRef == "VER-2026-000001")
+  assertMsg "complianceRef on result" (cr.complianceRef == "COM-2026-000001")
+  Some ab <- queryContractId p.vetify approved
+  assertMsg "verificationRef on ApprovedBusiness" (ab.verificationRef == "VER-2026-000001")
+  assertMsg "complianceRef on ApprovedBusiness" (ab.complianceRef == "COM-2026-000001")
+  assertMsg "ApprovedBusiness status is Active" (ab.status == BusinessActive)
+  assertMsg "reviewStartedAt carried to ComplianceResult (gap 3)" (cr.reviewStartedAt /= None)
+  pure ()
+
+-- ─── Gap 1 (Maker-Checker) ───────────────────────────────────────────────────
+
+-- Corrector cannot be the same person as the original human reviewer.
+testMakerCheckerSupersede : Script ()
+testMakerCheckerSupersede = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (_, result) <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  -- Same person as original reviewer → fails
+  submitMustFail p.vetify do
+    exerciseCmd result Supersede with
+      correctionRef    = "COR-2026-000001"
+      correctedOutcome = Rejected
+      reason           = "Re-run confirmed positive"
+      correctedBy      = "Fatima Al-Hassan"
+  -- Different person → succeeds
+  _ <- submit p.vetify do
+    exerciseCmd result Supersede with
+      correctionRef    = "COR-2026-000001"
+      correctedOutcome = Rejected
+      reason           = "Re-run confirmed positive"
+      correctedBy      = "Head of Compliance"
+  pure ()
+
+-- ─── Gap 4 (Expiry Enforcement) ──────────────────────────────────────────────
+
+-- RequestFinancing fails when the ApprovedBusiness approval has expired.
+testExpiryEnforced : Script ()
+testExpiryEnforced = do
+  p <- setupCParties
+  t <- getTime
+  approved <- submit p.vetify do
+    createCmd ApprovedBusiness with
+      business         = p.business
+      vetify           = p.vetify
+      businessName      = sampleProfile.name
+      cacRegNumber      = sampleKyc.cacRegNumber
+      businessSector    = sampleProfile.businessSector
+      businessActivity  = sampleProfile.businessActivity
+      incorporationDate = sampleProfile.incorporationDate
+      verificationRef   = "VER-2026-000001"
+      complianceRef     = "COM-2026-000001"
+      approvedAt        = t
+      status           = BusinessActive
+      expiresAt        = Some t   -- expires at current ledger time
+      suspendedAt      = None
+      suspendedReason  = None
+      reinstatedAt     = None
+      reinstatedReason = None
+  passTime (hours 1)
+  submitMustFail p.business do
+    exerciseCmd approved RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms
+      financingRef         = "FIN-COMP-EXP-001"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  pure ()
+
+-- ─── Gap 5 (Suspension Audit) ────────────────────────────────────────────────
+
+-- Suspend stores suspendedAt and suspendedReason on the contract.
+testSuspensionAuditFields : Script ()
+testSuspensionAuditFields = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  suspended <- submit p.vetify do
+    exerciseCmd approved Suspend with reason = "Monitoring alert — adverse media match"
+  Some s <- queryContractId p.vetify suspended
+  assertMsg "status is Suspended" (s.status == BusinessSuspended)
+  assertMsg "suspendedReason recorded" (s.suspendedReason == Some "Monitoring alert — adverse media match")
+  assertMsg "suspendedAt recorded" (s.suspendedAt /= None)
+  pure ()
+
+-- ─── Gap 6 (Reinstatement Audit) ─────────────────────────────────────────────
+
+-- Reinstate stores reinstatedAt and reinstatedReason; suspension data is preserved.
+testReinstatementAuditFields : Script ()
+testReinstatementAuditFields = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  suspended <- submit p.vetify do
+    exerciseCmd approved Suspend with reason = "Monitoring alert"
+  reinstated <- submit p.vetify do
+    exerciseCmd suspended Reinstate with reason = "Alert cleared — confirmed false positive"
+  Some r <- queryContractId p.vetify reinstated
+  assertMsg "status restored to Active" (r.status == BusinessActive)
+  assertMsg "reinstatedReason recorded" (r.reinstatedReason == Some "Alert cleared — confirmed false positive")
+  assertMsg "reinstatedAt recorded" (r.reinstatedAt /= None)
+  assertMsg "suspendedReason preserved for audit" (r.suspendedReason == Some "Monitoring alert")
+  pure ()
+
+-- ─── Gap 7 (Revocation Audit) ────────────────────────────────────────────────
+
+-- Revoke creates an immutable RevocationRecord (the testRevoke above covers archival).
+testRevocationRecord : Script ()
+testRevocationRecord = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  revRecord <- submit p.vetify do
+    exerciseCmd approved Revoke with
+      reason    = "Confirmed fraudulent application"
+      revokedBy = "Chief Compliance Officer"
+  Some rr <- queryContractId p.vetify revRecord
+  assertMsg "revokedBy on record" (rr.revokedBy == "Chief Compliance Officer")
+  assertMsg "complianceRef links to original approval" (rr.complianceRef == "COM-2026-000001")
+  pure ()
+
+-- ─── Gap 9 (AML Evidence Validation) ─────────────────────────────────────────
+
+-- Auto-decided approval without amlEvidence is rejected.
+testAutoDecidedRequiresAmlEvidence : Script ()
+testAutoDecidedRequiresAmlEvidence = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = True
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-compliance-v1.0"
+      aiMetadata            = Some sampleComplianceAIMetadata
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None   -- missing on auto-decided path → fails
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 11 (Policy Effective Dates) ─────────────────────────────────────────
+
+-- effectiveTo before effectiveFrom violates ensure → policy creation fails.
+testPolicyEffectiveDateRange : Script ()
+testPolicyEffectiveDateRange = do
+  p <- setupCParties
+  t <- getTime
+  submitMustFail p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v1"
+      effectiveFrom        = addRelTime t (hours 24)  -- future
+      effectiveTo          = Some t                   -- past (before effectiveFrom) → invalid
+      scoringWeights       = sampleComplianceScoringWeights
+  pure ()
+
+-- ─── Gap 13 (Reviewer Independence) ──────────────────────────────────────────
+
+-- Business cannot be set as the compliance reviewer.
+testReviewerCannotBeBusiness : Script ()
+testReviewerCannotBeBusiness = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.business   -- business as reviewer → fails
+      reviewedBy            = Some "Business"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 1 (new): SLA escalation ────────────────────────────────────────────
+
+-- SLA window expired: EscalateOverdue moves UnderReview → ManualReview.
+testEscalateOverdue : Script ()
+testEscalateOverdue = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v1"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = Some policyCid
+  passTime (hours 49)
+  escalated <- submit p.vetify do
+    exerciseCmd ur EscalateOverdue with fallbackSlaHours = 48, policyCid = Some policyCid
+  Some e <- queryContractId p.vetify escalated
+  assertMsg "status is ManualReview after escalation" (e.status == ManualReview)
+  pure ()
+
+-- SLA window not yet expired: EscalateOverdue is rejected.
+testEscalateBeforeSlaExpiry : Script ()
+testEscalateBeforeSlaExpiry = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v1"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = Some policyCid
+  passTime (hours 24)
+  submitMustFail p.vetify do
+    exerciseCmd ur EscalateOverdue with fallbackSlaHours = 48, policyCid = Some policyCid
+  pure ()
+
+-- ─── Gap 2 (new): AML evidence refs ─────────────────────────────────────────
+
+-- Evidence refs passed to ApproveCompliance are persisted on ComplianceResult.
+testAmlEvidenceOnResult : Script ()
+testAmlEvidenceOnResult = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (_, result) <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = True
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-compliance-v1.0"
+      aiMetadata            = Some sampleComplianceAIMetadata
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "amlEvidence stored on result" (cr.amlEvidence == Some sampleAmlEvidence)
+  pure ()
+
+-- ─── Gap 4 (new): ApprovedBusiness lifecycle ─────────────────────────────────
+
+-- Suspended business cannot request new financing.
+testSuspendPreventsFinancing : Script ()
+testSuspendPreventsFinancing = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  suspended <- submit p.vetify do
+    exerciseCmd approved Suspend with reason = "Suspicious activity detected"
+  submitMustFail p.business do
+    exerciseCmd suspended RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms
+      financingRef         = "FIN-COMP-SUSP-001"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  pure ()
+
+-- Reinstate restores Active status and financing access.
+testSuspendReinstate : Script ()
+testSuspendReinstate = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  suspended <- submit p.vetify do
+    exerciseCmd approved Suspend with reason = "Monitoring alert"
+  reinstated <- submit p.vetify do
+    exerciseCmd suspended Reinstate with reason = "Alert cleared — false positive"
+  Some r <- queryContractId p.vetify reinstated
+  assertMsg "status is Active after reinstate" (r.status == BusinessActive)
+  _ <- submit p.business do
+    exerciseCmd reinstated RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms
+      financingRef         = "FIN-COMP-REINST-001"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  pure ()
+
+-- Revoke archives the ApprovedBusiness permanently.
+testRevoke : Script ()
+testRevoke = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  revRecord <- submit p.vetify do
+    exerciseCmd approved Revoke with
+      reason    = "Fraudulent application confirmed"
+      revokedBy = "Senior Compliance Officer"
+  result <- queryContractId p.business approved
+  assertMsg "ApprovedBusiness archived on revocation" (result == None)
+  Some rr <- queryContractId p.vetify revRecord
+  assertMsg "reason on RevocationRecord" (rr.reason == "Fraudulent application confirmed")
+  assertMsg "cacRegNumber on RevocationRecord" (rr.cacRegNumber == "RC123456")
+  pure ()
+
+-- ─── Gap 5 (new): Periodic re-certification ──────────────────────────────────
+
+-- RequestRecertification archives ApprovedBusiness and creates a fresh ComplianceReview.
+testRecertification : Script ()
+testRecertification = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (approved, _) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  newReview <- submit p.vetify do
+    exerciseCmd approved RequestRecertification with
+      verifier = p.verifier
+      advisor = p.advisor
+      newComplianceRef  = "COM-2026-000002"
+      reason            = "Annual re-KYC/re-KYB required by CBN NIFI Framework"
+  -- Old ApprovedBusiness is archived
+  old <- queryContractId p.business approved
+  assertMsg "Old ApprovedBusiness archived" (old == None)
+  -- New ComplianceReview is pending
+  Some nr <- queryContractId p.vetify newReview
+  assertMsg "New review is Pending" (nr.status == Pending)
+  assertMsg "complianceRef is new" (nr.complianceRef == "COM-2026-000002")
+  assertMsg "verificationRef carried from original" (nr.verificationRef == "VER-2026-000001")
+  pure ()
+
+-- ─── Gap 14 (Four-Eyes Principle) ────────────────────────────────────────────
+
+-- The person who created the review cannot be the same one who approves it.
+testFourEyesApproval : Script ()
+testFourEyesApproval = do
+  p <- setupCParties
+  t <- getTime
+  -- Create the review with a named creator
+  rv <- submit p.vetify do
+    createCmd ComplianceReview with
+      business                = p.business
+      vetify                  = p.vetify
+      verifier                = p.verifier
+      businessName            = sampleProfile.name
+      cacRegNumber            = sampleKyc.cacRegNumber
+      businessSector          = sampleProfile.businessSector
+      businessActivity        = sampleProfile.businessActivity
+      incorporationDate       = sampleProfile.incorporationDate
+      verificationRef         = "VER-2026-000001"
+      complianceRef           = "COM-2026-000001"
+      status                  = Pending
+      checks                  = None
+      agentScore              = None
+      agentRisk               = None
+      agentNote               = None
+      agentVersion            = None
+      createdAt               = Some t
+      reviewStartedAt         = None
+      compliancePolicyVersion = None
+      policySnapshot          = None
+      createdBy               = Some "Fatima Al-Hassan"  -- same name as reviewer below
+      shariahVerdict          = None
+      advisor            = p.advisor
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  -- Reviewer is the same person as creator → fails (four-eyes violation)
+  submitMustFail p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  -- Different reviewer → succeeds
+  _ <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Amina Ibrahim"   -- different from createdBy
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = None
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 15 (Role Authorization) ─────────────────────────────────────────────
+
+-- Deauthorizing the compliance officer prevents further approvals.
+testDeauthorizedReviewerBlocked : Script ()
+testDeauthorizedReviewerBlocked = do
+  p <- setupCParties
+  -- Deauthorize the AuthorizedReviewer created by setupCParties. No contract
+  -- keys on SDK 3.4.11 / Daml-LF 2.1/2.2, so there is no queryByKey/lookupByKey
+  -- to resolve it — CParties already carries the ContractId from setup.
+  submit p.vetify do
+    exerciseCmd p.reviewerAuthCid Deauthorize with reason = "Officer resigned"
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  submitMustFail p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  pure ()
+
+-- ─── Gap 16 (Policy Snapshot) ────────────────────────────────────────────────
+
+-- Full policy snapshot (not just version string) is stored on ComplianceResult.
+testPolicySnapshotOnResult : Script ()
+testPolicySnapshotOnResult = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = Some policyCid
+  (_, result) <- submit p.verifier do
+    agentApproveCompliance ur passingCompliance 88 Low p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  case cr.policySnapshot of
+    None -> assertFail "Expected policySnapshot to be captured at StartReview"
+    Some snap -> do
+      assertMsg "snapshot.policyVersion matches" (snap.policyVersion == "2026-v3")
+      assertMsg "snapshot.autoApproveMin matches" (snap.autoApproveMin == 80)
+      assertMsg "snapshot.escalationSlaHours matches" (snap.escalationSlaHours == 48)
+  pure ()
+
+-- ─── Gap 20 (Assignment Workflow) ────────────────────────────────────────────
+
+-- AssignReview changes the verifier on a Pending review.
+testAssignReview : Script ()
+testAssignReview = do
+  p <- setupCParties
+  -- Allocate a second officer and authorize them
+  officer2 <- allocateParty "Verifier2"
+  t <- getTime
+  submit p.vetify do
+    createCmd AuthorizedReviewer with
+      vetify            = p.vetify
+      verifier = officer2
+      authorizedBy      = "Vetify Admin"
+      authorizedAt      = t
+      role              = "Compliance Officer"
+  rv <- pendingReview p
+  -- Assign to officer2
+  reassigned <- submit p.vetify do
+    exerciseCmd rv AssignReview with
+      newOfficer     = officer2
+      assignedByName = "Head of Compliance"
+  Some r <- queryContractId p.vetify reassigned
+  assertMsg "verifier updated to officer2" (r.verifier == officer2)
+  assertMsg "still Pending after assignment" (r.status == Pending)
+  pure ()
+
+-- ─── Gap 21 (Officer Reassignment) ───────────────────────────────────────────
+
+-- ReassignReview changes the officer mid-review; same officer is rejected.
+testReassignReview : Script ()
+testReassignReview = do
+  p <- setupCParties
+  officer2 <- allocateParty "Verifier2"
+  t <- getTime
+  submit p.vetify do
+    createCmd AuthorizedReviewer with
+      vetify            = p.vetify
+      verifier = officer2
+      authorizedBy      = "Vetify Admin"
+      authorizedAt      = t
+      role              = "Compliance Officer"
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  -- Reassign to same officer → fails
+  submitMustFail p.vetify do
+    exerciseCmd ur ReassignReview with
+      newOfficer = p.verifier
+      reason     = "No change"
+  -- Reassign to different officer → succeeds
+  reassigned <- submit p.vetify do
+    exerciseCmd ur ReassignReview with
+      newOfficer = officer2
+      reason     = "Original officer on leave"
+  Some r <- queryContractId p.vetify reassigned
+  assertMsg "verifier updated" (r.verifier == officer2)
+  pure ()
+
+-- ─── Gap 22 (Expiry Lifecycle) ────────────────────────────────────────────────
+
+-- ExpireBusiness transitions Active → BusinessExpired after expiresAt.
+testExpireBusiness : Script ()
+testExpireBusiness = do
+  p <- setupCParties
+  t <- getTime
+  ab <- submit p.vetify do
+    createCmd ApprovedBusiness with
+      business         = p.business
+      vetify           = p.vetify
+      businessName      = sampleProfile.name
+      cacRegNumber      = sampleKyc.cacRegNumber
+      businessSector    = sampleProfile.businessSector
+      businessActivity  = sampleProfile.businessActivity
+      incorporationDate = sampleProfile.incorporationDate
+      verificationRef   = "VER-2026-000001"
+      complianceRef     = "COM-2026-000001"
+      approvedAt        = t
+      status           = BusinessActive
+      expiresAt        = Some t
+      suspendedAt      = None
+      suspendedReason  = None
+      reinstatedAt     = None
+      reinstatedReason = None
+  -- Cannot expire before the deadline passes
+  submitMustFail p.vetify do
+    exerciseCmd ab ExpireBusiness with reason = "Annual review"
+  passTime (hours 1)
+  expired <- submit p.vetify do
+    exerciseCmd ab ExpireBusiness with reason = "Annual approval period ended"
+  Some e <- queryContractId p.vetify expired
+  assertMsg "status is BusinessExpired" (e.status == BusinessExpired)
+  -- Expired business cannot request financing
+  submitMustFail p.business do
+    exerciseCmd expired RequestFinancing with
+      financialInstitution = p.fi
+      assessor          = p.assessor
+      terms                = sampleFinancingTerms
+      financingRef         = "FIN-COMP-EXP-002"
+      verificationRef      = None
+      complianceRef        = None
+      supportingDocuments  = []
+      businessSector       = "Food Retail"
+  pure ()
+
+-- ─── Gap 25 (Document Traceability) ──────────────────────────────────────────
+
+-- Documents passed to ApproveCompliance are persisted on ComplianceResult.
+testComplianceDocumentsOnResult : Script ()
+testComplianceDocumentsOnResult = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (_, result) <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = True
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-compliance-v1.0"
+      aiMetadata            = Some sampleComplianceAIMetadata
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = [sampleDocRef]
+      shariahAssessment     = None
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  assertMsg "complianceDocuments persisted" (cr.complianceDocuments == [sampleDocRef])
+  pure ()
+
+-- ─── Gap 27 (Detailed Shariah Review) ────────────────────────────────────────
+
+-- ShariahAssessment stored on ComplianceResult with full structured output.
+testShariahAssessmentOnResult : Script ()
+testShariahAssessmentOnResult = do
+  p <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  (_, result) <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = True
+      reviewerParty         = None
+      reviewedBy            = None
+      agentVersion          = Some "vetify-compliance-v1.0"
+      aiMetadata            = Some sampleComplianceAIMetadata
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = Some sampleShariahAssessment
+      eddCaseCid            = None
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some cr <- queryContractId p.vetify result
+  case cr.shariahAssessment of
+    None -> assertFail "Expected shariahAssessment to be stored"
+    Some sa -> do
+      assertMsg "verdict is COMPLIANT" (sa.verdict == "COMPLIANT")
+      assertMsg "aaoifiStandards recorded" (length sa.aaoifiStandards == 2)
+      assertMsg "agentRef recorded" (sa.agentRef /= None)
+  pure ()
+
+-- ─── Maker-checker for CompliancePolicy changes ────────────────────────────
+
+-- ApprovePolicyChange with a distinct approver activates the proposal.
+testCompliancePolicyChangeApprovedByDifferentPerson : Script ()
+testCompliancePolicyChangeApprovedByDifferentPerson = do
+  p <- setupCParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights with amlBothClear = 40
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review — raise AML weight"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  activeCid <- submit p.vetify do
+    exerciseCmd endorsed ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  Some active <- queryContractId p.vetify activeCid
+  assertMsg "activated policy carries the proposed weights" (active.scoringWeights.amlBothClear == 40)
+  assertMsg "activated policy carries the proposed version" (active.policyVersion == "2026-v3")
+
+-- The same person cannot both propose and approve.
+testCompliancePolicyChangeCannotSelfApprove : Script ()
+testCompliancePolicyChangeCannotSelfApprove = do
+  p <- setupCParties
+  t <- getTime
+  -- A real registrant, distinct from the point being tested (self-approval
+  -- fails before the approver registry is even consulted) — still needed to
+  -- supply a well-typed ContractId PolicyApprover argument.
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Alice (Risk Analyst)"
+      role         = "Risk Analyst"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Alice (Risk Analyst)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- Approving a proposal replaces whichever CompliancePolicy was previously
+-- active, and the ledger key prevents a second one from coexisting.
+testCompliancePolicyChangeReplacesActivePolicy : Script ()
+testCompliancePolicyChangeReplacesActivePolicy = do
+  p <- setupCParties
+  t <- getTime
+  policyCid <- submit p.vetify do
+    createCmd CompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v1"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v2"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights with kybActiveFullMatch = 10
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Lower KYB weight"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  activeCid <- submit p.vetify do
+    exerciseCmd endorsed ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = Some policyCid
+  Some active <- queryContractId p.vetify activeCid
+  assertMsg "the new policy version is active" (active.policyVersion == "2026-v2")
+  assertMsg "the old scoringWeights no longer apply" (active.scoringWeights.kybActiveFullMatch == 10)
+  -- Not asserted here: that a second CompliancePolicy create would now fail
+  -- on the vetify-singleton key — dpm test's in-memory Script interpreter
+  -- doesn't enforce ledger-level key uniqueness, only a real Canton
+  -- participant does. ApprovePolicyChange's own successful create (asserted
+  -- above) already proves the archive-then-create ran cleanly.
+  pure ()
+
+-- RejectPolicyChange withdraws a proposal without ever creating a CompliancePolicy.
+testCompliancePolicyChangeCanBeRejected : Script ()
+testCompliancePolicyChangeCanBeRejected = do
+  p <- setupCParties
+  t <- getTime
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Experimental change"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submit p.vetify do
+    exerciseCmd pending RejectPolicyChange with
+      rejectedBy      = "Alice (Risk Analyst)"
+      rejectionReason = "Decided against it before anyone else reviewed"
+  pure ()
+
+-- Layer 1 of the Policy-Approval Security Roadmap: an unregistered name
+-- cannot approve, even though it legitimately differs from proposedBy.
+testCompliancePolicyChangeFailsIfApproverNotRegistered : Script ()
+testCompliancePolicyChangeFailsIfApproverNotRegistered = do
+  p <- setupCParties
+  t <- getTime
+  -- A real, distinct registrant — "Carol" herself was never registered, so
+  -- we prove the identity-mismatch assertion in requireActivePolicyApprover
+  -- fires: Bob's ContractId does not name "Carol".
+  bobApproverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Carol (Nobody in Particular)"
+      approverCid      = bobApproverCid
+      currentPolicyCid = None
+  pure ()
+
+-- A deactivated approver cannot approve, even though they were once registered.
+testCompliancePolicyChangeFailsIfApproverDeactivated : Script ()
+testCompliancePolicyChangeFailsIfApproverDeactivated = do
+  p <- setupCParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  submit p.vetify do
+    exerciseCmd approverCid DeactivatePolicyApprover with
+      reason      = "Left the risk committee"
+      performedBy = "Vetify Founder"
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- Layer 2 of the Policy-Approval Security Roadmap: vetify cannot finalize a
+-- compliance policy change on its own, even with a validly registered
+-- approver, until the Risk Committee's own separately-signed transaction has
+-- endorsed it.
+testCompliancePolicyChangeFailsWithoutRiskCommitteeEndorsement : Script ()
+testCompliancePolicyChangeFailsWithoutRiskCommitteeEndorsement = do
+  p <- setupCParties
+  t <- getTime
+  approverCid <- submit p.vetify do
+    createCmd PolicyApprover with
+      vetify       = p.vetify
+      approverName = "Bob (Risk Manager)"
+      role         = "Risk Manager"
+      authorizedBy = "Vetify Founder"
+      authorizedAt = t
+      active       = True
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  -- No EndorseByRiskCommittee call — a registered approver alone is not enough.
+  submitMustFail p.vetify do
+    exerciseCmd pending ApprovePolicyChange with
+      approvedBy       = "Bob (Risk Manager)"
+      approverCid      = approverCid
+      currentPolicyCid = None
+  pure ()
+
+-- EndorseByRiskCommittee cannot be exercised twice on the same proposal.
+testCompliancePolicyChangeCannotDoubleEndorse : Script ()
+testCompliancePolicyChangeCannotDoubleEndorse = do
+  p <- setupCParties
+  t <- getTime
+  pending <- submit p.vetify do
+    createCmd PendingCompliancePolicy with
+      vetify               = p.vetify
+      autoApproveMin       = 80
+      autoRejectMax        = 50
+      escalationSlaHours   = 48
+      shariahPolicyVersion = "AAOIFI-2023-Std8"
+      policyVersion        = "2026-v3"
+      effectiveFrom        = t
+      effectiveTo          = None
+      scoringWeights       = sampleComplianceScoringWeights
+      proposedBy           = "Alice (Risk Analyst)"
+      reason               = "Quarterly rubric review"
+      proposedAt           = t
+      riskCommittee           = p.riskCommittee
+      riskCommitteeEndorsedBy = None
+      riskCommitteeEndorsedAt = None
+  endorsed <- submit p.riskCommittee do
+    exerciseCmd pending EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  submitMustFail p.riskCommittee do
+    exerciseCmd endorsed EndorseByRiskCommittee with endorsedBy = "Imam Yusuf Abdullahi"
+  pure ()
+
+-- ─── G14: Enhanced Due Diligence case (PEP hits) ──────────────────────────────
+
+-- OpenEddCase creates an Open EDDCase linked to this review, with an empty checklist.
+testOpenEddCaseCreated : Script ()
+testOpenEddCaseCreated = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  eddCid <- submit p.vetify do exerciseCmd ur OpenEddCase with triggerReason = "PEP_HIT"
+  Some edd <- queryContractId p.vetify eddCid
+  assertMsg "status Open" (edd.status == EddOpen)
+  assertMsg "trigger reason stored" (edd.triggerReason == "PEP_HIT")
+  assertMsg "checklist starts incomplete" (not edd.checklist.sourceOfWealthVerified)
+  assertMsg "linked to this review" (edd.complianceReviewCid == ur)
+
+-- ApproveCompliance must fail while the referenced EDD case is still Open.
+testApproveComplianceBlockedByOpenEddCase : Script ()
+testApproveComplianceBlockedByOpenEddCase = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  eddCid <- submit p.vetify do exerciseCmd ur OpenEddCase with triggerReason = "PEP_HIT"
+  submitMustFail p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = Some eddCid
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()
+
+-- CloseEddCase must fail while any checklist item is incomplete.
+testCloseEddCaseRequiresCompleteChecklist : Script ()
+testCloseEddCaseRequiresCompleteChecklist = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  eddCid <- submit p.vetify do exerciseCmd ur OpenEddCase with triggerReason = "PEP_HIT"
+  -- Only partially fill the checklist.
+  eddCid1 <- submit p.verifier do
+    exerciseCmd eddCid UpdateEddChecklist with
+      sourceOfWealthVerified  = Some True
+      sourceOfWealthNote      = Some "Business income verified via bank statements"
+      enhancedMediaSearchDone = None
+      seniorManagementSignoff = None
+      monitoringFrequency     = None
+  submitMustFail p.verifier do
+    exerciseCmd eddCid1 CloseEddCase with closedBy_ = "Fatima Al-Hassan"
+  pure ()
+
+-- Full workflow: open → fill checklist → close → ApproveCompliance now succeeds.
+testApproveComplianceSucceedsAfterEddClosed : Script ()
+testApproveComplianceSucceedsAfterEddClosed = do
+  p  <- setupCParties
+  rv <- pendingReview p
+  ur <- submit p.vetify do exerciseCmd rv StartReview with policyCid = None
+  eddCid <- submit p.vetify do exerciseCmd ur OpenEddCase with triggerReason = "PEP_HIT"
+  eddCid1 <- submit p.verifier do
+    exerciseCmd eddCid UpdateEddChecklist with
+      sourceOfWealthVerified  = Some True
+      sourceOfWealthNote      = Some "Business income verified via bank statements"
+      enhancedMediaSearchDone = Some True
+      seniorManagementSignoff = Some "Chief Compliance Officer — Amina Bello"
+      monitoringFrequency     = Some "quarterly"
+  eddCid2 <- submit p.verifier do
+    exerciseCmd eddCid1 CloseEddCase with closedBy_ = "Fatima Al-Hassan"
+  Some closedCase <- queryContractId p.vetify eddCid2
+  assertMsg "status Closed" (closedCase.status == EddClosed)
+  (_, result) <- submit p.verifier do
+    exerciseCmd ur ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = Some eddCid2
+      reviewerAuthCid       = p.reviewerAuthCid
+  Some res <- queryContractId p.verifier result
+  assertMsg "approved" (res.outcome == Approved)
+
+-- An EDD case tied to a different ComplianceReview cannot gate this one's approval.
+testEddCaseForWrongReviewBlocked : Script ()
+testEddCaseForWrongReviewBlocked = do
+  p   <- setupCParties
+  rv1 <- pendingReview p
+  ur1 <- submit p.vetify do exerciseCmd rv1 StartReview with policyCid = None
+  eddCid <- submit p.vetify do exerciseCmd ur1 OpenEddCase with triggerReason = "PEP_HIT"
+  eddCid1 <- submit p.verifier do
+    exerciseCmd eddCid UpdateEddChecklist with
+      sourceOfWealthVerified  = Some True
+      sourceOfWealthNote      = None
+      enhancedMediaSearchDone = Some True
+      seniorManagementSignoff = Some "CCO"
+      monitoringFrequency     = Some "quarterly"
+  eddCid2 <- submit p.verifier do
+    exerciseCmd eddCid1 CloseEddCase with closedBy_ = "Fatima Al-Hassan"
+  -- A second, unrelated review — the closed EDD case above belongs to the FIRST review.
+  rv2 <- submit p.vetify do
+    createCmd ComplianceReview with
+      business                = p.business
+      vetify                  = p.vetify
+      verifier                = p.verifier
+      businessName            = sampleProfile.name
+      cacRegNumber            = sampleKyc.cacRegNumber <> "-2"
+      businessSector          = sampleProfile.businessSector
+      businessActivity        = sampleProfile.businessActivity
+      incorporationDate       = sampleProfile.incorporationDate
+      verificationRef         = "VER-2026-000002"
+      complianceRef           = "COM-2026-000002"
+      status                  = Pending
+      checks                  = None
+      agentScore              = None
+      agentRisk               = None
+      agentNote               = None
+      agentVersion            = None
+      createdAt               = None
+      reviewStartedAt         = None
+      compliancePolicyVersion = None
+      policySnapshot          = None
+      createdBy               = None
+      shariahVerdict          = None
+      advisor                 = p.advisor
+  ur2 <- submit p.vetify do exerciseCmd rv2 StartReview with policyCid = None
+  submitMustFail p.verifier do
+    exerciseCmd ur2 ApproveCompliance with
+      completedChecks       = passingCompliance
+      riskScore             = 88
+      riskLevel             = Low
+      autoDecided           = False
+      reviewerParty         = Some p.verifier
+      reviewedBy            = Some "Fatima Al-Hassan"
+      agentVersion          = None
+      aiMetadata            = None
+      overrideJustification = None
+      reviewNotes           = None
+      overrideType          = None
+      amlEvidence           = Some sampleAmlEvidence
+      complianceDocuments   = []
+      shariahAssessment     = None
+      eddCaseCid            = Some eddCid2
+      reviewerAuthCid       = p.reviewerAuthCid
+  pure ()

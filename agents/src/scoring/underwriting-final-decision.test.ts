@@ -86,3 +86,52 @@ test("determinism: identical input produces identical output", () => {
   const b = combineEngines(engines(), DEFAULT_UNDERWRITING_WEIGHTS, 1_000_000, 500_000, 1.8);
   assert.deepEqual(a, b);
 });
+
+// ── decision: mirrors VerificationDecision/ComplianceDecision's action-branching ──
+
+test("Low risk composite decides BeginUnderwriting (auto-qualify)", () => {
+  const { decision } = combineEngines(engines(), DEFAULT_UNDERWRITING_WEIGHTS, 1_000_000, 500_000, 1.8);
+  assert.deepEqual(decision, { action: "BeginUnderwriting", autoDecided: true });
+});
+
+test("Medium risk composite decides FlagUnderwritingForManualReview", () => {
+  const medium: EngineResult = { score: 65, flags: [] };
+  const { assessment, decision } = combineEngines(
+    { financialBehaviour: medium, cashflowRisk: medium, creditworthiness: medium, fraudDetection: medium },
+    DEFAULT_UNDERWRITING_WEIGHTS, 1_000_000, 500_000, 1.2,
+  );
+  assert.equal(assessment.riskCategory, "Medium");
+  assert.equal(decision.action, "FlagUnderwritingForManualReview");
+  if (decision.action === "FlagUnderwritingForManualReview") {
+    assert.equal(decision.note, assessment.recommendation);
+  }
+});
+
+test("High risk composite decides RejectUnderwriting (hard veto) with a reason", () => {
+  // fraudDetection stays strong (100) here specifically to isolate the plain
+  // composite-score High-risk path from the fraud hard-override path (tested
+  // separately below) — a weak fraud score would trigger both at once.
+  const weak: EngineResult = { score: 20, flags: [] };
+  const { assessment, decision } = combineEngines(
+    { financialBehaviour: weak, cashflowRisk: weak, creditworthiness: weak, fraudDetection: strong },
+    DEFAULT_UNDERWRITING_WEIGHTS, 1_000_000, 500_000, 0.5,
+  );
+  assert.equal(assessment.riskCategory, "High");
+  assert.equal(decision.action, "RejectUnderwriting");
+  if (decision.action === "RejectUnderwriting") {
+    assert.equal(decision.autoDecided, true);
+    assert.match(decision.reason, /High-risk band/);
+  }
+});
+
+test("fraud hard override routes to RejectUnderwriting, not just a Flag, since riskCategory is forced High", () => {
+  const { assessment, decision } = combineEngines(
+    engines({ fraudDetection: { score: 20, flags: [] } }),
+    DEFAULT_UNDERWRITING_WEIGHTS, 1_000_000, 500_000, 1.8,
+  );
+  assert.equal(assessment.riskCategory, "High");
+  assert.equal(decision.action, "RejectUnderwriting");
+  if (decision.action === "RejectUnderwriting") {
+    assert.match(decision.reason, /Fraud Detection score/);
+  }
+});

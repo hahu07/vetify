@@ -20,7 +20,6 @@ import {
   useApprovedProviders, useAuthorizedOfficers,
 } from '../../api/client'
 import type { FinancingRequest } from '../../api/client'
-import { FI_PARTY_ID } from '../../api/parties'
 
 const approveSchema = z.object({
   description: z.string().min(3, 'Describe the asset being financed'),
@@ -28,10 +27,16 @@ const approveSchema = z.object({
   supplierRef: z.string().min(1, 'Supplier invoice/PO reference is required'),
   estimatedCost: z.number({ invalid_type_error: 'Enter estimated cost' }).positive(),
   approvingOfficerId: z.string().min(1, 'Select an authorizing officer'),
+  approvedByName: z.string().optional(),
+  reasonCode: z.string().optional(),
+  decisionFactors: z.string().optional(),
 })
 
 const rejectSchema = z.object({
   reason: z.string().min(10, 'Reason must be at least 10 characters'),
+  rejectedByName: z.string().optional(),
+  reasonCode: z.string().optional(),
+  decisionFactors: z.string().optional(),
 })
 
 type ApproveFormData = z.infer<typeof approveSchema>
@@ -65,11 +70,17 @@ export default function UnderwritingQueue() {
   const rejectFinancing = useRejectFinancing()
   const approveFinancing = useApproveFinancing()
 
-  const myApprovedProvider = approvedProviders?.find(
-    (p) => p.financialInstitution === FI_PARTY_ID && p.approvedInstruments.includes('Murabahah')
-  )
+  // GET /providers/approved is already scoped server-side to this session's own institution
+  // (self-serve financer sessions carry their own dynamically-allocated party; the legacy
+  // shared demo account falls through to an unscoped view) — comparing against the hard-coded
+  // FI_PARTY_ID constant here only ever matched the one static demo party, so every genuine
+  // self-serve-signed-up institution saw "not an approved provider" even after actually being
+  // approved. Same bug, same fix, as FinancingForm.tsx's financial-institution routing:
+  // ProviderSettings.tsx already trusts this same scoped response with `approvedProviders?.[0]`
+  // — mirrored here instead of re-deriving "mine" from a constant that isn't mine.
+  const myApprovedProvider = approvedProviders?.find((p) => p.approvedInstruments.includes('Murabahah'))
   const myCreditOfficers = (officers ?? []).filter(
-    (o) => o.financialInstitution === FI_PARTY_ID && o.active && o.roles.includes('CreditOfficer')
+    (o) => o.financialInstitution === myApprovedProvider?.financialInstitution && o.active && o.roles.includes('CreditOfficer')
   )
 
   const {
@@ -80,7 +91,10 @@ export default function UnderwritingQueue() {
     reset: resetApprove,
   } = useForm<ApproveFormData>({
     resolver: zodResolver(approveSchema),
-    defaultValues: { description: '', supplier: '', supplierRef: '', estimatedCost: 0, approvingOfficerId: '' },
+    defaultValues: {
+      description: '', supplier: '', supplierRef: '', estimatedCost: 0, approvingOfficerId: '',
+      approvedByName: '', reasonCode: '', decisionFactors: '',
+    },
   })
 
   const {
@@ -98,7 +112,13 @@ export default function UnderwritingQueue() {
     if (!rejectModal) return
     setRejectError(null)
     try {
-      await rejectFinancing.mutateAsync({ id: rejectModal.id, reason: data.reason })
+      await rejectFinancing.mutateAsync({
+        id: rejectModal.id,
+        reason: data.reason,
+        rejectedByName: data.rejectedByName || undefined,
+        reasonCode: data.reasonCode || undefined,
+        decisionFactors: data.decisionFactors ? data.decisionFactors.split(',').map((f) => f.trim()).filter(Boolean) : undefined,
+      })
       setRejectModal(null)
       resetReject()
     } catch (e) {
@@ -121,6 +141,9 @@ export default function UnderwritingQueue() {
           },
           approvedProviderCid: myApprovedProvider.id,
           approvingOfficerId: data.approvingOfficerId,
+          approvedByName: data.approvedByName || undefined,
+          reasonCode: data.reasonCode || undefined,
+          decisionFactors: data.decisionFactors ? data.decisionFactors.split(',').map((f) => f.trim()).filter(Boolean) : undefined,
         },
       })
       setApproveModal(null)
@@ -371,6 +394,21 @@ export default function UnderwritingQueue() {
                   {approveErrors.approvingOfficerId && <p className="text-xs text-red-600 mt-1">{approveErrors.approvingOfficerId.message}</p>}
                 </div>
 
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Approved By <span className="text-gray-400 font-normal">(optional)</span></label>
+                    <input className="input text-sm" {...registerApprove('approvedByName')} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Reason Code <span className="text-gray-400 font-normal">(optional)</span></label>
+                    <input className="input text-sm" placeholder="e.g. LOW_RISK_AUTO" {...registerApprove('reasonCode')} />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Decision Factors <span className="text-gray-400 font-normal">(optional, comma-separated)</span></label>
+                  <input className="input text-sm" placeholder="Strong DSCR, established business, clean credit history" {...registerApprove('decisionFactors')} />
+                </div>
+
                 {approveError && <p className="text-xs text-red-600">{approveError}</p>}
 
                 <div className="flex gap-3 pt-1">
@@ -418,6 +456,21 @@ export default function UnderwritingQueue() {
                   {...registerReject('reason')}
                 />
                 {rejectErrors.reason && <p className="text-xs text-red-600 mt-1">{rejectErrors.reason.message}</p>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Rejected By <span className="text-gray-400 font-normal">(optional)</span></label>
+                  <input className="input text-sm" {...registerReject('rejectedByName')} />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Reason Code <span className="text-gray-400 font-normal">(optional)</span></label>
+                  <input className="input text-sm" placeholder="e.g. INSUFFICIENT_DSCR" {...registerReject('reasonCode')} />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Decision Factors <span className="text-gray-400 font-normal">(optional, comma-separated)</span></label>
+                <input className="input text-sm" placeholder="Weak cash flow, high existing debt" {...registerReject('decisionFactors')} />
               </div>
 
               {rejectError && <p className="text-xs text-red-600">{rejectError}</p>}

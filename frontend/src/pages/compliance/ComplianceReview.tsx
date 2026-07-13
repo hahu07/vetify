@@ -11,6 +11,7 @@ import {
   X,
   FileSearch,
   BookOpen,
+  UserSearch,
 } from 'lucide-react'
 import Layout from '../../components/Layout'
 import StatusBadge from '../../components/StatusBadge'
@@ -19,8 +20,12 @@ import { formatDate } from '../../lib/formatters'
 import {
   useComplianceQueue, useOnboardingList, useApproveCompliance, useRejectCompliance,
   useFlagComplianceForManualReview,
+  useEddCases, useOpenEddCase, useUpdateEddChecklist, useCloseEddCase,
+  useStartReview, useAssignReview, useReassignReview, useSupersedeShariahVerdict,
+  useEscalateComplianceOverdue,
 } from '../../api/client'
-import type { ComplianceCheck, RiskLevel } from '../../api/client'
+import type { ComplianceCheck, RiskLevel, ShariahAssessmentInput } from '../../api/client'
+import { VERIFIER_PARTY_ID } from '../../api/parties'
 
 function RiskGauge({ score }: { score: number }) {
   const circumference = 2 * Math.PI * 40
@@ -88,8 +93,43 @@ export default function ComplianceReview() {
   const rejectCompliance = useRejectCompliance()
   const flagCompliance = useFlagComplianceForManualReview()
 
+  const { data: eddCases } = useEddCases()
+  const openEddCase = useOpenEddCase()
+  const updateEddChecklist = useUpdateEddChecklist()
+  const closeEddCase = useCloseEddCase()
+
+  const startReview = useStartReview()
+  const assignReview = useAssignReview()
+  const reassignReview = useReassignReview()
+  const supersedeShariahVerdict = useSupersedeShariahVerdict()
+  const escalateOverdue = useEscalateComplianceOverdue()
+  const [escalateError, setEscalateError] = useState<string | null>(null)
+
   const review = queue?.find((r) => r.id === id)
   const onboarding = onboardingList?.find((o) => o.kyc.cacRegNumber === review?.cacNumber)
+  // A review can have more than one EDDCase over time (e.g. re-screened later) — the approval
+  // gate must catch *any* still-open one, not just whichever happens to be first in the list.
+  const eddCasesForReview = eddCases?.filter((e) => e.cacNumber === review?.cacNumber) ?? []
+  const eddCase = eddCasesForReview.find((e) => e.status === 'EddOpen') ?? eddCasesForReview[0]
+
+  const [eddTriggerReason, setEddTriggerReason] = useState('')
+  const [eddError, setEddError] = useState<string | null>(null)
+  const [sourceOfWealthNote, setSourceOfWealthNote] = useState('')
+  const [seniorManagementSignoff, setSeniorManagementSignoff] = useState('')
+  const [monitoringFrequency, setMonitoringFrequency] = useState('')
+  const [closedByInput, setClosedByInput] = useState('')
+
+  const [assignOfficer, setAssignOfficer] = useState(VERIFIER_PARTY_ID)
+  const [assignReason, setAssignReason] = useState('')
+  const [assignError, setAssignError] = useState<string | null>(null)
+  const [showAssign, setShowAssign] = useState(false)
+
+  const [showSupersede, setShowSupersede] = useState(false)
+  const [supersedeVerdict, setSupersedeVerdict] = useState<ShariahAssessmentInput['verdict']>('COMPLIANT')
+  const [supersedeRationale, setSupersedeRationale] = useState('')
+  const [supersedeReason, setSupersedeReason] = useState('')
+  const [supersedeBy, setSupersedeBy] = useState('')
+  const [supersedeError, setSupersedeError] = useState<string | null>(null)
 
   // The reviewer's own checklist — ComplianceCheck is a decision the reviewer submits, not
   // pre-computed state read from the ledger (ComplianceReview.checks is only ever set inside
@@ -116,12 +156,168 @@ export default function ComplianceReview() {
 
   const handleApprove = async () => {
     setActionError(null)
+    // G14 hard gate: the Daml assertion only fires when eddCaseCid is actually supplied — an
+    // open EDD case with no cid passed doesn't block on the ledger side at all, so this must be
+    // enforced here too, not just conditionally include the cid (verified live: omitting it let
+    // ApproveCompliance succeed with a genuinely open EDDCase still outstanding).
+    if (eddCase && eddCase.status !== 'EddClosed') {
+      setActionError('This case has an open EDD investigation — close it before approving.')
+      return
+    }
     try {
-      await approveCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel })
+      await approveCompliance.mutateAsync({
+        id: review.id, completedChecks: checks, riskScore, riskLevel,
+        eddCaseCid: eddCase?.status === 'EddClosed' ? eddCase.id : undefined,
+      })
       setActionDone('approved')
       setTimeout(() => navigate('/vetify/compliance'), 2000)
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to approve compliance review')
+    }
+  }
+
+  const handleOpenEddCase = async () => {
+    setEddError(null)
+    if (eddTriggerReason.trim().length < 5) {
+      setEddError('Please describe why this case needs Enhanced Due Diligence')
+      return
+    }
+    try {
+      await openEddCase.mutateAsync({ id: review.id, triggerReason: eddTriggerReason })
+      setEddTriggerReason('')
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to open EDD case')
+    }
+  }
+
+  const handleToggleSourceOfWealth = async (verified: boolean) => {
+    if (!eddCase) return
+    try {
+      await updateEddChecklist.mutateAsync({ id: eddCase.id, sourceOfWealthVerified: verified })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to update checklist')
+    }
+  }
+
+  const handleSaveSourceOfWealthNote = async () => {
+    if (!eddCase) return
+    try {
+      await updateEddChecklist.mutateAsync({ id: eddCase.id, sourceOfWealthNote })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to update checklist')
+    }
+  }
+
+  const handleToggleMediaSearch = async (done: boolean) => {
+    if (!eddCase) return
+    try {
+      await updateEddChecklist.mutateAsync({ id: eddCase.id, enhancedMediaSearchDone: done })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to update checklist')
+    }
+  }
+
+  const handleSaveSignoff = async () => {
+    if (!eddCase || !seniorManagementSignoff.trim()) return
+    try {
+      await updateEddChecklist.mutateAsync({ id: eddCase.id, seniorManagementSignoff })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to update checklist')
+    }
+  }
+
+  const handleSaveMonitoringFrequency = async () => {
+    if (!eddCase || !monitoringFrequency.trim()) return
+    try {
+      await updateEddChecklist.mutateAsync({ id: eddCase.id, monitoringFrequency })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to update checklist')
+    }
+  }
+
+  const eddChecklistComplete = !!eddCase &&
+    eddCase.checklist.sourceOfWealthVerified &&
+    eddCase.checklist.enhancedMediaSearchDone &&
+    !!eddCase.checklist.seniorManagementSignoff &&
+    !!eddCase.checklist.monitoringFrequency
+
+  const handleCloseEddCase = async () => {
+    setEddError(null)
+    if (!eddCase) return
+    if (closedByInput.trim().length < 2) {
+      setEddError('Enter your name to close this case')
+      return
+    }
+    try {
+      await closeEddCase.mutateAsync({ id: eddCase.id, closedBy: closedByInput })
+    } catch (e) {
+      setEddError(e instanceof Error ? e.message : 'Failed to close EDD case')
+    }
+  }
+
+  const handleStartReview = async () => {
+    if (!review) return
+    setActionError(null)
+    try {
+      await startReview.mutateAsync(review.id)
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Failed to start review')
+    }
+  }
+
+  const handleAssignOrReassign = async () => {
+    if (!review) return
+    setAssignError(null)
+    if (!assignOfficer.trim()) {
+      setAssignError('Officer party ID is required')
+      return
+    }
+    try {
+      if (review.status === 'Pending') {
+        if (!assignReason.trim()) {
+          setAssignError('Assigned-by name is required')
+          return
+        }
+        await assignReview.mutateAsync({ id: review.id, newOfficer: assignOfficer, assignedByName: assignReason })
+      } else {
+        if (!assignReason.trim()) {
+          setAssignError('Reassignment reason is required')
+          return
+        }
+        await reassignReview.mutateAsync({ id: review.id, newOfficer: assignOfficer, reason: assignReason })
+      }
+      setShowAssign(false)
+      setAssignReason('')
+    } catch (e) {
+      setAssignError(e instanceof Error ? e.message : 'Failed to assign review')
+    }
+  }
+
+  const handleSupersedeShariahVerdict = async () => {
+    if (!review) return
+    setSupersedeError(null)
+    if (!supersedeRationale.trim() || !supersedeReason.trim() || !supersedeBy.trim()) {
+      setSupersedeError('Rationale, reason, and your name are all required')
+      return
+    }
+    try {
+      await supersedeShariahVerdict.mutateAsync({
+        id: review.id,
+        correctionRef: `SVC-${Date.now()}`,
+        newVerdict: {
+          verdict: supersedeVerdict,
+          activitiesScreened: [],
+          aaoifiStandards: ['Std No. 28'],
+          rationale: supersedeRationale,
+        },
+        reason: supersedeReason,
+        correctedBy: supersedeBy,
+      })
+      setShowSupersede(false)
+      setSupersedeReason('')
+      setSupersedeRationale('')
+    } catch (e) {
+      setSupersedeError(e instanceof Error ? e.message : 'Failed to supersede Shariah verdict')
     }
   }
 
@@ -147,6 +343,18 @@ export default function ComplianceReview() {
       setActionDone('flagged')
     } catch (e) {
       setActionError(e instanceof Error ? e.message : 'Failed to flag for manual review')
+    }
+  }
+
+  // Distinct from handleFlag above — this is Compliance.daml's own EscalateOverdue, gated on
+  // the review's SLA window (from the active CompliancePolicy, or this fallback) actually
+  // having expired, not a discretionary flag.
+  const handleEscalateOverdue = async () => {
+    setEscalateError(null)
+    try {
+      await escalateOverdue.mutateAsync({ id: review.id, fallbackSlaHours: 48 })
+    } catch (e) {
+      setEscalateError(e instanceof Error ? e.message : 'Failed to escalate overdue review')
     }
   }
 
@@ -180,9 +388,9 @@ export default function ComplianceReview() {
           </h2>
           <p className="text-gray-600 text-sm mb-4">
             {actionDone === 'approved'
-              ? `${review.businessName} has passed compliance. An ApprovedBorrower record has been created on the ledger.`
+              ? `${review.businessName} has passed compliance and is now an approved business, eligible for financing.`
               : actionDone === 'rejected'
-              ? 'The compliance review has been rejected and the borrower notified.'
+              ? 'The compliance review has been rejected and the business notified.'
               : 'This application has been escalated for manual review.'}
           </p>
           <p className="text-xs text-gray-400">Redirecting to queue...</p>
@@ -215,6 +423,38 @@ export default function ComplianceReview() {
             CAC: <span className="font-mono text-gray-700">{review.cacNumber}</span> • Submitted{' '}
             {review.submittedAt ? formatDate(review.submittedAt) : '—'}
           </p>
+
+          <div className="ml-7 mt-3 flex items-center gap-2 flex-wrap">
+            {review.status === 'Pending' && (
+              <button onClick={handleStartReview} disabled={startReview.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">
+                {startReview.isPending ? 'Starting…' : 'Start Review'}
+              </button>
+            )}
+            {(review.status === 'Pending' || review.status === 'UnderReview' || review.status === 'ManualReview') && (
+              <button onClick={() => setShowAssign((v) => !v)} className="btn-secondary text-xs px-3 py-1.5">
+                {review.status === 'Pending' ? 'Assign Officer' : 'Reassign Officer'}
+              </button>
+            )}
+          </div>
+
+          {showAssign && (
+            <div className="ml-7 mt-3 p-3 rounded-lg bg-gray-50 space-y-2 max-w-md">
+              <input className="input text-xs font-mono" placeholder="Officer (verifier) party ID" value={assignOfficer} onChange={(e) => setAssignOfficer(e.target.value)} />
+              <input
+                className="input text-xs"
+                placeholder={review.status === 'Pending' ? 'Assigned by (your name)' : 'Reason for reassignment'}
+                value={assignReason}
+                onChange={(e) => setAssignReason(e.target.value)}
+              />
+              {assignError && <p className="text-xs text-red-600">{assignError}</p>}
+              <div className="flex gap-2">
+                <button onClick={() => setShowAssign(false)} className="btn-secondary text-xs px-3 py-1.5 flex-1">Cancel</button>
+                <button onClick={handleAssignOrReassign} disabled={assignReview.isPending || reassignReview.isPending} className="btn-primary text-xs px-3 py-1.5 flex-1 disabled:opacity-50">
+                  Confirm
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
@@ -311,6 +551,34 @@ export default function ComplianceReview() {
                   {review.shariahReason}
                 </div>
               )}
+
+              {review.shariahVerdict && (
+                <div className="mt-3 pt-3 border-t border-gray-100">
+                  {!showSupersede ? (
+                    <button onClick={() => setShowSupersede(true)} className="text-xs text-indigo-600 hover:underline">
+                      Correct this verdict (audit correction)
+                    </button>
+                  ) : (
+                    <div className="space-y-2">
+                      <select value={supersedeVerdict} onChange={(e) => setSupersedeVerdict(e.target.value as ShariahAssessmentInput['verdict'])} className="input text-xs">
+                        <option value="COMPLIANT">COMPLIANT</option>
+                        <option value="REQUIRES_REVIEW">REQUIRES_REVIEW</option>
+                        <option value="NON_COMPLIANT">NON_COMPLIANT</option>
+                      </select>
+                      <textarea rows={2} className="input text-xs resize-none" placeholder="Corrected rationale" value={supersedeRationale} onChange={(e) => setSupersedeRationale(e.target.value)} />
+                      <textarea rows={2} className="input text-xs resize-none" placeholder="Why is this correction being made?" value={supersedeReason} onChange={(e) => setSupersedeReason(e.target.value)} />
+                      <input className="input text-xs" placeholder="Your name" value={supersedeBy} onChange={(e) => setSupersedeBy(e.target.value)} />
+                      {supersedeError && <p className="text-xs text-red-600">{supersedeError}</p>}
+                      <div className="flex gap-2">
+                        <button onClick={() => setShowSupersede(false)} className="btn-secondary text-xs px-3 py-1.5 flex-1">Cancel</button>
+                        <button onClick={handleSupersedeShariahVerdict} disabled={supersedeShariahVerdict.isPending} className="btn-primary text-xs px-3 py-1.5 flex-1 disabled:opacity-50">
+                          {supersedeShariahVerdict.isPending ? 'Submitting…' : 'Confirm Correction'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* AI agent assessment (advisory only — the reviewer below submits the final decision) */}
@@ -377,6 +645,121 @@ export default function ComplianceReview() {
                 </div>
               </div>
             </div>
+
+            {/* G14: Enhanced Due Diligence — a PEP-only hit hard-gates ApproveCompliance
+                until this case is EddClosed (Compliance.daml's ApproveCompliance assertion) */}
+            <div className="card p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <UserSearch size={15} className="text-primary" />
+                <h2 className="text-sm font-semibold text-gray-700">Enhanced Due Diligence (G14)</h2>
+              </div>
+
+              {!eddCase ? (
+                <div className="space-y-2">
+                  <p className="text-xs text-gray-500">
+                    Open a case if this business's screening surfaced a PEP relationship — required
+                    before approval in that scenario.
+                  </p>
+                  <textarea
+                    rows={2}
+                    value={eddTriggerReason}
+                    onChange={(e) => setEddTriggerReason(e.target.value)}
+                    className="input text-xs resize-none"
+                    placeholder="Why does this case need EDD? (e.g. director is a PEP per Youverify screening)"
+                  />
+                  {eddError && <p className="text-xs text-red-600">{eddError}</p>}
+                  <button
+                    onClick={handleOpenEddCase}
+                    disabled={openEddCase.isPending}
+                    className="btn-secondary w-full text-xs py-2 disabled:opacity-50"
+                  >
+                    {openEddCase.isPending ? 'Opening…' : 'Open EDD Case'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <StatusBadge status={eddCase.status} size="sm" />
+                    <span className="text-xs text-gray-500">{eddCase.triggerReason}</span>
+                  </div>
+
+                  {eddCase.status === 'EddOpen' ? (
+                    <>
+                      <label className="flex items-center justify-between py-1.5 border-b border-gray-100 cursor-pointer">
+                        <span className="text-xs text-gray-700">Source of Wealth Verified</span>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 accent-primary"
+                          checked={eddCase.checklist.sourceOfWealthVerified}
+                          onChange={(e) => handleToggleSourceOfWealth(e.target.checked)}
+                        />
+                      </label>
+                      <div className="flex gap-2">
+                        <input
+                          className="input text-xs flex-1"
+                          placeholder="Source of wealth note"
+                          defaultValue={eddCase.checklist.sourceOfWealthNote ?? ''}
+                          onChange={(e) => setSourceOfWealthNote(e.target.value)}
+                        />
+                        <button onClick={handleSaveSourceOfWealthNote} className="btn-secondary text-xs px-3">Save</button>
+                      </div>
+
+                      <label className="flex items-center justify-between py-1.5 border-b border-gray-100 cursor-pointer">
+                        <span className="text-xs text-gray-700">Enhanced Media Search Done</span>
+                        <input
+                          type="checkbox"
+                          className="w-4 h-4 accent-primary"
+                          checked={eddCase.checklist.enhancedMediaSearchDone}
+                          onChange={(e) => handleToggleMediaSearch(e.target.checked)}
+                        />
+                      </label>
+
+                      <div className="flex gap-2">
+                        <input
+                          className="input text-xs flex-1"
+                          placeholder="Senior management sign-off (name/ref)"
+                          defaultValue={eddCase.checklist.seniorManagementSignoff ?? ''}
+                          onChange={(e) => setSeniorManagementSignoff(e.target.value)}
+                        />
+                        <button onClick={handleSaveSignoff} className="btn-secondary text-xs px-3">Save</button>
+                      </div>
+
+                      <div className="flex gap-2">
+                        <input
+                          className="input text-xs flex-1"
+                          placeholder="Monitoring frequency (e.g. quarterly)"
+                          defaultValue={eddCase.checklist.monitoringFrequency ?? ''}
+                          onChange={(e) => setMonitoringFrequency(e.target.value)}
+                        />
+                        <button onClick={handleSaveMonitoringFrequency} className="btn-secondary text-xs px-3">Save</button>
+                      </div>
+
+                      <div className="pt-2 border-t border-gray-100 space-y-2">
+                        <input
+                          className="input text-xs"
+                          placeholder="Your name (closing this case)"
+                          value={closedByInput}
+                          onChange={(e) => setClosedByInput(e.target.value)}
+                        />
+                        {eddError && <p className="text-xs text-red-600">{eddError}</p>}
+                        <button
+                          onClick={handleCloseEddCase}
+                          disabled={!eddChecklistComplete || closeEddCase.isPending}
+                          title={!eddChecklistComplete ? 'All four checklist items must be complete first' : undefined}
+                          className="btn-primary w-full text-xs py-2 disabled:opacity-40"
+                        >
+                          {closeEddCase.isPending ? 'Closing…' : 'Close EDD Case'}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <p className="text-xs text-emerald-700">
+                      Closed by {eddCase.closedBy} on {eddCase.closedAt ? formatDate(eddCase.closedAt) : '—'} — approval unblocked.
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Right: Actions */}
@@ -391,7 +774,7 @@ export default function ComplianceReview() {
                 {/* Approve */}
                 <button
                   onClick={handleApprove}
-                  disabled={!checks.amlCleared || !checks.kycValidated || approveCompliance.isPending}
+                  disabled={!checks.amlCleared || !checks.kycValidated || approveCompliance.isPending || (!!eddCase && eddCase.status !== 'EddClosed')}
                   className="w-full btn-primary flex items-center justify-center gap-2 disabled:opacity-40"
                 >
                   <CheckCircle2 size={15} />
@@ -400,6 +783,11 @@ export default function ComplianceReview() {
                 {(!checks.amlCleared || !checks.kycValidated) && (
                   <p className="text-xs text-gray-500 text-center">
                     AML and KYC must be checked before approving
+                  </p>
+                )}
+                {eddCase && eddCase.status !== 'EddClosed' && (
+                  <p className="text-xs text-amber-600 text-center">
+                    Close the open EDD investigation before approving
                   </p>
                 )}
 
@@ -423,6 +811,21 @@ export default function ComplianceReview() {
                     Flag for Manual Review
                   </button>
                 )}
+
+                {/* Escalate Overdue — only valid from UnderReview, and only once the SLA
+                    window has actually expired (Compliance.daml's own gate, not discretionary) */}
+                {review.status === 'UnderReview' && (
+                  <button
+                    onClick={handleEscalateOverdue}
+                    disabled={escalateOverdue.isPending}
+                    title="Fails if the SLA window hasn't actually expired yet"
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-orange-200 bg-orange-50 text-orange-700 hover:bg-orange-100 text-sm font-medium transition-colors disabled:opacity-40"
+                  >
+                    <AlertTriangle size={15} />
+                    {escalateOverdue.isPending ? 'Escalating…' : 'Escalate Overdue'}
+                  </button>
+                )}
+                {escalateError && <p className="text-xs text-red-600 text-center">{escalateError}</p>}
 
                 {actionError && <p className="text-xs text-red-600 text-center">{actionError}</p>}
               </div>

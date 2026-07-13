@@ -1,0 +1,32 @@
+# Audit finding O-2 (Phase 3 Enterprise Production Readiness Audit,
+# 2026-07-08): no SAST of any kind ran anywhere in this repo's CI. Standard
+# GitHub CodeQL setup for the one language actually in play here
+# (JavaScript/TypeScript across backend/, agents/, frontend/) — Daml has no
+# CodeQL support, so that surface is unaffected by this workflow; its own
+# safety net is the SCU compatibility check (see docs/daml-upgrade-lineage.md)
+# and daml lint, not SAST.
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, independent of push activity — CodeQL's own query packs update
+    # over time, so a repo with no commits in a given week can still have a
+    # newly-discovered pattern flagged.
+    - cron: "17 3 * * 1"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+      - uses: github/codeql-action/analyze@v3

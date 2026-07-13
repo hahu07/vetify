@@ -1,0 +1,22 @@
+# Test/scripting package, split from the main `vetify` package (review gap
+# G10a, docs/platform-review-2026-07.md): the Daml compiler itself warns that
+# a package defining templates AND depending on daml-script uploads
+# daml-script to the participant with it, bloating the package store. The
+# main package now ships templates only; every Daml Script test and the
+# operational seed scripts live here, importing the built production DAR as a
+# data-dependency.
+#
+# Build order matters: `dpm build` at the repo root first (produces
+# ../.daml/dist/vetify-0.3.0.dar), then `dpm build` / `dpm test` here.
+sdk-version: 3.4.11
+name: vetify-tests
+source: daml
+version: 0.3.0
+build-options:
+  - --target=2.2
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../.daml/dist/vetify-0.3.0.dar

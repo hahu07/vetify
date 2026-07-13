@@ -22,14 +22,16 @@ const V3 = "https://api.withmono.com/v3";
 
 const HEADERS = { "mono-sec-key": API_KEY, "Content-Type": "application/json" };
 
+const FETCH_TIMEOUT_MS = 30_000; // G9: a hung provider call must not hang the tool/agent
+
 async function monoGet(url: string): Promise<unknown> {
-  const res = await fetch(url, { headers: HEADERS });
+  const res = await fetch(url, { headers: HEADERS, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`mono.co error: ${res.status} ${await res.text()}`);
   return res.json();
 }
 
 async function monoPost(url: string, body: unknown): Promise<unknown> {
-  const res = await fetch(url, { method: "POST", headers: HEADERS, body: JSON.stringify(body) });
+  const res = await fetch(url, { method: "POST", headers: HEADERS, body: JSON.stringify(body), signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`mono.co error: ${res.status} ${await res.text()}`);
   return res.json();
 }
@@ -70,15 +72,14 @@ server.registerTool(
 server.registerTool(
   "lookup_mashup",
   {
-    description: "Verify NIN, BVN, and date of birth in a single call — fastest combined identity check",
+    description: "Verify NIN and BVN in a single call — fastest combined identity check",
     inputSchema: z.object({
       nin: z.string().length(11),
       bvn: z.string().length(11),
-      dateOfBirth: z.string().describe("YYYY-MM-DD"),
     }),
   },
-  async ({ nin, bvn, dateOfBirth }) => {
-    const result = await monoPost(`${V3}/lookup/mashup`, { nin, bvn, date_of_birth: dateOfBirth });
+  async ({ nin, bvn }) => {
+    const result = await monoPost(`${V3}/lookup/mashup`, { nin, bvn });
     return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
   }
 );
@@ -115,10 +116,10 @@ server.registerTool(
 server.registerTool(
   "lookup_credit_history",
   {
-    description: "Check credit bureau history (CRC & First Central) for a borrower — used by Compliance and Underwriting agents",
+    description: "Check credit bureau history (CRC & First Central) for a business — used by Compliance and Underwriting agents",
     inputSchema: z.object({
       bvn: z.string().length(11),
-      phoneNumber: z.string().describe("Borrower phone number"),
+      phoneNumber: z.string().describe("Business phone number"),
     }),
   },
   async ({ bvn, phoneNumber }) => {
@@ -132,14 +133,14 @@ server.registerTool(
 server.registerTool(
   "prove_initiate",
   {
-    description: "Initiate a Mono Prove KYC session — returns a URL the borrower completes for facial + document verification",
+    description: "Initiate a Mono Prove KYC session — returns a URL the business completes for facial + document verification",
     inputSchema: z.object({
       tier: z.enum(["Tier_1", "Tier_2", "Tier_3"]).describe(
         "Tier_1: BVN+NIN+face | Tier_2: +govt ID | Tier_3: +address confirmation"
       ),
       customerName: z.string(),
       customerEmail: z.string().email(),
-      redirectUrl: z.string().url().describe("URL to redirect borrower after completing Prove"),
+      redirectUrl: z.string().url().describe("URL to redirect business after completing Prove"),
     }),
   },
   async ({ tier, customerName, customerEmail, redirectUrl }) => {
@@ -221,12 +222,12 @@ server.registerTool(
   {
     description: "Create a Direct Debit mandate for automated installment collection via mono.co. Returns a monoMandateRef to store on DirectDebitMandate contract.",
     inputSchema: z.object({
-      accountId: z.string().describe("mono.co account ID of the borrower's repayment account"),
+      accountId: z.string().describe("mono.co account ID of the business's repayment account"),
       amount: z.number().describe("Maximum collection amount per installment in Kobo (NGN × 100)"),
       startDate: z.string().describe("Mandate start date in ISO 8601 format (YYYY-MM-DD)"),
       endDate: z.string().optional().describe("Mandate end date in ISO 8601 format; omit for open-ended"),
       reference: z.string().describe("FI's internal reference (facilityRef) for reconciliation"),
-      description: z.string().describe("Narration shown on borrower's bank statement"),
+      description: z.string().describe("Narration shown on business's bank statement"),
     }),
   },
   async ({ accountId, amount, startDate, endDate, reference, description }) => {
@@ -299,9 +300,9 @@ server.registerTool(
 server.registerTool(
   "initiate_gsm",
   {
-    description: "Initiate a Global Standing Mandate (GSM) sweep via mono.co / CBN-NIBSS for cross-bank recovery on a defaulted contract. Returns a monoGsmRef to store on GSMInvocation contract. Requires borrower's BVN and outstanding amount.",
+    description: "Initiate a Global Standing Mandate (GSM) sweep via mono.co / CBN-NIBSS for cross-bank recovery on a defaulted contract. Returns a monoGsmRef to store on GSMInvocation contract. Requires business's BVN and outstanding amount.",
     inputSchema: z.object({
-      bvn: z.string().describe("Borrower's Bank Verification Number (11 digits)"),
+      bvn: z.string().describe("Business's Bank Verification Number (11 digits)"),
       amountKobo: z.number().describe("Outstanding balance to recover in Kobo (NGN × 100)"),
       reference: z.string().describe("FI's unique reference (facilityRef) for this GSM request"),
       narration: z.string().describe("Narration submitted to CBN/NIBSS describing the debt"),

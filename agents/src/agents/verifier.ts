@@ -24,16 +24,20 @@
  */
 import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
-import { ChatAnthropic } from "@langchain/anthropic";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
+import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache } from "./util.js";
+import { VerificationEvidenceSchema, ComplianceEvidenceSchema, ProviderEvidenceSchema } from "./evidence-schemas.js";
 import { scoreVerification } from "../scoring/verification.js";
 import { scoreCompliance } from "../scoring/compliance.js";
+import { scoreProviderVerification } from "../scoring/provider-verification.js";
 import {
   DEFAULT_COMPLIANCE_POLICY_VERSION,
   DEFAULT_COMPLIANCE_WEIGHTS,
   DEFAULT_VERIFICATION_POLICY_VERSION,
   DEFAULT_VERIFICATION_WEIGHTS,
+  DEFAULT_PROVIDER_VERIFICATION_POLICY_VERSION,
+  DEFAULT_PROVIDER_VERIFICATION_WEIGHTS,
   numifyWeights,
 } from "../scoring/types.js";
 import type {
@@ -44,52 +48,63 @@ import type {
   KybEvidence,
   KybStatus,
   MashupResult,
+  ProviderType,
+  ProviderVerificationScoringWeights,
   TinResult,
   VerificationScoringWeights,
 } from "../scoring/types.js";
 import type { ShariahVerdict } from "../scoring/shariah-policy.js";
+import { validateAgentsConfig } from "../config.js";
 
 const T_ONBOARDING = "Vetify.Onboarding:BusinessOnboarding";
 const T_COMPLIANCE = "Vetify.Compliance:ComplianceReview";
 const T_VERIFICATION_POLICY = "Vetify.Onboarding:VerificationPolicy";
 const T_COMPLIANCE_POLICY = "Vetify.Compliance:CompliancePolicy";
+const T_PROVIDER_ONBOARDING = "Vetify.FinancingProvider:FinancingProviderOnboarding";
+const T_PROVIDER_VERIFICATION_POLICY = "Vetify.FinancingProvider:ProviderVerificationPolicy";
+// ComplianceReview needs advisor for observer visibility (so the independent
+// Shariah advisor party can see and later act on this contract), but unlike
+// business/vetify/verifier there's no upstream contract field to copy it from
+// (BusinessOnboarding has no advisor field) — sourced from the validated
+// config module (G7): the previous `?? ""` fallback created a ComplianceReview
+// with an empty-string party and only failed deep inside the ledger call.
+const ADVISOR_PARTY_ID = validateAgentsConfig().advisorPartyId;
 
 const VERIFIER_PERSONA = `
 You are the Verifier Agent for Vetify, an AI-powered non-interest financing platform.
 `.trim();
 
-function buildModel() {
-  return new ChatAnthropic({
-    model: process.env.LLM_MODEL ?? "claude-sonnet-4-6",
-    temperature: 0,
-  });
-}
 
-/** Extracts the JSON object from an agent's final message text. */
-function extractJson(content: unknown): Record<string, unknown> {
-  const text = typeof content === "string" ? content : JSON.stringify(content);
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`Expected a JSON evidence object in the agent's response.\nResponse: ${text}`);
-  return JSON.parse(match[0]) as Record<string, unknown>;
-}
 
-interface McpTool { name: string; invoke: (input: Record<string, unknown>) => Promise<unknown> }
 
-async function invokeTool(tools: McpTool[], name: string, input: Record<string, unknown>): Promise<unknown> {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) throw new Error(`MCP tool "${name}" not found among available tools`);
-  return tool.invoke(input);
-}
 
 /** VerificationPolicy/CompliancePolicy have no observer clause — only vetify (their
  * signatory) can see them, so this always queries as party "vetify", regardless of which
  * party the caller otherwise acts as. Returns undefined if no policy is active — callers
  * fall back to the built-in DEFAULT_* weights/version, same as the Daml choices themselves
- * already fall back when lookupByKey finds nothing. */
-async function fetchActivePolicyPayload(tools: McpTool[], templateId: string): Promise<Record<string, unknown> | undefined> {
-  const raw = await invokeTool(tools, "get_active_contracts", { templateId, party: "vetify" });
-  const parsed = extractJson(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
-  return parsed.result?.[0]?.payload;
+ * already fall back when the caller supplies `policyCid = null`.
+ *
+ * Returns the ContractId alongside the payload (not just the payload) because SDK 3.4.11 /
+ * Daml-LF 2.1/2.2 has no contract keys — StartReview/EscalateOverdue/Approve/Reject/
+ * FlagComplianceForManualReview/RecordProviderScore/RejectProvider can no longer resolve
+ * their active policy via lookupByKey and now take its ContractId as an explicit argument. */
+async function fetchActivePolicy(tools: McpTool[], templateId: string): Promise<{ contractId: string; payload: Record<string, unknown> } | undefined> {
+  return withPolicyCache(templateId, async () => {
+    const raw = await invokeTool(tools, "get_active_contracts", { templateId, party: "vetify" });
+    const parsed = extractJsonObject(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
+    return parsed.result?.[0];
+  });
+}
+
+/** Resolves the AuthorizedReviewer ContractId for `(vetify, verifierParty)` — no contract
+ * keys on SDK 3.4.11 / Daml-LF 2.1/2.2, so ApproveCompliance/RejectCompliance can no longer
+ * resolve it themselves via lookupByKey. Not cached (unlike fetchActivePolicy): registry
+ * membership changes are rarer still than policy changes, but the read is cheap and this
+ * avoids a second cache-key namespace for a lookup this infrequent. */
+async function fetchAuthorizedReviewerCid(tools: McpTool[], verifierParty: string): Promise<string | null> {
+  const raw = await invokeTool(tools, "get_active_contracts", { templateId: "Vetify.Compliance:AuthorizedReviewer", party: "vetify" });
+  const parsed = extractJsonObject(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
+  return parsed.result?.find((r) => r.payload.verifier === verifierParty)?.contractId ?? null;
 }
 
 /** quantifiableScore's 80-point ceiling is a different scale from the full 100-point CDD
@@ -99,6 +114,122 @@ function quantifiableRiskLevel(score: number): "Low" | "Medium" | "High" {
   if (score >= 80) return "Low";
   if (score >= 50) return "Medium";
   return "High";
+}
+
+// ─── Stage 0: Financing Provider Registration — evidence gathering only ────
+// Reuses this module's own mono `lookup_cac` tool + toCacResult converter —
+// genuinely the same CAC check as Stage 2, just against a provider's own
+// registration instead of a business director's. Dispatched by the Supervisor
+// when a FinancingProviderOnboarding reaches UnderReview; runs as this same
+// evidence-only agent shape (no exercise_choice/create_contract tool access),
+// but the resulting Daml choices (RecordProviderScore/FlagProviderForManualReview/
+// RejectProvider) are all controller `vetify` alone — not `verifier`, since
+// verifier has no authority over Stage 0 — so the Supervisor exercises them as
+// vetify, independent of which agent module gathered the evidence.
+
+const PROVIDER_EVIDENCE_PROMPT = `
+${VERIFIER_PERSONA}
+
+You are gathering Stage 0 registration evidence for a FinancingProviderOnboarding
+application. You do NOT decide whether to approve, reject, or flag it, and you have no
+tool access to do so — a deterministic scoring engine makes that decision from the
+evidence you report.
+
+Call:
+1. lookup_cac — the provider's own CAC registration number
+
+Then reply with ONLY this JSON object (no text before or after it):
+{
+  "cac": { "found": boolean, "status": "Active" | "Inactive" | "Struck Off" | "Pending", "nameMatch": "exact" | "close" | "mismatch" } | { "error": true, "httpStatus": number }
+}
+Report exactly what the tool returned — do not soften, round, or reinterpret any field.
+`.trim() + "\n\n" + UNTRUSTED_DATA_GUIDANCE;
+
+export async function runVerifierProviderStage(contractId: string, contractPayload: unknown): Promise<void> {
+  const payload = contractPayload as Record<string, unknown>;
+
+  const evidenceMcp = new MultiServerMCPClient({
+    mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
+  });
+  const evidenceTools = await evidenceMcp.getTools();
+  const evidenceAgent = createDeepAgent({
+    model: buildModel(),
+    tools: evidenceTools,
+    systemPrompt: PROVIDER_EVIDENCE_PROMPT,
+    backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
+    skills: ["skills/verifier"],
+    checkpointer: new MemorySaver(),
+  });
+
+  const task = `
+Gather Stage 0 registration evidence for the following FinancingProviderOnboarding.
+
+Contract ID: ${contractId}
+CAC registration number to look up: ${String(payload.cacRegNumber ?? "")}
+${fenceUntrusted("canton-contract-payload", contractPayload)}
+  `.trim();
+
+  const result = await withLlmResilience("Verifier provider evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
+  await evidenceMcp.close();
+  const lastMessage = result.messages[result.messages.length - 1];
+  const evidence = parseEvidence(lastMessage.content, ProviderEvidenceSchema, "Verifier Agent (provider)");
+
+  const cantonMcp = new MultiServerMCPClient({
+    mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
+  });
+  const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
+
+  const activePolicy = await fetchActivePolicy(cantonTools, T_PROVIDER_VERIFICATION_POLICY);
+  const weights = activePolicy?.payload.scoringWeights
+    ? numifyWeights<ProviderVerificationScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
+    : DEFAULT_PROVIDER_VERIFICATION_WEIGHTS;
+  const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_PROVIDER_VERIFICATION_POLICY_VERSION;
+  // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2 — RecordProviderScore/RejectProvider
+  // now take the active policy's ContractId explicitly instead of resolving it via lookupByKey.
+  const policyCid = activePolicy?.contractId ?? null;
+
+  const scoring = scoreProviderVerification(
+    toCacResult(evidence.cac),
+    payload.providerType as ProviderType,
+    (payload.regulatoryBody as string | null) ?? null,
+    (payload.licenseNumber as string | null) ?? null,
+    weights,
+    policyVersion,
+  );
+
+  switch (scoring.decision.action) {
+    case "FlagForManualReview":
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "FlagProviderForManualReview", party: "vetify",
+        argument: {
+          score: scoring.riskScore, risk: scoring.riskLevel,
+          note: scoring.decision.note, version: scoring.scoringPolicyVersion,
+        },
+      });
+      break;
+    case "Reject":
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RejectProvider", party: "vetify",
+        argument: {
+          reason: scoring.decision.reason,
+          agentScore: scoring.riskScore, agentRisk: scoring.riskLevel, agentVersion: scoring.scoringPolicyVersion,
+          policyCid,
+        },
+      });
+      break;
+    case "RecordScore":
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RecordProviderScore", party: "vetify",
+        argument: {
+          score: scoring.riskScore, risk: scoring.riskLevel,
+          note: null, version: scoring.scoringPolicyVersion,
+          policyCid,
+        },
+      });
+      break;
+  }
+
+  await cantonMcp.close();
 }
 
 // ─── Stage 2: Verification — evidence gathering only ───────────────────────
@@ -111,18 +242,18 @@ NOT decide whether to approve, reject, or flag it, and you have no tool access t
 deterministic scoring engine makes that decision from the evidence you report.
 
 Call, in order:
-1. lookup_mashup — the director's NIN, BVN, and date of birth if provided
+1. lookup_mashup — the director's NIN and BVN
 2. lookup_cac — the CAC registration number
 3. lookup_tin — the tax ID, with channel "cac"
 
 Then reply with ONLY this JSON object (no text before or after it):
 {
-  "mashup": { "ninVerified": boolean, "bvnVerified": boolean, "dobProvided": boolean, "dobMatch": boolean } | { "error": true, "httpStatus": number },
+  "mashup": { "ninVerified": boolean, "bvnVerified": boolean, "nameMatch": boolean } | { "error": true, "httpStatus": number },
   "cac": { "found": boolean, "status": "Active" | "Inactive" | "Struck Off" | "Pending", "nameMatch": "exact" | "close" | "mismatch" } | { "error": true, "httpStatus": number },
   "tin": { "outcome": "verifiedMatchesCac" | "verifiedDifferentEntity" | "notFound" } | { "error": true, "httpStatus": number }
 }
 Report exactly what each tool returned — do not soften, round, or reinterpret any field.
-`.trim();
+`.trim() + "\n\n" + UNTRUSTED_DATA_GUIDANCE;
 
 function toMashupResult(raw: unknown): MashupResult {
   const r = (raw ?? {}) as Record<string, unknown>;
@@ -132,8 +263,9 @@ function toMashupResult(raw: unknown): MashupResult {
     data: {
       ninVerified: !!r.ninVerified,
       bvnVerified: !!r.bvnVerified,
-      dobProvided: !!r.dobProvided,
-      dobMatch: !!r.dobMatch,
+      // Fail closed on a missing/falsy value — an unclear cross-check reads as a
+      // mismatch, not a pass, same principle as every other evidence coercion here.
+      nameMatch: !!r.nameMatch,
     },
   };
 }
@@ -178,13 +310,15 @@ export async function runVerifierVerificationStage(contractId: string, contractP
 Gather Stage 2 verification evidence for the following BusinessOnboarding application.
 
 Contract ID: ${contractId}
-Payload: ${JSON.stringify(contractPayload, null, 2)}
+${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await evidenceAgent.invoke({ messages: [{ role: "user", content: task }] });
+  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
   await evidenceMcp.close();
   const lastMessage = result.messages[result.messages.length - 1];
-  const evidence = extractJson(lastMessage.content);
+  // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
+  // no decision reaches the ledger on unvalidated shapes.
+  const evidence = parseEvidence(lastMessage.content, VerificationEvidenceSchema, "Verifier Agent (verification)");
 
   // Deterministic decision execution from here — no LLM involved. A single
   // canton client is reused for the policy fetch and the choice exercise.
@@ -196,14 +330,17 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
   // VerificationPolicy carries the scoring weights ops can retune without a
   // code deploy; fall back to the built-in defaults if none is active, same
   // as the Daml choices themselves already do for policyVersion/thresholds.
-  const policyPayload = await fetchActivePolicyPayload(cantonTools, T_VERIFICATION_POLICY);
+  const activePolicy = await fetchActivePolicy(cantonTools, T_VERIFICATION_POLICY);
   // Daml Int fields arrive as JSON strings from the ledger — numifyWeights converts them to
   // real numbers before they're summed (see its doc comment in scoring/types.ts for the bug
   // this closes: string-concatenation instead of addition once a real policy is active).
-  const weights = policyPayload?.scoringWeights
-    ? numifyWeights<VerificationScoringWeights>(policyPayload.scoringWeights as Record<string, unknown>)
+  const weights = activePolicy?.payload.scoringWeights
+    ? numifyWeights<VerificationScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
     : DEFAULT_VERIFICATION_WEIGHTS;
-  const policyVersion = (policyPayload?.policyVersion as string | undefined) ?? DEFAULT_VERIFICATION_POLICY_VERSION;
+  const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_VERIFICATION_POLICY_VERSION;
+  // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2 — Approve/Reject now take the active
+  // policy's ContractId explicitly instead of resolving it via lookupByKey.
+  const policyCid = activePolicy?.contractId ?? null;
 
   const scoring = scoreVerification(
     toMashupResult(evidence.mashup),
@@ -228,6 +365,7 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
     policyVersion: scoring.scoringPolicyVersion,
     overrideType: null,
     reviewNotes: null,
+    policyCid,
   };
 
   switch (scoring.decision.action) {
@@ -241,37 +379,41 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
       });
       break;
     case "Reject":
+      // Dual controller (verifier, vetify) — vetify's signature is required for
+      // Approve/Reject's VerificationPolicy lookupByKey (see Onboarding.daml).
+      // A single-party actAs here was a latent gap: it would fail against a
+      // real, authorization-enforcing ledger regardless of JWT/auth mode.
       await invokeTool(cantonTools, "exercise_choice", {
-        templateId: T_ONBOARDING, contractId, choice: "Reject", party: "verifier",
+        templateId: T_ONBOARDING, contractId, choice: "Reject", party: ["verifier", "vetify"],
         argument: { ...commonArgs, autoDecided: true, reason: scoring.decision.reason },
       });
       break;
     case "Approve": {
       await invokeTool(cantonTools, "exercise_choice", {
-        templateId: T_ONBOARDING, contractId, choice: "Approve", party: "verifier",
+        templateId: T_ONBOARDING, contractId, choice: "Approve", party: ["verifier", "vetify"],
         argument: { ...commonArgs, autoDecided: true },
       });
 
       // Phase D: auto-create the initial ComplianceReview — deterministic,
       // not agent-decided. create_contract always submits as vetify, which
       // is ComplianceReview's signatory, so no further authorization is needed.
-      const business = payload.business as Record<string, unknown> | undefined;
+      const profile = payload.profile as Record<string, unknown> | undefined;
       const kyc = payload.kyc as Record<string, unknown> | undefined;
       const complianceRef = `COM-${verificationRef.slice(4)}`;
       await invokeTool(cantonTools, "create_contract", {
         templateId: T_COMPLIANCE,
         payload: {
-          borrower: payload.borrower,
+          business: payload.business,
           vetify: payload.vetify,
           verifier: payload.verifier,
-          businessName: business?.name ?? "",
+          businessName: profile?.name ?? "",
           cacRegNumber: kyc?.cacRegNumber ?? "",
-          businessSector: business?.businessSector ?? "",
-          businessActivity: business?.businessActivity ?? "",
-          // incorporationDate is non-optional on ComplianceReview; business is always defined
+          businessSector: profile?.businessSector ?? "",
+          businessActivity: profile?.businessActivity ?? "",
+          // incorporationDate is non-optional on ComplianceReview; profile is always defined
           // here since this runs immediately after Approve succeeded on this same contract's
           // payload (no null-safe fallback exists for a required Date field).
-          incorporationDate: business!.incorporationDate,
+          incorporationDate: profile!.incorporationDate,
           verificationRef,
           complianceRef,
           status: "Pending",
@@ -286,6 +428,7 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
           policySnapshot: null,
           createdBy: "Verifier scoring engine (auto, post-Approve)",
           shariahVerdict: null,
+          advisor: ADVISOR_PARTY_ID,
         },
       });
       break;
@@ -317,12 +460,21 @@ Then reply with ONLY this JSON object (no text before or after it):
   "amlBusinessStatus": "clear" | "review_required" | "not_cleared",
   "amlDirectorStatus": "clear" | "review_required" | "not_cleared",
   "amlScreeningRef": string | null,
+  "sanctionsCheckRef": string | null,
+  "pepCheckRef": string | null,
+  "adverseMediaRef": string | null,
+  "pepHit": boolean,
   "adverseMediaSummary": string,
   "creditHistory": "clean" | "minor_resolved" | "delinquent_or_default",
   "kybStatus": "active_full_match" | "active_minor_discrepancy" | "inactive_or_mismatch" | "not_found" | "struck_off_or_dissolved"
 }
 Report exactly what each tool returned — do not soften, round, or reinterpret any field.
-`.trim();
+sanctionsCheckRef/pepCheckRef/adverseMediaRef are each tool response's own verification/reference
+ID (e.g. a "verificationId" or "reference" field) — report null if the response doesn't include
+one; never invent one. Set pepHit true only if either aml_screen_business or aml_screen_individual
+returned status "review_required" AND its categoryCount shows a pep match with no sanctions match
+(a PEP-only hit) — this is distinct from a sanctions hit, which should already lean toward reject.
+`.trim() + "\n\n" + UNTRUSTED_DATA_GUIDANCE;
 
 function toAmlStatus(raw: unknown): "clear" | "review_required" | "not_cleared" {
   return raw === "clear" || raw === "review_required" || raw === "not_cleared" ? raw : "review_required";
@@ -346,20 +498,24 @@ export async function runVerifierComplianceStage(contractId: string, contractPay
   });
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
 
-  // StartReview always runs first, deterministically — Pending → UnderReview.
-  await invokeTool(cantonTools, "exercise_choice", {
-    templateId: T_COMPLIANCE, contractId, choice: "StartReview", party: "vetify", argument: {},
-  });
-
   // CompliancePolicy carries the scoring weights ops can retune without a
   // code deploy; fall back to the built-in defaults if none is active.
-  const policyPayload = await fetchActivePolicyPayload(cantonTools, T_COMPLIANCE_POLICY);
+  // Fetched before StartReview (reordered from the SDK 3.5.1 version) since
+  // StartReview itself now needs the ContractId — no contract keys on
+  // SDK 3.4.11 / Daml-LF 2.1/2.2, so it can no longer resolve it via lookupByKey.
+  const activePolicy = await fetchActivePolicy(cantonTools, T_COMPLIANCE_POLICY);
   // See numifyWeights's doc comment (scoring/types.ts) — Daml Int fields arrive as JSON
   // strings from the ledger; this converts them to real numbers before they're summed.
-  const weights = policyPayload?.scoringWeights
-    ? numifyWeights<ComplianceScoringWeights>(policyPayload.scoringWeights as Record<string, unknown>)
+  const weights = activePolicy?.payload.scoringWeights
+    ? numifyWeights<ComplianceScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
     : DEFAULT_COMPLIANCE_WEIGHTS;
-  const policyVersion = (policyPayload?.policyVersion as string | undefined) ?? DEFAULT_COMPLIANCE_POLICY_VERSION;
+  const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_COMPLIANCE_POLICY_VERSION;
+  const policyCid = activePolicy?.contractId ?? null;
+
+  // StartReview always runs first, deterministically — Pending → UnderReview.
+  await invokeTool(cantonTools, "exercise_choice", {
+    templateId: T_COMPLIANCE, contractId, choice: "StartReview", party: "vetify", argument: { policyCid },
+  });
 
   // Evidence-gathering agent: mono.co + youverify tools only, no canton access.
   const evidenceMcp = new MultiServerMCPClient({
@@ -382,13 +538,15 @@ export async function runVerifierComplianceStage(contractId: string, contractPay
 Gather Stage 3 compliance evidence for the following ComplianceReview contract.
 
 Contract ID: ${contractId}
-Payload: ${JSON.stringify(contractPayload, null, 2)}
+${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await evidenceAgent.invoke({ messages: [{ role: "user", content: task }] });
+  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
   await evidenceMcp.close();
   const lastMessage = result.messages[result.messages.length - 1];
-  const evidence = extractJson(lastMessage.content);
+  // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
+  // no decision reaches the ledger on unvalidated shapes.
+  const evidence = parseEvidence(lastMessage.content, ComplianceEvidenceSchema, "Verifier Agent (compliance)");
 
   const aml: AmlEvidence = {
     businessStatus: toAmlStatus(evidence.amlBusinessStatus),
@@ -401,14 +559,30 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
   const age = incorporationDate ? { incorporationDate } : undefined;
   const scoring = scoreCompliance(shariahVerdict, aml, kyb, creditHistory, age, weights, policyVersion);
 
+  // G14: sanctionsListVersion/sanctionsListDate previously always null (schema
+  // existed, never populated — "Gap 10" in name only). Youverify's API doesn't
+  // expose an incrementing "list version" (per the aml-decision-guide's
+  // Database Coverage section — a fixed set of watchlists, not a versioned
+  // snapshot), so rather than fabricate a fake version string, this records
+  // the two things that ARE real: the fixed coverage the screening actually
+  // ran against, and the actual date it ran — exactly what an examiner needs
+  // to reconstruct "what was checked, and when".
+  const screenedAt = new Date();
   const amlEvidence = {
     amlScreeningRef: evidence.amlScreeningRef ?? null,
-    sanctionsCheckRef: null,
-    pepCheckRef: null,
-    adverseMediaRef: null,
+    sanctionsCheckRef: evidence.sanctionsCheckRef ?? null,
+    pepCheckRef: evidence.pepCheckRef ?? null,
+    adverseMediaRef: evidence.adverseMediaRef ?? null,
     shariahScreeningRef: null,
-    sanctionsListVersion: null,
-    sanctionsListDate: null,
+    sanctionsListVersion: "Youverify AML/PEP/Sanctions — OFAC, UN, EU, HMT, NFIU, Interpol consolidated",
+    sanctionsListDate: screenedAt.toISOString().slice(0, 10),
+    // No structured data source exists for these yet (same principle as Stage
+    // 6's PD/LGD/EAD and Stage 3's CDD purpose-coherence factor — never
+    // fabricate a value for a factor with no real source).
+    apiResponseHash: null,
+    beneficialOwnershipRef: null,
+    sourceOfFundsRef: null,
+    amlRiskScore: null,
   };
   const commonArgs = {
     completedChecks: scoring.checks,
@@ -431,18 +605,37 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
         argument: {
           riskScore: scoring.quantifiableScore, riskLevel: quantifiableRiskLevel(scoring.quantifiableScore),
           agentVersion: scoring.scoringPolicyVersion, note: scoring.decision.note,
+          policyCid,
         },
       });
+      // G14: a PEP hit gets a structured EDD case, distinct from the generic
+      // ManualReview queue every other ambiguous case lands in — CBN NIFI/
+      // AAOIFI expect documented source-of-wealth verification and senior-
+      // management sign-off for a PEP relationship, not just a review note.
+      if (evidence.pepHit) {
+        await invokeTool(cantonTools, "exercise_choice", {
+          templateId: T_COMPLIANCE, contractId, choice: "OpenEddCase", party: "vetify",
+          argument: { triggerReason: "PEP_HIT" },
+        });
+      }
       break;
-    case "RejectCompliance":
+    case "RejectCompliance": {
+      // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2 — RejectCompliance now takes the
+      // AuthorizedReviewer's ContractId explicitly instead of resolving it via lookupByKey.
+      const reviewerAuthCid = await fetchAuthorizedReviewerCid(cantonTools, payload.verifier as string);
+      if (!reviewerAuthCid) {
+        throw new Error(`verifier ${String(payload.verifier)} is not in the authorized reviewer registry`);
+      }
       await invokeTool(cantonTools, "exercise_choice", {
         templateId: T_COMPLIANCE, contractId, choice: "RejectCompliance", party: "verifier",
         argument: {
           ...commonArgs, autoDecided: true, reason: scoring.decision.reason,
           riskScore: scoring.quantifiableScore, riskLevel: quantifiableRiskLevel(scoring.quantifiableScore),
+          reviewerAuthCid,
         },
       });
       break;
+    }
     case "ApproveCompliance":
       // Structurally unreachable: scoreCompliance never returns this action
       // (see its doc comment) — the qualitative CDD judgment always requires

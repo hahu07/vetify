@@ -1,58 +1,85 @@
--- | Stage 5–7: Financing request, AI underwriting, and the FI funding decision.
---   ApproveFunding creates a MurabahahWad — the borrower's binding promise to
---   purchase — which opens the Wa'd → Wakala → AssetPurchaseRecord →
---   MurabahahProposal chain defined in Vetify.Murabahah.
+-- | Stage 5-7: financing request, AI underwriting, and the FI's funding
+-- decision. `ApproveFunding` creates a MurabahahWad — the business's binding
+-- promise to purchase — which opens the Wa'd -> Wakala -> AssetPurchaseRecord
+-- -> MurabahahProposal chain defined in Vetify.Murabahah.
 module Vetify.Financing where
 
 import Vetify.Types
 import Vetify.Murabahah (MurabahahWad(..))
 import Vetify.FinancingProvider (ApprovedProvider(..))
-import Vetify.Governance (OfficerRole(..), requireActiveOfficer)
+import Vetify.Governance (OfficerRole(..), AuthorizedOfficer, AuthorizedAssessor, requireActiveOfficer, requireActiveAssessor)
 import DA.Time
 
--- ─── F16: Underwriting Policy ────────────────────────────────────────────────
--- Per-institution underwriting parameters signed by vetify and observed by the FI.
--- Key: (vetify, financialInstitution) — one active policy per institution pair.
--- BeginUnderwriting looks up this policy to capture a snapshot and compute the
--- request SLA expiry; ApproveFunding uses it to set the Wa'd offer validity window.
+-- ─── Underwriting Policy ────────────────────────────────────────────────────
+
+-- | Per-institution underwriting parameters, signed by vetify and observed
+-- by the FI. Keyed on `(vetify, financialInstitution)` — one active policy
+-- per institution pair. `BeginUnderwriting` looks up this policy to capture
+-- a snapshot and compute the request SLA expiry; `ApproveFunding` uses it to
+-- set the Wa'd offer validity window.
 template UnderwritingPolicy
   with
     vetify               : Party
     financialInstitution : Party
     policyVersion        : Text
-    autoApproveMin       : Int      -- score threshold for AI auto-approval (inclusive)
-    autoRejectMax        : Int      -- score threshold for AI auto-rejection (inclusive)
-    minDscrRatio         : Optional Decimal  -- minimum DSCR ratio for approval
-    maxLoanAmount        : Optional Decimal  -- maximum single-facility amount in NGN
-    requestSlaHours      : Int      -- hours from submission to FI decision before expiry
-    offerValidityDays    : Int      -- days the Wa'd offer remains open for borrower
+    -- | Score threshold for AI auto-approval (inclusive).
+    autoApproveMin       : Int
+    -- | Score threshold for AI auto-rejection (inclusive).
+    autoRejectMax        : Int
+    -- | Minimum DSCR ratio for approval.
+    minDscrRatio         : Optional Decimal
+    -- | Minimum single-facility amount in NGN this FI will fund.
+    minLoanAmount        : Optional Decimal
+    -- | Maximum single-facility amount in NGN.
+    maxLoanAmount        : Optional Decimal
+    -- | Indicative only — never binds a contract. The real profit margin is
+    -- set by the FI at Stage 8 (OfferMurabahah's murabahahTerms); this only
+    -- shapes the Stage 5 "Estimated Terms" preview the business sees before
+    -- an assessor or the FI ever looks at the request, so it can reflect
+    -- what this specific institution actually tends to charge instead of a
+    -- platform-wide guess.
+    indicativeProfitMarginPct : Optional Decimal
+    -- | Hours from submission to FI decision before expiry.
+    requestSlaHours      : Int
+    -- | Days the Wa'd offer remains open for the business.
+    offerValidityDays    : Int
     effectiveFrom        : Time
-    effectiveTo          : Optional Time  -- None while active; set on supersession via PQS
-    writeOffThresholdAmount      : Optional Decimal  -- business limit: write-offs above this need extra scrutiny (backend/off-ledger tiering)
-    maxRestructuringsPerFacility : Optional Int       -- business limit: threaded into MurabahahContract.ApproveRestructuring
-    -- Gap F12: per-institution lending-rules extensions (folded into UnderwritingPolicy
-    -- rather than a separate CreditPolicy template, to avoid two overlapping
-    -- per-institution policy contracts with duplicate maxLoanAmount/offerValidityDays/
-    -- versioning fields). permittedSectors is hard-enforced in BeginUnderwriting.
-    -- requiredCollateralTypes and maxSectorConcentrationPct are advisory config only:
-    -- neither has a natural single-choice enforcement point on-ledger — required
-    -- collateral existence can't be checked before a RahnAgreement is created (a
-    -- separate, optional step), and sector concentration inherently needs portfolio-
-    -- wide aggregation across every active facility for this FI, which a single Daml
-    -- choice cannot query. Both are backend/PQS reporting concerns, matching the same
-    -- boundary already used for PortfolioRiskReport/PortfolioReport in this codebase.
+    -- | `None` while active; set on supersession via PQS.
+    effectiveTo          : Optional Time
+    -- | Business limit: write-offs above this need extra scrutiny
+    -- (backend/off-ledger tiering).
+    writeOffThresholdAmount      : Optional Decimal
+    -- | Business limit: threaded into MurabahahContract.ApproveRestructuring.
+    maxRestructuringsPerFacility : Optional Int
+    -- | Per-institution lending-rules extensions, folded into
+    -- UnderwritingPolicy rather than a separate CreditPolicy template, to
+    -- avoid two overlapping per-institution policy contracts with
+    -- duplicate maxLoanAmount/offerValidityDays/versioning fields.
+    -- `permittedSectors` is hard-enforced in BeginUnderwriting.
+    -- `requiredCollateralTypes` and `maxSectorConcentrationPct` are
+    -- advisory config only: neither has a natural single-choice enforcement
+    -- point on-ledger — required collateral existence can't be checked
+    -- before a RahnAgreement is created (a separate, optional step), and
+    -- sector concentration inherently needs portfolio-wide aggregation
+    -- across every active facility for this FI, which a single Daml choice
+    -- cannot query. Both are backend/PQS reporting concerns, the same
+    -- boundary already used for PortfolioRiskReport/PortfolioReport.
     permittedSectors             : Optional [Text]
     requiredCollateralTypes      : [Text]
     maxSectorConcentrationPct    : Optional Decimal
-    -- Off-ledger Stage 6 scoring engine's per-check point table (agents/src/scoring/
-    -- underwriting.ts), now data instead of hardcoded constants — mirrors
+    -- | Off-ledger Stage 6 scoring engine's per-check point table
+    -- (agents/src/scoring/underwriting*.ts) — mirrors
     -- VerificationPolicy/CompliancePolicy's scoringWeights fields.
     scoringWeights                : UnderwritingScoringWeights
   where
     signatory vetify
     observer financialInstitution
-    key (vetify, financialInstitution) : (Party, Party)
-    maintainer key._1
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): callers can no longer `lookupByKey @UnderwritingPolicy
+    -- (vetify, financialInstitution)` — they must query PQS for the active
+    -- row (backend/repository.ts's `getUnderwritingPolicyByFi` already does
+    -- this) and pass its ContractId into resolveUnderwritingPolicy's
+    -- caller-facing choices and FlagUnderwritingForManualReview.
     ensure policyVersion /= ""
         && autoApproveMin > autoRejectMax
         && requestSlaHours > 0
@@ -60,6 +87,11 @@ template UnderwritingPolicy
         && (case writeOffThresholdAmount of Some a -> a > 0.0; None -> True)
         && (case maxRestructuringsPerFacility of Some n -> n > 0; None -> True)
         && (case maxSectorConcentrationPct of Some p -> p > 0.0 && p <= 100.0; None -> True)
+        && (case minLoanAmount of Some a -> a > 0.0; None -> True)
+        && (case (minLoanAmount, maxLoanAmount) of
+              (Some minAmt, Some maxAmt) -> minAmt <= maxAmt
+              _ -> True)
+        && (case indicativeProfitMarginPct of Some p -> p > 0.0 && p < 100.0; None -> True)
         && scoringWeights.dscrHigh >= 0 && scoringWeights.dscrMedium >= 0 && scoringWeights.dscrLow >= 0
         && scoringWeights.debtObligationsLow >= 0 && scoringWeights.debtObligationsModerate >= 0 && scoringWeights.debtObligationsHigh >= 0
         && scoringWeights.cashReserveStrong >= 0 && scoringWeights.cashReserveAdequate >= 0 && scoringWeights.cashReserveWeak >= 0
@@ -77,7 +109,7 @@ template UnderwritingPolicy
         && (scoringWeights.financialBehaviourEngineWeight + scoringWeights.cashflowRiskEngineWeight
             + scoringWeights.creditworthinessEngineWeight + scoringWeights.fraudDetectionEngineWeight) == 100
         && scoringWeights.fraudReviewThreshold >= 0 && scoringWeights.fraudReviewThreshold <= 100
-        -- Band-boundary ordering/bounds — the risk-tolerance cutoffs themselves
+        -- Band-boundary ordering/bounds — the risk-tolerance cutoffs themselves.
         && scoringWeights.dscrHighThreshold > scoringWeights.dscrMediumThreshold && scoringWeights.dscrMediumThreshold >= 0.0
         && scoringWeights.debtObligationsLowThreshold > 0.0 && scoringWeights.debtObligationsLowThreshold < scoringWeights.debtObligationsModerateThreshold
         && scoringWeights.cashReserveStrongMonths > scoringWeights.cashReserveAdequateMonths && scoringWeights.cashReserveAdequateMonths >= 0.0
@@ -90,14 +122,16 @@ template UnderwritingPolicy
         && scoringWeights.creditScoreExcellentThreshold > scoringWeights.creditScoreGoodThreshold
         && scoringWeights.creditScoreGoodThreshold > scoringWeights.creditScoreFairThreshold && scoringWeights.creditScoreFairThreshold >= 0
 
-    -- Vetify issues a new policy version; archives the current one.
+    -- | vetify issues a new policy version; archives the current one.
     choice UpdatePolicy : ContractId UnderwritingPolicy
       with
         newPolicyVersion     : Text
         newAutoApproveMin    : Int
         newAutoRejectMax     : Int
         newMinDscrRatio      : Optional Decimal
+        newMinLoanAmount     : Optional Decimal
         newMaxLoanAmount     : Optional Decimal
+        newIndicativeProfitMarginPct : Optional Decimal
         newRequestSlaHours   : Int
         newOfferValidityDays : Int
         newEffectiveFrom     : Time
@@ -113,150 +147,236 @@ template UnderwritingPolicy
           autoApproveMin    = newAutoApproveMin
           autoRejectMax     = newAutoRejectMax
           minDscrRatio      = newMinDscrRatio
+          minLoanAmount     = newMinLoanAmount
           maxLoanAmount     = newMaxLoanAmount
+          indicativeProfitMarginPct = newIndicativeProfitMarginPct
           requestSlaHours   = newRequestSlaHours
           offerValidityDays = newOfferValidityDays
           effectiveFrom     = newEffectiveFrom
           effectiveTo       = None
           scoringWeights    = newScoringWeights
 
+-- | Given the active UnderwritingPolicy's ContractId for `(vetify,
+-- financialInstitution)` (if any — caller-supplied, since SDK 3.4.11 /
+-- Daml-LF 2.1/2.2 does not support contract keys, so this can no longer
+-- resolve it itself via `lookupByKey`), enforces its FI-specific gates
+-- (currently in effect, per-institution auto-approval floor, loan-amount
+-- bounds, permitted-sector membership), and returns a policy snapshot plus
+-- the computed SLA expiry. Extracted from BeginUnderwriting for
+-- readability — the choice itself was one of the two largest in this
+-- codebase.
+resolveUnderwritingPolicy
+  : Optional (ContractId UnderwritingPolicy) -> Bool -> RiskAssessment -> Decimal -> Text -> Time
+  -> Update (Optional UnderwritingPolicySnapshot, Optional Time)
+resolveUnderwritingPolicy mPolicyCid autoDecided assessment requestedAmount businessSector t = do
+  case mPolicyCid of
+    None -> return (None, None)
+    Some policyCid -> do
+      policy <- fetch policyCid
+      -- The policy must be currently in effect.
+      assertMsg "UnderwritingPolicy is not yet effective" (policy.effectiveFrom <= t)
+      assertMsg "UnderwritingPolicy has been superseded" (policy.effectiveTo == None)
+      -- Mirrors Onboarding.Approve's identical policy-threshold gate: an
+      -- agent auto-decision must meet this institution's own auto-approval
+      -- floor, not just the canonical 80 enforced by UnderwritingResult's
+      -- ensure clause.
+      if autoDecided
+        then assertMsg ("Agent auto-decision requires score >= " <> show policy.autoApproveMin)
+               (assessment.score >= policy.autoApproveMin)
+        else return ()
+      -- Enforce the policy's maximum loan amount.
+      case policy.maxLoanAmount of
+        Some maxAmt ->
+          assertMsg "Requested amount exceeds policy maximum loan amount" (requestedAmount <= maxAmt)
+        None -> return ()
+      -- Symmetric floor — same enforcement point as the ceiling above, so a
+      -- request too small for this FI to bother funding is caught here
+      -- rather than silently proceeding to a real human's underwriting queue.
+      case policy.minLoanAmount of
+        Some minAmt ->
+          assertMsg "Requested amount is below policy minimum loan amount" (requestedAmount >= minAmt)
+        None -> return ()
+      -- Enforce permitted business sectors, when the policy restricts them.
+      case policy.permittedSectors of
+        Some sectors ->
+          assertMsg "Business sector is not permitted under this institution's lending policy"
+            (businessSector `elem` sectors)
+        None -> return ()
+      let snapshot = UnderwritingPolicySnapshot with
+            policyVersion     = policy.policyVersion
+            autoApproveMin    = policy.autoApproveMin
+            autoRejectMax     = policy.autoRejectMax
+            minDscrRatio      = policy.minDscrRatio
+            minLoanAmount     = policy.minLoanAmount
+            maxLoanAmount     = policy.maxLoanAmount
+            indicativeProfitMarginPct = policy.indicativeProfitMarginPct
+            requestSlaHours   = policy.requestSlaHours
+            offerValidityDays = policy.offerValidityDays
+            effectiveFrom     = policy.effectiveFrom
+            capturedAt        = t
+            scoringWeights    = policy.scoringWeights
+      let expiry = addRelTime t (hours policy.requestSlaHours)
+      return (Some snapshot, Some expiry)
+
 
 -- ─── Stage 5: Financing Request ──────────────────────────────────────────────
--- Borrower submits a Murabahah financing request to a financial institution.
--- F17: Contract key (borrower, financingRef) enforces one active request per
---      reference — the ledger rejects duplicate keys on Canton sandbox.
+
+-- | A business's Murabahah financing request to a financial institution.
+-- Keyed on `(business, financingRef)` — the ledger rejects a duplicate
+-- reference for the same business.
 template FinancingRequest
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
+    -- | vetify's own underwriting team, not a third party (the same framing
+    -- as `verifier`) — screens/qualifies businesses before they reach the
+    -- FI at all. Distinct from `assignedAssessorId`/`assignedAssessorName`
+    -- below, which track an FI staff member's own internal task
+    -- assignment, not ledger authority.
+    assessor          : Party
     businessName         : Text
     cacRegNumber         : Text
     terms                : FinancingTerms
     status               : FinancingStatus
-    -- F1: traceability chain
-    financingRef         : Text           -- F17: mandatory unique reference; contract key component
-    verificationRef      : Optional Text  -- links to VerificationResult for this borrower
-    complianceRef        : Optional Text  -- links to ApprovedBorrower / ComplianceResult
-    -- F2: audit timestamps
-    submittedAt          : Optional Time  -- ledger time of initial submission
-    -- F14: immutable references to financial statements, invoices, quotations
+    -- | Mandatory unique reference; a contract-key component.
+    financingRef         : Text
+    -- | Links to the VerificationResult for this business.
+    verificationRef      : Optional Text
+    -- | Links to ApprovedBusiness / ComplianceResult.
+    complianceRef        : Optional Text
+    -- | Ledger time of initial submission.
+    submittedAt          : Optional Time
+    -- | Immutable references to financial statements, invoices, quotations.
     supportingDocuments  : [DocumentRef]
-    -- Gap F12: checked against UnderwritingPolicy.permittedSectors in BeginUnderwriting
+    -- | Checked against UnderwritingPolicy.permittedSectors in
+    -- BeginUnderwriting.
     businessSector       : Text
-    -- Carried over from ApprovedBorrower.incorporationDate at RequestFinancing time —
-    -- used by the Underwriting Agent's business-age scoring factor (agents/src/scoring/
-    -- underwriting.ts). Previously absent (a data-completeness gap of the same kind
-    -- already closed for ComplianceReview/ApprovedBorrower).
+    -- | Carried over from ApprovedBusiness.incorporationDate at
+    -- RequestFinancing time — used by the Underwriting Agent's
+    -- business-age scoring factor (agents/src/scoring/underwriting.ts).
     incorporationDate    : Date
-    -- F18: SLA expiry — set by BeginUnderwriting from UnderwritingPolicy
+    -- | SLA expiry, set by BeginUnderwriting from UnderwritingPolicy.
     expiresAt            : Optional Time
-    -- F24: amendment history
-    termHistory          : [FinancingTerms]  -- original terms before each accepted amendment
-    amendmentCount       : Int               -- total amendments accepted
-    -- Gap F9: underwriter task assignment, for SLA/workload tracking
-    assignedUnderwriterId   : Optional Text  -- AuthorizedOfficer registry key (UnderwritingOfficer role)
-    assignedUnderwriterName : Optional Text
+    -- | Original terms before each accepted amendment.
+    termHistory          : [FinancingTerms]
+    -- | Total amendments accepted.
+    amendmentCount       : Int
+    -- | Assessor task assignment, for SLA/workload tracking — the
+    -- AuthorizedOfficer registry key (UnderwritingOfficer role).
+    assignedAssessorId   : Optional Text
+    assignedAssessorName : Optional Text
     assignedAt              : Optional Time
+    -- | Set by FlagUnderwritingForManualReview — mirrors
+    -- BusinessOnboarding's identical fields for its own ManualReview
+    -- escalation.
+    agentScore    : Optional Int
+    agentRisk     : Optional RiskLevel
+    agentNote     : Optional Text
+    agentVersion  : Optional Text
   where
-    signatory borrower
-    observer vetify, financialInstitution
+    signatory business
+    observer vetify, financialInstitution, assessor
     ensure terms.amount > 0.0 && terms.tenureMonths > 0
            && financingRef /= ""
            && amendmentCount >= 0
            && businessSector /= ""
-    key (borrower, financingRef) : (Party, Text)
-    maintainer key._1
+    -- No contract key (Daml-LF 2.1/2.2, SDK 3.4.11, does not support
+    -- contract keys): ledger-enforced uniqueness of
+    -- (business, financingRef) is no longer guaranteed.
 
-    -- Gap F9: assigns a human underwriter to this request for task-management/SLA
-    -- tracking, gated on the AuthorizedOfficer registry (UnderwritingOfficer role).
-    -- Can be called before or after BeginUnderwriting (Submitted or Underwriting).
-    -- Controller is financialInstitution, not vetify: the AuthorizedOfficer
-    -- registry lookup requires the key's maintainer (financialInstitution) to
-    -- authorize the transaction (Daml's lookupByKey needs all key maintainers
-    -- present) — the FI is assigning one of its own staff, so this is also the
+    -- | Assigns a human assessor to this request for task-management/SLA
+    -- tracking, gated on the AuthorizedOfficer registry (UnderwritingOfficer
+    -- role). Can be called before or after BeginUnderwriting (Submitted or
+    -- Underwriting).
+    --
+    -- Controller is `financialInstitution`, not vetify: the FI is assigning
+    -- one of its own staff (the `officerCid` argument below), so it's the
     -- semantically correct owner of the action.
-    choice AssignUnderwriter : ContractId FinancingRequest
+    choice AssignAssessor : ContractId FinancingRequest
       with
         assignedOfficerId : Text
         assignedByName    : Text
+        -- | The registered AuthorizedOfficer entry to assign — caller
+        -- (financialInstitution) supplied, since SDK 3.4.11 / Daml-LF
+        -- 2.1/2.2 does not support contract keys.
+        officerCid        : ContractId AuthorizedOfficer
       controller financialInstitution
       do
-        assertMsg "Can only assign an underwriter while Submitted or Underwriting"
-          (status == Submitted || status == Underwriting)
+        assertMsg "Can only assign an assessor while Submitted or Underwriting"
+          (isOpenFinancingRequest status)
         assertMsg "assignedByName must not be empty" (assignedByName /= "")
-        officer <- requireActiveOfficer financialInstitution assignedOfficerId UnderwritingOfficer
+        officer <- requireActiveOfficer financialInstitution assignedOfficerId UnderwritingOfficer officerCid
         t <- getTime
         create this with
-          assignedUnderwriterId   = Some assignedOfficerId
-          assignedUnderwriterName = Some officer.officerName
+          assignedAssessorId   = Some assignedOfficerId
+          assignedAssessorName = Some officer.officerName
           assignedAt              = Some t
 
-    -- Vetify triggers the Underwriting Agent; updates request status, computes SLA
-    -- expiry from the active UnderwritingPolicy (if one exists), and records the full
-    -- AI assessment on-ledger for auditability and governance (F3, F4, F16, F18, F23).
+    -- | The assessor qualifies the business — vetify's own underwriting
+    -- team screens and proceeds to the FI, mirroring how `verifier` screens
+    -- businesses before Stage 5. Covers both the auto-qualify path (Low
+    -- risk, straight from Submitted) and the human-approved-after-flag path
+    -- (from UnderwritingManualReview).
+    --
+    -- Dual controller (`assessor, vetify`): vetify's own signature is
+    -- required since FinancingRequest's signatory is business only —
+    -- vetify's authority isn't free here (mirrors Onboarding.Approve's
+    -- identical dual-controller rationale).
     choice BeginUnderwriting : (ContractId FinancingRequest, ContractId UnderwritingResult)
       with
         assessment        : RiskAssessment
-        autoDecided       : Bool                        -- F3: True if AI decided without human review
-        aiMetadata        : Optional AIDecisionMetadata -- F3: agent provenance (model version, trace ID)
-        agentVersion      : Optional Text               -- F3: deployed agent version string
-        underwriterName   : Optional Text               -- F3/F11: name of underwriter (agent or human)
-        underwritingRef   : Optional Text               -- F2: external underwriting trace reference
-        decisionDocuments : [DocumentRef]               -- F23: evidence docs for this underwriting decision
-      controller vetify
+        -- | True if AI decided without human review.
+        autoDecided       : Bool
+        -- | Agent provenance (model version, trace ID).
+        aiMetadata        : Optional AIDecisionMetadata
+        -- | Deployed agent version string.
+        agentVersion      : Optional Text
+        -- | Name of the assessor, agent or human.
+        assessorName   : Optional Text
+        -- | External underwriting trace reference.
+        underwritingRef   : Optional Text
+        -- | Evidence documents for this underwriting decision.
+        decisionDocuments : [DocumentRef]
+        -- | The registered AuthorizedAssessor entry for `assessor` —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        assessorCid       : ContractId AuthorizedAssessor
+        -- | The active UnderwritingPolicy's ContractId, if one exists —
+        -- caller-supplied, same reason.
+        policyCid         : Optional (ContractId UnderwritingPolicy)
+      controller assessor, vetify
       do
-        assertMsg "Can only begin underwriting from Submitted" (status == Submitted)
-        -- F27: AI score must be in the valid 0–100 range
+        assertMsg "Can only begin underwriting from Submitted or UnderwritingManualReview"
+          (isPendingUnderwritingDecision status)
+        requireActiveAssessor vetify assessor assessorCid
+        -- The AI score must be in the valid 0-100 range.
         assertMsg "assessment.score must be between 0 and 100"
           (assessment.score >= 0 && assessment.score <= 100)
-        -- Each per-engine sub-score, when present, must also be a valid 0-100 score
+        -- Each per-engine sub-score, when present, must also be a valid
+        -- 0-100 score.
         let inRange01 mScore = case mScore of None -> True; Some s -> s >= 0 && s <= 100
         assertMsg "assessment.behaviouralScore must be between 0 and 100" (inRange01 assessment.behaviouralScore)
         assertMsg "assessment.cashflowRiskScore must be between 0 and 100" (inRange01 assessment.cashflowRiskScore)
         assertMsg "assessment.creditworthinessScore must be between 0 and 100" (inRange01 assessment.creditworthinessScore)
         assertMsg "assessment.fraudScore must be between 0 and 100" (inRange01 assessment.fraudScore)
+        -- High-risk assessments cannot be auto-decided; mirrors
+        -- Onboarding.Approve's identical gate — a human assessor must sign
+        -- off on a High-risk facility.
+        assertMsg "High-risk assessments cannot be auto-decided; human review required"
+          (not (autoDecided && assessment.riskCategory == High))
         t <- getTime
-        -- F16: look up active policy to capture snapshot and compute SLA expiry
-        mPolicyCid <- lookupByKey @UnderwritingPolicy (vetify, financialInstitution)
-        (policySnapshot, expiresAtTime) <- case mPolicyCid of
-          None -> return (None, None)
-          Some policyCid -> do
-            policy <- fetch policyCid
-            -- F26: policy must be currently in effect
-            assertMsg "UnderwritingPolicy is not yet effective" (policy.effectiveFrom <= t)
-            assertMsg "UnderwritingPolicy has been superseded" (policy.effectiveTo == None)
-            -- F28: enforce policy maximum loan amount
-            case policy.maxLoanAmount of
-              Some maxAmt ->
-                assertMsg "Requested amount exceeds policy maximum loan amount" (terms.amount <= maxAmt)
-              None -> return ()
-            -- Gap F12: enforce permitted business sectors, when the policy restricts them
-            case policy.permittedSectors of
-              Some sectors ->
-                assertMsg "Business sector is not permitted under this institution's lending policy"
-                  (businessSector `elem` sectors)
-              None -> return ()
-            -- F28: enforce minimum DSCR ratio gate (advisory — stored for FI to act on)
-            let snapshot = UnderwritingPolicySnapshot with
-                  policyVersion     = policy.policyVersion
-                  autoApproveMin    = policy.autoApproveMin
-                  autoRejectMax     = policy.autoRejectMax
-                  minDscrRatio      = policy.minDscrRatio
-                  maxLoanAmount     = policy.maxLoanAmount
-                  requestSlaHours   = policy.requestSlaHours
-                  offerValidityDays = policy.offerValidityDays
-                  effectiveFrom     = policy.effectiveFrom
-                  capturedAt        = t
-                  scoringWeights    = policy.scoringWeights
-            let expiry = addRelTime t (hours policy.requestSlaHours)
-            return (Some snapshot, Some expiry)
+        -- Look up the active policy to capture a snapshot and compute the
+        -- SLA expiry.
+        (policySnapshot, expiresAtTime) <-
+          resolveUnderwritingPolicy policyCid autoDecided assessment terms.amount businessSector t
         updatedRequest <- create this with
           status    = Underwriting
           expiresAt = expiresAtTime
         result <- create UnderwritingResult with
-          borrower
+          business
           vetify
+          assessor
           financialInstitution
           businessName
           cacRegNumber
@@ -266,7 +386,7 @@ template FinancingRequest
           autoDecided
           aiMetadata
           agentVersion
-          underwriterName
+          assessorName
           policySnapshot
           underwritingRef
           decisionDocuments
@@ -277,69 +397,170 @@ template FinancingRequest
           overriddenByName      = None
         return (updatedRequest, result)
 
-    -- Stage 7: FI approves funding and triggers the Murabahah chain by creating
-    -- a MurabahahWad. Also creates an immutable FinancingDecision audit record (F5, F22, F23).
-    -- Status guard (F6) and maker-checker (F11) are enforced here.
-    -- F19: offerExpiresAt is supplied by the caller (computed from the policy snapshot
-    --      captured on UnderwritingResult, which the FI can read from the ledger).
+    -- | The Underwriting Agent stores its score and flags the request for
+    -- human assessor review — mirrors FlagComplianceForManualReview exactly
+    -- (band validation against the active policy, controller vetify alone
+    -- since no assessor decision has been made yet, just
+    -- routing/escalation).
+    choice FlagUnderwritingForManualReview : ContractId FinancingRequest
+      with
+        riskScore    : Int
+        riskLevel    : RiskLevel
+        agentVersion : Text
+        note         : Text
+        -- | The active UnderwritingPolicy's ContractId, if one exists —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        policyCid    : Optional (ContractId UnderwritingPolicy)
+      controller vetify
+      do
+        assertMsg "Can only flag from Submitted" (status == Submitted)
+        assertMsg "Risk score must be 0–100" (riskScore >= 0 && riskScore <= 100)
+        case policyCid of
+          None -> return ()
+          Some cid -> do
+            policy <- fetch cid
+            assertMsg "Risk score is outside the Medium band for this institution's policy"
+              (riskScore > policy.autoRejectMax && riskScore < policy.autoApproveMin)
+        create this with
+          status       = UnderwritingManualReview
+          agentScore   = Some riskScore
+          agentRisk    = Some riskLevel
+          agentNote    = Some note
+          agentVersion = Some agentVersion
+
+    -- | The assessor's hard veto — a business screened out here never
+    -- reaches the FI at all, mirroring RejectCompliance's screening
+    -- authority in Stage 3. Same dual-controller rationale as
+    -- BeginUnderwriting above.
+    choice RejectUnderwriting : ContractId UnderwritingRejection
+      with
+        reason        : Text
+        autoDecided   : Bool
+        reviewerParty : Optional Party
+        reviewedBy    : Optional Text
+        -- | The assessment that produced this rejection, when one was
+        -- computed. `None` on the pre-scoring Shariah-purpose hard veto
+        -- (agents/src/agents/underwriting.ts screens the stated financing
+        -- purpose before any RiskAssessment exists); `Some` on the
+        -- scoring-engine's own High-risk/fraud-override rejection path.
+        assessment    : Optional RiskAssessment
+        -- | The registered AuthorizedAssessor entry for `assessor` —
+        -- caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        assessorCid   : ContractId AuthorizedAssessor
+      controller assessor, vetify
+      do
+        assertMsg "Can only reject underwriting from Submitted or UnderwritingManualReview"
+          (isPendingUnderwritingDecision status)
+        assertMsg "Rejection reason must not be empty" (reason /= "")
+        assertMsg "Human decisions require a reviewer party (reviewerParty)"
+          (autoDecided || reviewerParty /= None)
+        -- When an assessment is present, an auto-decided rejection must be
+        -- backed by a High-risk assessment — the precise mirror of
+        -- BeginUnderwriting's "cannot auto-decide a High-risk assessment"
+        -- gate. Human decisions (autoDecided = False) may reject on
+        -- qualitative grounds not captured in the score.
+        case assessment of
+          Some a | autoDecided ->
+            assertMsg "Auto-decided rejection requires a High-risk assessment"
+              (a.riskCategory == High)
+          _ -> return ()
+        requireActiveAssessor vetify assessor assessorCid
+        t <- getTime
+        create UnderwritingRejection with
+          business
+          vetify
+          assessor
+          financialInstitution
+          businessName
+          cacRegNumber
+          financingRef
+          reason
+          autoDecided
+          reviewerParty
+          reviewedBy
+          assessment
+          decidedAt = t
+
+    -- | Stage 7: the FI approves funding and triggers the Murabahah chain by
+    -- creating a MurabahahWad. Also creates an immutable FinancingDecision
+    -- audit record. `offerExpiresAt` is supplied by the caller, computed
+    -- from the policy snapshot captured on UnderwritingResult (which the FI
+    -- can read from the ledger).
     choice ApproveFunding : (ContractId MurabahahWad, ContractId FinancingDecision)
       with
-        approvedProviderCid : ContractId ApprovedProvider  -- must hold Murabahah in approvedInstruments
+        -- | Must hold Murabahah in approvedInstruments.
+        approvedProviderCid : ContractId ApprovedProvider
         assetDetails        : AssetDetails
-        approvedByName      : Optional Text               -- F11: name of FI officer who approved
-        underwriterName     : Optional Text               -- F11: underwriter name for maker-checker
-        reasonCode          : Optional Text               -- F15: machine-readable approval reason code
-        decisionFactors     : [Text]                      -- F15: structured list of decision factors
-        approvalSignature   : Optional ApprovalSignature  -- F22: digital signature evidence
-        decisionDocuments   : [DocumentRef]               -- F23: evidence docs for the approval decision
-        offerExpiresAt      : Optional Time               -- F19: Wa'd offer window expiry (from policy snapshot)
-        approvingOfficerId  : Text                        -- RBAC: AuthorizedOfficer registry key (CreditOfficer role)
+        -- | Name of the FI officer who approved.
+        approvedByName      : Optional Text
+        -- | Assessor name, for maker-checker.
+        assessorName     : Optional Text
+        -- | Machine-readable approval reason code.
+        reasonCode          : Optional Text
+        -- | Structured list of decision factors.
+        decisionFactors     : [Text]
+        -- | Digital signature evidence.
+        approvalSignature   : Optional ApprovalSignature
+        -- | Evidence documents for the approval decision.
+        decisionDocuments   : [DocumentRef]
+        -- | Wa'd offer window expiry, from the policy snapshot.
+        offerExpiresAt      : Optional Time
+        -- | AuthorizedOfficer registry key (CreditOfficer role).
+        approvingOfficerId  : Text
+        -- | The registered AuthorizedOfficer entry for `approvingOfficerId`
+        -- — caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        approvingOfficerCid : ContractId AuthorizedOfficer
       controller financialInstitution
       do
         assertMsg "Can only approve from Underwriting" (status == Underwriting)
-        -- Stage 0 gate: FI must be onboarded and approved for Murabahah financing.
+        -- Stage 0 gate: the FI must be onboarded and approved for
+        -- Murabahah financing.
         ap <- fetch approvedProviderCid
         assertMsg "ApprovedProvider is not for this financial institution"
           (ap.financialInstitution == financialInstitution)
         assertMsg "Financial institution is not approved to offer Murabahah financing"
           (Murabahah `elem` ap.approvedInstruments)
-        -- RBAC: approving officer must be a registered, active CreditOfficer
-        officer <- requireActiveOfficer financialInstitution approvingOfficerId CreditOfficer
+        -- The approving officer must be a registered, active CreditOfficer.
+        officer <- requireActiveOfficer financialInstitution approvingOfficerId CreditOfficer approvingOfficerCid
         case approvedByName of
           Some n -> assertMsg "approvedByName does not match the registered officer" (n == officer.officerName)
           None   -> return ()
-        -- Gap F37: officer cannot approve above their tier's authorization limit
+        -- The officer cannot approve above their tier's authorization limit.
         case officer.approvalLimit of
           Some limit -> assertMsg "Financing amount exceeds officer's approval limit" (terms.amount <= limit)
           None       -> return ()
-        -- F11: maker-checker — approver must differ from underwriter
-        case (underwriterName, approvedByName) of
+        -- Maker-checker: the approver must differ from the assessor.
+        case (assessorName, approvedByName) of
           (Some u, Some a) ->
             assertMsg "Approver cannot be the same person who underwrote (maker-checker)" (u /= a)
           _ -> return ()
         t <- getTime
-        -- U1: if an SLA expiry was set by BeginUnderwriting, the FI must approve before it lapses
+        -- If an SLA expiry was set by BeginUnderwriting, the FI must
+        -- approve before it lapses.
         case expiresAt of
           Some expiry ->
             assertMsg "Underwriting assessment has expired — re-underwriting required" (t <= expiry)
           None -> return ()
-        -- F35: offer expiry must be strictly in the future if provided
+        -- The offer expiry must be strictly in the future, if provided.
         case offerExpiresAt of
           Some expiry ->
             assertMsg "offerExpiresAt must be in the future" (expiry > t)
           None -> return ()
         wad <- create MurabahahWad with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
           cacRegNumber
           terms
           assetDetails
-          financingRef    = Some financingRef  -- F20: carry reference into Murabahah chain
+          financingRef    = Some financingRef  -- carry the reference into the Murabahah chain
           offerExpiresAt
         decision <- create FinancingDecision with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -355,23 +576,28 @@ template FinancingRequest
           decisionDocuments
         return (wad, decision)
 
-    -- Stage 7: FI rejects the request with structured reason for explainability (F15).
-    -- The rejection is preserved on-ledger as a FinancingDecision audit record.
+    -- | Stage 7: the FI rejects the request, with a structured reason for
+    -- explainability. The rejection is preserved on-ledger as a
+    -- FinancingDecision audit record.
     choice RejectFunding : ContractId FinancingDecision
       with
         reason            : Text
-        rejectedByName    : Optional Text  -- F11: name of FI officer who rejected
-        reasonCode        : Optional Text  -- F15: machine-readable rejection reason code
-        decisionFactors   : [Text]         -- F15: structured list of decision factors
-        decisionDocuments : [DocumentRef]  -- F23: evidence docs for the rejection decision
+        -- | Name of the FI officer who rejected.
+        rejectedByName    : Optional Text
+        -- | Machine-readable rejection reason code.
+        reasonCode        : Optional Text
+        -- | Structured list of decision factors.
+        decisionFactors   : [Text]
+        -- | Evidence documents for the rejection decision.
+        decisionDocuments : [DocumentRef]
       controller financialInstitution
       do
         assertMsg "Can only reject from Submitted or Underwriting"
-          (status == Submitted || status == Underwriting)
+          (isOpenFinancingRequest status)
         assertMsg "Rejection reason must not be empty" (reason /= "")
         t <- getTime
         create FinancingDecision with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -386,18 +612,19 @@ template FinancingRequest
           approvalSignature = None
           decisionDocuments
 
-    -- F13: Borrower voluntarily withdraws the request before a funding decision.
-    -- Creates a WithdrawalRecord as an immutable on-ledger audit trail.
+    -- | The business voluntarily withdraws the request before a funding
+    -- decision. Creates a WithdrawalRecord as an immutable on-ledger audit
+    -- trail.
     choice WithdrawRequest : ContractId WithdrawalRecord
       with reason : Text
-      controller borrower
+      controller business
       do
         assertMsg "Can only withdraw a Submitted or Underwriting request"
-          (status == Submitted || status == Underwriting)
+          (isOpenFinancingRequest status)
         assertMsg "Withdrawal reason must not be empty" (reason /= "")
         t <- getTime
         create WithdrawalRecord with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -406,21 +633,22 @@ template FinancingRequest
           reason
           withdrawnAt = t
 
-    -- F18: Vetify expires a request that has exceeded its policy SLA.
-    -- Gated: request must have an expiresAt and current ledger time must be past it.
+    -- | vetify expires a request that has exceeded its policy SLA. Gated:
+    -- the request must have an `expiresAt`, and the current ledger time
+    -- must be past it.
     choice ExpireRequest : ContractId RequestClosureRecord
       with reason : Text
       controller vetify
       do
         assertMsg "Can only expire a Submitted or Underwriting request"
-          (status == Submitted || status == Underwriting)
+          (isOpenFinancingRequest status)
         now <- getTime
         case expiresAt of
           None -> assertMsg "No SLA expiry configured on this request" False
           Some expiry ->
             assertMsg "Request SLA has not yet elapsed" (now > expiry)
         create RequestClosureRecord with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -430,17 +658,18 @@ template FinancingRequest
           reason
           closedAt = now
 
-    -- F18: Vetify administratively cancels a request (e.g. borrower insolvency event).
+    -- | vetify administratively cancels a request, e.g. a business
+    -- insolvency event.
     choice CancelRequest : ContractId RequestClosureRecord
       with reason : Text
       controller vetify
       do
         assertMsg "Can only cancel a Submitted or Underwriting request"
-          (status == Submitted || status == Underwriting)
+          (isOpenFinancingRequest status)
         assertMsg "Cancellation reason must not be empty" (reason /= "")
         now <- getTime
         create RequestClosureRecord with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -450,8 +679,9 @@ template FinancingRequest
           reason
           closedAt = now
 
-    -- F24: FI proposes amended financing terms to the borrower.
-    -- nonconsuming: the original request remains active until the borrower accepts/declines.
+    -- | The FI proposes amended financing terms to the business.
+    -- Nonconsuming: the original request remains active until the business
+    -- accepts or declines.
     nonconsuming choice ProposeAmendment : ContractId FinancingAmendment
       with
         proposedTerms : FinancingTerms
@@ -459,12 +689,12 @@ template FinancingRequest
       controller financialInstitution
       do
         assertMsg "Can only propose amendments to Submitted or Underwriting requests"
-          (status == Submitted || status == Underwriting)
+          (isOpenFinancingRequest status)
         assertMsg "Proposed amount must be positive" (proposedTerms.amount > 0.0)
         assertMsg "Proposed tenure must be positive" (proposedTerms.tenureMonths > 0)
         now <- getTime
         create FinancingAmendment with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -476,11 +706,13 @@ template FinancingRequest
           proposalNote
 
 
--- ─── F13: Withdrawal Record ───────────────────────────────────────────────────
--- Immutable audit record created when a borrower withdraws a financing request.
+-- ─── Withdrawal Record ────────────────────────────────────────────────────
+
+-- | Immutable audit record created when a business withdraws a financing
+-- request.
 template WithdrawalRecord
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
     businessName         : Text
@@ -489,67 +721,95 @@ template WithdrawalRecord
     reason               : Text
     withdrawnAt          : Time
   where
-    signatory borrower
+    signatory business
     observer vetify, financialInstitution
 
 
--- ─── F18: Request Closure Record ─────────────────────────────────────────────
--- Immutable audit record created when a request is expired or cancelled by vetify.
+-- ─── Request Closure Record ───────────────────────────────────────────────
+
+-- | Immutable audit record created when a request is expired or cancelled
+-- by vetify.
 template RequestClosureRecord
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
     businessName         : Text
     cacRegNumber         : Text
     financingRef         : Text
-    outcome              : FinancingStatus  -- Expired or Cancelled
+    -- | Expired or Cancelled.
+    outcome              : FinancingStatus
     reason               : Text
     closedAt             : Time
   where
     signatory vetify
-    observer borrower, financialInstitution
+    observer business, financialInstitution
 
 
 -- ─── Stage 6: Underwriting Result ────────────────────────────────────────────
--- Underwriting Agent risk assessment — visible to FI and borrower.
--- Carries full AI governance metadata for traceability and override audit (F3, F4, F10).
--- F16: policySnapshot records the exact policy thresholds in effect at underwriting time.
+
+-- | The Underwriting Agent's risk assessment — visible to the FI and the
+-- business. Carries full AI governance metadata for traceability and
+-- override audit.
 template UnderwritingResult
   with
-    borrower              : Party
+    business              : Party
     vetify                : Party
+    -- | Signs this result; vetify's own underwriting team.
+    assessor           : Party
     financialInstitution  : Party
     businessName          : Text
     cacRegNumber          : Text
-    financingRef          : Text                          -- F17/F23: traceability to FinancingRequest
+    -- | Traceability back to the FinancingRequest.
+    financingRef          : Text
     terms                 : FinancingTerms
     assessment            : RiskAssessment
-    -- F3: AI governance
-    autoDecided           : Bool                          -- True if AI agent made the decision
-    aiMetadata            : Optional AIDecisionMetadata   -- agent provenance
-    agentVersion          : Optional Text                 -- deployed agent version string
-    underwriterName       : Optional Text                 -- agent or human underwriter name
-    -- F10: human override audit trail
-    overrideJustification : Optional Text                 -- set by OverrideUnderwriting
-    overrideType          : Optional OverrideType         -- OverrodeApproval or OverrodeRejection
-    overriddenByName      : Optional Text                 -- who performed the override
-    -- F16: policy snapshot
-    policySnapshot        : Optional UnderwritingPolicySnapshot  -- policy in effect at BeginUnderwriting
-    -- F2: audit timestamps and references
-    underwritingRef       : Optional Text                 -- external underwriting trace
-    underwritingStartedAt : Optional Time                 -- ledger time at BeginUnderwriting
-    -- U1: assessment validity window — mirrors the request SLA expiry from the policy
-    validUntil            : Optional Time                 -- assessment expires after this time; None = no expiry
-    -- F23: evidence documents
-    decisionDocuments     : [DocumentRef]                 -- evidence docs for this underwriting decision
+    -- | True if the AI agent made the decision.
+    autoDecided           : Bool
+    -- | Agent provenance.
+    aiMetadata            : Optional AIDecisionMetadata
+    -- | Deployed agent version string.
+    agentVersion          : Optional Text
+    -- | Agent or human assessor name.
+    assessorName       : Optional Text
+    -- | Set by OverrideUnderwriting.
+    overrideJustification : Optional Text
+    overrideType          : Optional OverrideType
+    -- | Who performed the override.
+    overriddenByName      : Optional Text
+    -- | The policy in effect at BeginUnderwriting.
+    policySnapshot        : Optional UnderwritingPolicySnapshot
+    -- | External underwriting trace.
+    underwritingRef       : Optional Text
+    -- | Ledger time at BeginUnderwriting.
+    underwritingStartedAt : Optional Time
+    -- | Assessment validity window, mirroring the request SLA expiry from
+    -- the policy. The assessment expires after this time; `None` = no
+    -- expiry.
+    validUntil            : Optional Time
+    -- | Evidence documents for this underwriting decision.
+    decisionDocuments     : [DocumentRef]
   where
-    signatory vetify
-    observer financialInstitution, borrower
+    signatory assessor
+    observer vetify, financialInstitution, business
+    -- Agent auto-decisions must follow the canonical Model C score->level
+    -- mapping (Low >= 80, Medium 50-79, High < 50) — mirrors
+    -- VerificationResult's ensure. Human decisions (`autoDecided = False`,
+    -- e.g. after OverrideUnderwriting) may deviate based on qualitative
+    -- factors not captured in the score.
+    ensure financingRef /= ""
+        && assessment.score >= 0 && assessment.score <= 100
+        && (if autoDecided then
+              case assessment.riskCategory of
+                Low    -> assessment.score >= 80
+                Medium -> assessment.score >= 50 && assessment.score < 80
+                High   -> assessment.score < 50
+            else True)
 
-    -- F10: FI overrides the AI underwriting recommendation with a human decision.
-    -- Archives the agent result and creates a new UnderwritingResult recording the override.
-    -- Gap F31: overriding officer must be a registered, active UnderwritingOfficer.
+    -- | The FI overrides the AI underwriting recommendation with a human
+    -- decision: archives the agent result and creates a new
+    -- UnderwritingResult recording the override. The overriding officer
+    -- must be a registered, active UnderwritingOfficer.
     choice OverrideUnderwriting : ContractId UnderwritingResult
       with
         overriddenAssessment : RiskAssessment
@@ -557,14 +817,18 @@ template UnderwritingResult
         overriddenByName     : Text
         overrideType         : OverrideType
         overridingOfficerId  : Text
+        -- | The registered AuthorizedOfficer entry for `overridingOfficerId`
+        -- — caller-supplied, since SDK 3.4.11 / Daml-LF 2.1/2.2 does not
+        -- support contract keys.
+        overridingOfficerCid : ContractId AuthorizedOfficer
       controller financialInstitution
       do
         assertMsg "Justification required" (justification /= "")
         assertMsg "Override authority name required" (overriddenByName /= "")
-        -- F27: overridden score must also be in the valid range
+        -- The overridden score must also be in the valid range.
         assertMsg "overriddenAssessment.score must be between 0 and 100"
           (overriddenAssessment.score >= 0 && overriddenAssessment.score <= 100)
-        officer <- requireActiveOfficer financialInstitution overridingOfficerId UnderwritingOfficer
+        officer <- requireActiveOfficer financialInstitution overridingOfficerId UnderwritingOfficer overridingOfficerCid
         assertMsg "overriddenByName does not match the registered officer" (overriddenByName == officer.officerName)
         create this with
           assessment            = overriddenAssessment
@@ -573,8 +837,9 @@ template UnderwritingResult
           overriddenByName      = Some overriddenByName
           autoDecided           = False
 
-    -- F21: Vetify issues a post-decision correction when an underwriting assessment
-    -- contained an error. nonconsuming: the original result is preserved for audit.
+    -- | vetify issues a post-decision correction when an underwriting
+    -- assessment contained an error. Nonconsuming: the original result is
+    -- preserved for audit.
     nonconsuming choice IssueCorrection : ContractId UnderwritingCorrection
       with
         correctedAssessment : RiskAssessment
@@ -589,7 +854,7 @@ template UnderwritingResult
         assertMsg "correctedBy must not be empty" (correctedBy /= "")
         t <- getTime
         create UnderwritingCorrection with
-          borrower
+          business
           vetify
           financialInstitution
           businessName
@@ -605,12 +870,14 @@ template UnderwritingResult
           previousAutoDecided = autoDecided
 
 
--- ─── F21: Underwriting Correction ────────────────────────────────────────────
--- On-ledger record of a post-decision correction to an underwriting assessment.
--- Preserves the original assessment alongside the corrected one for full audit trail.
+-- ─── Underwriting Correction ──────────────────────────────────────────────
+
+-- | On-ledger record of a post-decision correction to an underwriting
+-- assessment. Preserves the original assessment alongside the corrected one
+-- for a full audit trail.
 template UnderwritingCorrection
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
     businessName         : Text
@@ -626,40 +893,71 @@ template UnderwritingCorrection
     previousAutoDecided  : Bool
   where
     signatory vetify
-    observer financialInstitution, borrower
+    observer financialInstitution, business
+
+
+-- | The assessor's screening rejection (RejectUnderwriting) — a distinct,
+-- additive template from FinancingDecision: FinancingDecision's signatory
+-- is financialInstitution, so reusing it here would force the FI to co-sign
+-- its own screening rejection. `financialInstitution` only observes this;
+-- it never decides it.
+template UnderwritingRejection
+  with
+    business             : Party
+    vetify               : Party
+    assessor          : Party
+    financialInstitution : Party
+    businessName         : Text
+    cacRegNumber         : Text
+    financingRef         : Text
+    reason               : Text
+    autoDecided          : Bool
+    reviewerParty        : Optional Party
+    reviewedBy           : Optional Text
+    -- | The assessment that produced this rejection, when one was computed
+    -- (see RejectUnderwriting's identical field for the two cases where
+    -- it's `None`).
+    assessment           : Optional RiskAssessment
+    decidedAt            : Time
+  where
+    signatory assessor
+    observer vetify, business, financialInstitution
 
 
 -- ─── Stage 7 Output: Financing Decision ──────────────────────────────────────
--- Immutable record of the FI funding decision. Created for both approvals and
--- rejections; carries structured explainability (F15), officer identity (F11),
--- digital signature evidence (F22), and decision documents (F23).
+
+-- | Immutable record of the FI's funding decision. Created for both
+-- approvals and rejections; carries structured explainability, officer
+-- identity, digital signature evidence, and decision documents.
 template FinancingDecision
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
     businessName         : Text
     cacRegNumber         : Text
-    financingRef         : Text            -- F17/F23: links back to the FinancingRequest
+    -- | Links back to the FinancingRequest.
+    financingRef         : Text
     outcome              : FinancingStatus
-    reason               : Optional Text   -- rejection reason; None for approvals
-    -- F2: audit timestamps
-    decidedAt            : Optional Time   -- ledger time of the funding decision
-    -- F11: decision officer identity
-    decidedByName        : Optional Text   -- name of the FI officer who approved or rejected
-    -- F15: decision explainability
-    reasonCode           : Optional Text   -- machine-readable code, e.g. "DSCR_BELOW_THRESHOLD"
-    decisionFactors      : [Text]          -- e.g. ["DSCR: 0.9", "Sector: High Risk"]
-    -- F22: digital signature
+    -- | Rejection reason; `None` for approvals.
+    reason               : Optional Text
+    -- | Ledger time of the funding decision.
+    decidedAt            : Optional Time
+    -- | Name of the FI officer who approved or rejected.
+    decidedByName        : Optional Text
+    -- | Machine-readable code, e.g. "DSCR_BELOW_THRESHOLD".
+    reasonCode           : Optional Text
+    -- | E.g. ["DSCR: 0.9", "Sector: High Risk"].
+    decisionFactors      : [Text]
     approvalSignature    : Optional ApprovalSignature
-    -- F23: evidence documents
     decisionDocuments    : [DocumentRef]
   where
     signatory financialInstitution
-    observer borrower, vetify
+    observer business, vetify
 
-    -- U2: FI records whether the funding decision aligned with the AI underwriting recommendation.
-    -- Nonconsuming — the decision record is immutable; governance is a separate side-contract.
+    -- | The FI records whether the funding decision aligned with the AI
+    -- underwriting recommendation. Nonconsuming — the decision record is
+    -- immutable; governance is a separate side-contract.
     nonconsuming choice RecordGovernanceAssessment : ContractId FundingGovernanceRecord
       with
         aiRecommendationFollowed : Bool
@@ -672,7 +970,7 @@ template FinancingDecision
         create FundingGovernanceRecord with
           financialInstitution
           vetify
-          borrower
+          business
           businessName
           cacRegNumber
           financingRef
@@ -683,12 +981,14 @@ template FinancingDecision
           assessedAt               = t
 
 
--- ─── F24: Financing Amendment ─────────────────────────────────────────────────
--- FI proposes revised financing terms to the borrower. The borrower accepts
--- (replacing the FinancingRequest with updated terms + history) or declines.
+-- ─── Financing Amendment ──────────────────────────────────────────────────
+
+-- | The FI proposes revised financing terms to the business. The business
+-- accepts (replacing the FinancingRequest with updated terms and history)
+-- or declines.
 template FinancingAmendment
   with
-    borrower             : Party
+    business             : Party
     vetify               : Party
     financialInstitution : Party
     businessName         : Text
@@ -700,19 +1000,20 @@ template FinancingAmendment
     proposalNote         : Optional Text
   where
     signatory financialInstitution
-    observer borrower, vetify
+    observer business, vetify
 
-    -- Borrower accepts: archives the current FinancingRequest and replaces it with
-    -- one carrying the new terms, the original terms appended to termHistory, and an
-    -- incremented amendmentCount. The expiresAt SLA is cleared (reset at next BeginUnderwriting).
+    -- | The business accepts: archives the current FinancingRequest and
+    -- replaces it with one carrying the new terms, the original terms
+    -- appended to `termHistory`, and an incremented `amendmentCount`. The
+    -- `expiresAt` SLA is cleared (reset at the next BeginUnderwriting).
+    -- Capped at 10 amendments to prevent indefinite renegotiation.
     choice AcceptAmendment : ContractId FinancingRequest
       with requestCid : ContractId FinancingRequest
-      controller borrower
+      controller business
       do
         req <- fetch requestCid
         assertMsg "Amendment must reference the matching request"
           (req.financingRef == financingRef)
-        -- F34: cap amendments to prevent indefinite renegotiation
         assertMsg "Maximum 10 amendments reached; a new financing request is required"
           (req.amendmentCount < 10)
         archive requestCid
@@ -725,29 +1026,31 @@ template FinancingAmendment
 
     choice DeclineAmendment : ()
       with reason : Text
-      controller borrower
+      controller business
       do
         assertMsg "Reason must not be empty" (reason /= "")
         return ()
 
 
--- ─── U2: Funding Governance Record ───────────────────────────────────────────
--- Captures whether the FI's funding decision aligned with the AI underwriting
--- recommendation. Created via RecordGovernanceAssessment on FinancingDecision.
--- Signed by: financialInstitution  |  Observer: borrower, vetify
+-- ─── Funding Governance Record ────────────────────────────────────────────
+
+-- | Captures whether the FI's funding decision aligned with the AI
+-- underwriting recommendation. Created via RecordGovernanceAssessment on
+-- FinancingDecision.
 template FundingGovernanceRecord
   with
     financialInstitution     : Party
     vetify                   : Party
-    borrower                 : Party
+    business                 : Party
     businessName             : Text
     cacRegNumber             : Text
     financingRef             : Text
     decisionOutcome          : FinancingStatus
-    aiRecommendationFollowed : Bool    -- True if FI's decision matched AI recommendation
+    -- | True if the FI's decision matched the AI recommendation.
+    aiRecommendationFollowed : Bool
     governanceNote           : Optional Text
     assessedBy               : Text
     assessedAt               : Time
   where
     signatory financialInstitution
-    observer borrower, vetify
+    observer business, vetify

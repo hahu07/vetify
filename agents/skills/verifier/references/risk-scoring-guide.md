@@ -4,7 +4,7 @@
 
 | Check | Tool | Max Points |
 |---|---|---|
-| Identity (NIN + BVN + DOB) | `lookup_mashup` | 40 |
+| Identity (NIN + BVN) | `lookup_mashup` | 40 |
 | CAC Business Registration | `lookup_cac` | 35 |
 | Tax ID (TIN) | `lookup_tin` | 25 |
 
@@ -12,14 +12,19 @@
 
 ## Step 1: Identity Score (lookup_mashup)
 
-| Result | Points | identityVerified |
-|---|---|---|
-| NIN valid, BVN valid, DOB matches | 40 | true |
-| NIN valid, BVN valid, DOB missing from contract | 30 | true |
-| NIN valid, BVN valid, DOB mismatch | 20 | true |
-| NIN valid, BVN not found | 15 | false |
-| NIN not found | 0 | false |
-| API error / timeout | 0 | false → Flag, do not Reject |
+No date-of-birth cross-check exists — nothing in the onboarding flow collects a
+director's DOB to compare against. Instead, mono.co's own `data.match.name`
+field cross-checks the name attached to the NIN record against the name
+attached to the BVN record — the real signal that NIN and BVN belong to the
+same person, not just two independently-real IDs.
+
+| Result | Points | identityVerified | Flags? |
+|---|---|---|---|
+| NIN valid, BVN valid, names match | 40 | true | no |
+| NIN valid, BVN valid, names don't match | 10 | true | **always flags**, regardless of score — a real identity-fraud signal |
+| NIN valid, BVN not found | 15 | false | no |
+| NIN not found | 0 | false | no |
+| API error / timeout | 0 | false → Flag, do not Reject | yes |
 
 ---
 

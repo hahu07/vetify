@@ -14,6 +14,7 @@ const statusConfig: Record<string, { label: string; className: string }> = {
 
   // FinancingStatus
   Submitted: { label: 'Submitted', className: 'bg-blue-100 text-blue-700' },
+  UnderwritingManualReview: { label: 'Manual Review', className: 'bg-amber-100 text-amber-700' },
   Underwriting: { label: 'Underwriting', className: 'bg-purple-100 text-purple-700' },
   FinancingApproved: { label: 'Approved', className: 'bg-emerald-100 text-emerald-700' },
   FinancingRejected: { label: 'Rejected', className: 'bg-red-100 text-red-700' },
@@ -26,6 +27,7 @@ const statusConfig: Record<string, { label: string; className: string }> = {
   Delinquent: { label: 'Delinquent', className: 'bg-red-100 text-red-700' },
   Completed: { label: 'Completed', className: 'bg-teal-100 text-teal-700' },
   Defaulted: { label: 'Defaulted', className: 'bg-red-200 text-red-900' },
+  DelinquencyManualReview: { label: 'Under Review', className: 'bg-amber-100 text-amber-700' },
 
   // ShariahVerdict
   COMPLIANT: { label: 'Compliant', className: 'bg-emerald-100 text-emerald-700' },
@@ -36,6 +38,20 @@ const statusConfig: Record<string, { label: string; className: string }> = {
   Paid: { label: 'Paid', className: 'bg-emerald-100 text-emerald-700' },
   Partial: { label: 'Partial', className: 'bg-amber-100 text-amber-700' },
   Late: { label: 'Late', className: 'bg-red-100 text-red-700' },
+
+  // CollateralStatus (RahnAgreement)
+  CollateralActive: { label: 'Active', className: 'bg-emerald-100 text-emerald-700' },
+  CollateralReleased: { label: 'Released', className: 'bg-gray-100 text-gray-600' },
+  CollateralEnforced: { label: 'Enforced', className: 'bg-red-100 text-red-700' },
+
+  // EddCaseStatus (EDDCase — G14)
+  EddOpen: { label: 'Open', className: 'bg-amber-100 text-amber-700' },
+  EddClosed: { label: 'Closed', className: 'bg-emerald-100 text-emerald-700' },
+
+  // BusinessStatus (ApprovedBusiness)
+  BusinessActive: { label: 'Active', className: 'bg-emerald-100 text-emerald-700' },
+  BusinessSuspended: { label: 'Suspended', className: 'bg-amber-100 text-amber-700' },
+  BusinessExpired: { label: 'Expired', className: 'bg-gray-100 text-gray-600' },
 }
 
 interface Props {

@@ -40,13 +40,28 @@
  * CompliancePolicy this is a per-institution policy, not a vetify-wide
  * singleton, and falls back to DEFAULT_UNDERWRITING_WEIGHTS if none is active
  * for this specific FI.
+ *
+ * `assessor` is a real Canton party (vetify's own underwriting team, not a
+ * third party — same framing as verifier), with its own screening authority
+ * mirroring verifier's Stage 2/3 gatekeeping: the final switch below dispatches
+ * on scoring.decision.action exactly like verifier.ts does — BeginUnderwriting
+ * (Low risk, auto-qualify), FlagUnderwritingForManualReview (Medium, escalates
+ * to a human assessor via the ACP skills/underwriting-review skill), or
+ * RejectUnderwriting (High risk, a hard veto — the business never reaches the
+ * FI at all). BeginUnderwriting/RejectUnderwriting are dual-controller
+ * (assessor, vetify), so exercise_choice is called with both parties in
+ * `party` — see canton-client.ts's exerciseLedgerChoice for why a single party
+ * isn't enough for a dual-controller choice.
  */
 import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
-import { ChatAnthropic } from "@langchain/anthropic";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
+import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache } from "./util.js";
+import { UnderwritingEvidenceSchema } from "./evidence-schemas.js";
 import { scoreUnderwriting } from "../scoring/underwriting.js";
+import { classifyFinancingPurpose } from "../scoring/shariah-policy.js";
+import { partyId } from "../mcp/canton-client.js";
 import { DEFAULT_UNDERWRITING_POLICY_VERSION, DEFAULT_UNDERWRITING_WEIGHTS, numifyWeights } from "../scoring/types.js";
 import type { CreditworthinessEvidence, NormalizedTransaction, TransactionEvidence, UnderwritingScoringWeights } from "../scoring/types.js";
 
@@ -59,28 +74,9 @@ const WEBHOOK_POLL_INTERVAL_MS = 3_000;
  * size manageable while still giving every engine a representative sample. */
 const MAX_TRANSACTIONS = 300;
 
-function buildModel() {
-  return new ChatAnthropic({
-    model: process.env.LLM_MODEL ?? "claude-sonnet-4-6",
-    temperature: 0,
-  });
-}
 
-/** Extracts the JSON object from an agent's final message text. */
-function extractJson(content: unknown): Record<string, unknown> {
-  const text = typeof content === "string" ? content : JSON.stringify(content);
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error(`Expected a JSON evidence object in the agent's response.\nResponse: ${text}`);
-  return JSON.parse(match[0]) as Record<string, unknown>;
-}
 
-interface McpTool { name: string; invoke: (input: Record<string, unknown>) => Promise<unknown> }
 
-async function invokeTool(tools: McpTool[], name: string, input: Record<string, unknown>): Promise<unknown> {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) throw new Error(`MCP tool "${name}" not found among available tools`);
-  return tool.invoke(input);
-}
 
 /** UnderwritingPolicy is keyed per (vetify, financialInstitution) — unlike
  * VerificationPolicy/CompliancePolicy's vetify-wide singleton, this queries all
@@ -88,13 +84,28 @@ async function invokeTool(tools: McpTool[], name: string, input: Record<string, 
  * this specific FI. Returns undefined if none is active for this institution —
  * callers fall back to DEFAULT_UNDERWRITING_WEIGHTS, same as the Daml choice
  * itself already does when lookupByKey finds nothing. */
+// Returns the ContractId alongside the payload (not just the payload) because SDK 3.4.11 /
+// Daml-LF 2.1/2.2 has no contract keys — BeginUnderwriting/FlagUnderwritingForManualReview
+// can no longer resolve the active UnderwritingPolicy via lookupByKey and now take its
+// ContractId as an explicit argument.
 async function fetchActiveUnderwritingPolicy(
   tools: McpTool[],
   financialInstitution: string,
-): Promise<Record<string, unknown> | undefined> {
-  const raw = await invokeTool(tools, "get_active_contracts", { templateId: T_UNDERWRITING_POLICY, party: "vetify" });
-  const parsed = extractJson(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
-  return parsed.result?.find((c) => c.payload.financialInstitution === financialInstitution)?.payload;
+): Promise<{ contractId: string; payload: Record<string, unknown> } | undefined> {
+  return withPolicyCache(`${T_UNDERWRITING_POLICY}:${financialInstitution}`, async () => {
+    const raw = await invokeTool(tools, "get_active_contracts", { templateId: T_UNDERWRITING_POLICY, party: "vetify" });
+    const parsed = extractJsonObject(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
+    return parsed.result?.find((c) => c.payload.financialInstitution === financialInstitution);
+  });
+}
+
+/** Resolves the AuthorizedAssessor ContractId for `(vetify, assessor)` — no contract keys
+ * on SDK 3.4.11 / Daml-LF 2.1/2.2, so BeginUnderwriting/RejectUnderwriting can no longer
+ * resolve it themselves via lookupByKey. */
+async function fetchAuthorizedAssessorCid(tools: McpTool[]): Promise<string | null> {
+  const raw = await invokeTool(tools, "get_active_contracts", { templateId: "Vetify.Governance:AuthorizedAssessor", party: "vetify" });
+  const parsed = extractJsonObject(raw) as { result?: Array<{ contractId: string; payload: Record<string, unknown> }> };
+  return parsed.result?.find((r) => r.payload.assessor === partyId("assessor"))?.contractId ?? null;
 }
 
 /** assess_creditworthiness's result is delivered via webhook (mono-server.ts's own
@@ -124,7 +135,7 @@ exercise any Canton choice — five independent deterministic engines compute th
 evidence you report.
 
 Call, in this order:
-1. get_account_statement — the borrower's account, last 6 months
+1. get_account_statement — the business's account, last 6 months
 2. get_account_transactions — enriched transaction data for the same account
 3. assess_creditworthiness — mono.co's DSCR and bureau credit score. Its result is delivered via
    webhook, not synchronously — the call's own response only returns a "reference" you must
@@ -151,10 +162,48 @@ Respond with ONLY a JSON object, no other text:
   "dscr": <number, omit if not returned synchronously>,
   "creditScore": <number, omit if not returned synchronously>
 }
-`.trim();
+`.trim() + "\n\n" + UNTRUSTED_DATA_GUIDANCE;
 
 export async function runUnderwritingAgent(contractId: string, contractPayload: unknown): Promise<void> {
   const payload = contractPayload as Record<string, unknown>;
+  const terms = payload.terms as Record<string, unknown> | undefined;
+
+  // Shariah purpose re-screen (review gap G4): Stage 3's pre-check ran before
+  // this FinancingRequest existed, so the prohibited-STRUCTURE table
+  // (refinancing, working capital, cash advance) was never exercised against
+  // the business's real stated purpose — only against a placeholder. Screen it
+  // here, deterministically, BEFORE spending an LLM evidence pass: a
+  // prohibited purpose is a hard veto (RejectUnderwriting, mirroring
+  // RejectCompliance's screening authority), same AAOIFI hard-gate precedent
+  // as Stage 3's NON_COMPLIANT sector handling.
+  const purpose = String(terms?.purpose ?? "");
+  const purposeHit = classifyFinancingPurpose(purpose);
+  if (purposeHit) {
+    const rejectMcp = new MultiServerMCPClient({
+      mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
+    });
+    const rejectTools = (await rejectMcp.getTools()) as unknown as McpTool[];
+    const assessorCid = await fetchAuthorizedAssessorCid(rejectTools);
+    if (!assessorCid) throw new Error("assessor is not a registered AuthorizedAssessor");
+    await invokeTool(rejectTools, "exercise_choice", {
+      templateId: T_FINANCING,
+      contractId,
+      choice: "RejectUnderwriting",
+      party: ["assessor", "vetify"],
+      argument: {
+        reason: `Shariah screen: financing purpose "${purpose}" is not permissible — ${purposeHit.citation}`,
+        autoDecided: true,
+        reviewerParty: null,
+        reviewedBy: null,
+        // No RiskAssessment exists yet — this hard veto fires before the
+        // scoring engines ever run (see the comment above).
+        assessment: null,
+        assessorCid,
+      },
+    });
+    await rejectMcp.close();
+    return;
+  }
 
   // Evidence-gathering agent: mono.co tools only. It cannot reach the Canton
   // MCP server at all, so it is architecturally incapable of exercising any
@@ -176,13 +225,15 @@ export async function runUnderwritingAgent(contractId: string, contractPayload: 
 Gather Stage 6 underwriting evidence for the following FinancingRequest contract.
 
 Contract ID: ${contractId}
-Payload: ${JSON.stringify(contractPayload, null, 2)}
+${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await evidenceAgent.invoke({ messages: [{ role: "user", content: task }] });
+  const result = await withLlmResilience("Underwriting evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
   await evidenceMcp.close();
   const lastMessage = result.messages[result.messages.length - 1];
-  const evidence = extractJson(lastMessage.content);
+  // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
+  // no decision reaches the ledger on unvalidated shapes.
+  const evidence = parseEvidence(lastMessage.content, UnderwritingEvidenceSchema, "Underwriting Agent");
 
   // Deterministic decision execution from here — no LLM involved.
   const cantonMcp = new MultiServerMCPClient({
@@ -191,39 +242,40 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
 
   const financialInstitution = payload.financialInstitution as string | undefined;
-  const policyPayload = financialInstitution
+  const activePolicy = financialInstitution
     ? await fetchActiveUnderwritingPolicy(cantonTools, financialInstitution)
     : undefined;
   // Daml Int fields arrive as JSON strings from the ledger — numifyWeights converts them to
   // real numbers before scoreUnderwriting sums them (see its doc comment in scoring/types.ts).
-  const weights = policyPayload?.scoringWeights
-    ? numifyWeights<UnderwritingScoringWeights>(policyPayload.scoringWeights as Record<string, unknown>)
+  const weights = activePolicy?.payload.scoringWeights
+    ? numifyWeights<UnderwritingScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
     : DEFAULT_UNDERWRITING_WEIGHTS;
-  const policyVersion = (policyPayload?.policyVersion as string | undefined) ?? DEFAULT_UNDERWRITING_POLICY_VERSION;
+  const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_UNDERWRITING_POLICY_VERSION;
+  const policyCid = activePolicy?.contractId ?? null;
 
   // dscr/creditScore only come back synchronously if evidenceAgent's assess_creditworthiness
   // call happened to get them directly (unlikely per its own "delivered via webhook" tool
   // description) — otherwise poll the webhook receiver using the reference it reported.
-  let dscr = evidence.dscr != null ? Number(evidence.dscr) : undefined;
-  let creditScore = evidence.creditScore != null ? Number(evidence.creditScore) : undefined;
-  if (dscr === undefined && typeof evidence.creditworthinessReference === "string") {
+  let dscr = evidence.dscr ?? undefined;
+  let creditScore = evidence.creditScore ?? undefined;
+  if (dscr === undefined && evidence.creditworthinessReference) {
     const webhookResult = await pollCreditworthinessResult(evidence.creditworthinessReference);
     dscr = webhookResult?.dscr;
     creditScore = creditScore ?? webhookResult?.creditScore;
   }
 
-  const rawTransactions = Array.isArray(evidence.transactions) ? evidence.transactions as Record<string, unknown>[] : [];
-  const transactions: NormalizedTransaction[] = rawTransactions.slice(0, MAX_TRANSACTIONS).map((tx) => ({
-    date: String(tx.date),
-    amount: Number(tx.amount),
-    direction: tx.direction === "credit" ? "credit" : "debit",
-    description: typeof tx.description === "string" ? tx.description : undefined,
-    counterparty: typeof tx.counterparty === "string" ? tx.counterparty : undefined,
-    balanceAfter: tx.balanceAfter != null ? Number(tx.balanceAfter) : undefined,
+  // Already schema-validated (date/amount/direction shapes) — normalize
+  // nullish optionals to undefined for the scoring engine's types.
+  const transactions: NormalizedTransaction[] = evidence.transactions.slice(0, MAX_TRANSACTIONS).map((tx) => ({
+    date: tx.date,
+    amount: tx.amount,
+    direction: tx.direction,
+    description: tx.description ?? undefined,
+    counterparty: tx.counterparty ?? undefined,
+    balanceAfter: tx.balanceAfter ?? undefined,
   }));
   const transactionEvidence: TransactionEvidence = { transactions };
   const creditworthiness: CreditworthinessEvidence = { dscr, creditScore };
-  const terms = payload.terms as Record<string, unknown> | undefined;
   const incorporationDate = payload.incorporationDate as string | undefined;
 
   const scoring = scoreUnderwriting(
@@ -238,21 +290,74 @@ Payload: ${JSON.stringify(contractPayload, null, 2)}
     policyVersion,
   );
 
-  await invokeTool(cantonTools, "exercise_choice", {
-    templateId: T_FINANCING,
-    contractId,
-    choice: "BeginUnderwriting",
-    party: "vetify",
-    argument: {
-      assessment: scoring.assessment,
-      autoDecided: true,
-      aiMetadata: null,
-      agentVersion: scoring.scoringPolicyVersion,
-      underwriterName: null,
-      underwritingRef: null,
-      decisionDocuments: [],
-    },
-  });
+  // Mirrors verifier.ts's switch on scoring.decision.action exactly — pure
+  // mechanical dispatch off the deterministic engine's decision, no LLM/branching
+  // logic here. BeginUnderwriting/RejectUnderwriting are dual-controller
+  // (assessor, vetify) since both need vetify's UnderwritingPolicy lookupByKey
+  // authority; FlagUnderwritingForManualReview is vetify alone (pure escalation,
+  // no assessor decision made yet).
+  switch (scoring.decision.action) {
+    case "BeginUnderwriting": {
+      const assessorCid = await fetchAuthorizedAssessorCid(cantonTools);
+      if (!assessorCid) throw new Error("assessor is not a registered AuthorizedAssessor");
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_FINANCING,
+        contractId,
+        choice: "BeginUnderwriting",
+        party: ["assessor", "vetify"],
+        argument: {
+          assessment: scoring.assessment,
+          autoDecided: true,
+          aiMetadata: null,
+          agentVersion: scoring.scoringPolicyVersion,
+          assessorName: null,
+          underwritingRef: null,
+          decisionDocuments: [],
+          assessorCid,
+          policyCid,
+        },
+      });
+      break;
+    }
+    case "RejectUnderwriting": {
+      const assessorCid = await fetchAuthorizedAssessorCid(cantonTools);
+      if (!assessorCid) throw new Error("assessor is not a registered AuthorizedAssessor");
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_FINANCING,
+        contractId,
+        choice: "RejectUnderwriting",
+        party: ["assessor", "vetify"],
+        argument: {
+          reason: scoring.decision.reason,
+          autoDecided: true,
+          reviewerParty: null,
+          reviewedBy: null,
+          // scoring.decision.action is only ever "RejectUnderwriting" for a
+          // High-risk composite or a fraud hard override, so the assessment
+          // is always riskCategory: "High" here — required by the Daml
+          // choice's auto-decided guard.
+          assessment: scoring.assessment,
+          assessorCid,
+        },
+      });
+      break;
+    }
+    case "FlagUnderwritingForManualReview":
+      await invokeTool(cantonTools, "exercise_choice", {
+        templateId: T_FINANCING,
+        contractId,
+        choice: "FlagUnderwritingForManualReview",
+        party: "vetify",
+        argument: {
+          riskScore: scoring.assessment.score,
+          riskLevel: scoring.assessment.riskCategory,
+          agentVersion: scoring.scoringPolicyVersion,
+          note: scoring.decision.note,
+          policyCid,
+        },
+      });
+      break;
+  }
 
   await cantonMcp.close();
 }

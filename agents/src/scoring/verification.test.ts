@@ -4,9 +4,9 @@ import { scoreVerification } from "./verification.js";
 import { DEFAULT_VERIFICATION_WEIGHTS } from "./types.js";
 import type { CacResult, MashupResult, TinResult } from "./types.js";
 
-const okMashup = (over: Partial<{ ninVerified: boolean; bvnVerified: boolean; dobProvided: boolean; dobMatch: boolean }> = {}): MashupResult => ({
+const okMashup = (over: Partial<{ ninVerified: boolean; bvnVerified: boolean; nameMatch: boolean }> = {}): MashupResult => ({
   kind: "ok",
-  data: { ninVerified: true, bvnVerified: true, dobProvided: true, dobMatch: true, ...over },
+  data: { ninVerified: true, bvnVerified: true, nameMatch: true, ...over },
 });
 const okCac = (over: Partial<{ found: boolean; status: string; nameMatch: "exact" | "close" | "mismatch" }> = {}): CacResult => ({
   kind: "ok",
@@ -21,15 +21,10 @@ test("perfect evidence scores 100 and auto-approves", () => {
   assert.deepEqual(result.decision, { action: "Approve", autoDecided: true });
 });
 
-test("DOB missing from contract scores 30 for identity, still true", () => {
-  const result = scoreVerification(okMashup({ dobProvided: false }), okCac(), okTin);
-  assert.equal(result.checkScores.identityScore, 30);
+test("NIN and BVN both verified scores identityVerified weight, identityVerified true", () => {
+  const result = scoreVerification(okMashup(), okCac(), okTin);
+  assert.equal(result.checkScores.identityScore, 40);
   assert.equal(result.checks.identityVerified, true);
-});
-
-test("DOB mismatch scores 20 for identity", () => {
-  const result = scoreVerification(okMashup({ dobMatch: false }), okCac(), okTin);
-  assert.equal(result.checkScores.identityScore, 20);
 });
 
 test("BVN not found scores 15, identityVerified false", () => {
@@ -41,6 +36,17 @@ test("BVN not found scores 15, identityVerified false", () => {
 test("NIN not found scores 0", () => {
   const result = scoreVerification(okMashup({ ninVerified: false }), okCac(), okTin);
   assert.equal(result.checkScores.identityScore, 0);
+});
+
+test("NIN and BVN both verified but name mismatch scores identityNameMismatch weight, identityVerified stays true", () => {
+  const result = scoreVerification(okMashup({ nameMatch: false }), okCac(), okTin);
+  assert.equal(result.checkScores.identityScore, 10);
+  assert.equal(result.checks.identityVerified, true);
+});
+
+test("NIN/BVN name mismatch always flags, regardless of score", () => {
+  const result = scoreVerification(okMashup({ nameMatch: false }), okCac(), okTin);
+  assert.equal(result.decision.action, "FlagForManualReview");
 });
 
 test("CAC close name match scores 28", () => {
@@ -72,19 +78,19 @@ test("CAC not found scores 0, cacRegistered false", () => {
 
 test("TIN verified but different entity scores 10", () => {
   const result = scoreVerification(okMashup(), okCac(), { kind: "verifiedDifferentEntity" });
-  assert.equal(result.checkScores.tinScore, 10);
+  assert.equal(result.checkScores.consistencyScore, 10);
   assert.equal(result.checks.dataConsistent, true);
 });
 
 test("TIN not found scores 5, dataConsistent false", () => {
   const result = scoreVerification(okMashup(), okCac(), { kind: "notFound" });
-  assert.equal(result.checkScores.tinScore, 5);
+  assert.equal(result.checkScores.consistencyScore, 5);
   assert.equal(result.checks.dataConsistent, false);
 });
 
 test("TIN API error scores 10, dataConsistent assumed true", () => {
   const result = scoreVerification(okMashup(), okCac(), { kind: "error", httpStatus: 500 });
-  assert.equal(result.checkScores.tinScore, 10);
+  assert.equal(result.checkScores.consistencyScore, 10);
   assert.equal(result.checks.dataConsistent, true);
 });
 
@@ -121,9 +127,9 @@ test("only identity failing (CAC fine) always flags, never auto-approves or auto
 });
 
 test("Medium band (50-79) flags for manual review", () => {
-  // identity 20 (dob mismatch) + cac 20 (pending) + tin 10 (different entity) = 50
-  const result = scoreVerification(okMashup({ dobMatch: false }), okCac({ status: "Pending" }), { kind: "verifiedDifferentEntity" });
-  assert.equal(result.riskScore, 50);
+  // identity 40 (verified) + cac 20 (pending) + tin 5 (not found) = 65
+  const result = scoreVerification(okMashup(), okCac({ status: "Pending" }), { kind: "notFound" });
+  assert.equal(result.riskScore, 65);
   assert.equal(result.riskLevel, "Medium");
   assert.equal(result.decision.action, "FlagForManualReview");
 });
@@ -135,12 +141,12 @@ test("scoring is deterministic — same evidence always produces the same result
 });
 
 test("custom weights actually change the score — a retuned policy is not ignored", () => {
-  const retuned = { ...DEFAULT_VERIFICATION_WEIGHTS, identityPerfect: 50, cacActiveExactMatch: 45, tinVerifiedMatchesCac: 5 };
+  const retuned = { ...DEFAULT_VERIFICATION_WEIGHTS, identityVerified: 50, cacActiveExactMatch: 45, tinVerifiedMatchesCac: 5 };
   const result = scoreVerification(okMashup(), okCac(), okTin, retuned, "custom-policy-v9");
   assert.equal(result.riskScore, 100); // 50 + 45 + 5
   assert.equal(result.checkScores.identityScore, 50);
   assert.equal(result.checkScores.cacScore, 45);
-  assert.equal(result.checkScores.tinScore, 5);
+  assert.equal(result.checkScores.consistencyScore, 5);
   assert.equal(result.scoringPolicyVersion, "custom-policy-v9");
 });
 

@@ -1,10 +1,12 @@
-sdk-version: 3.5.1
+# Templates only — Daml Script tests and seed scripts live in daml-tests/
+# (its own package, `vetify-tests`), so uploading this DAR to a participant
+# no longer drags daml-script along with it (review gap G10a).
+sdk-version: 3.4.11
 name: vetify
 source: daml
 version: 0.3.0
 build-options:
-  - --target=2.3
+  - --target=2.2
 dependencies:
   - daml-prim
   - daml-stdlib
-  - daml-script

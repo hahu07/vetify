@@ -9,15 +9,31 @@
  * submits their action to the ledger.
  */
 import "dotenv/config";
+import { readSecret } from "./secrets.js";
 import { Request, Response, NextFunction } from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { authenticator } from "otplib";
-import { findUserByUsername, GovernanceUser } from "./appdb.js";
+import { findUserByUsername, GovernanceUser, recordFailedLogin, resetFailedLogins } from "./appdb.js";
 
-const SESSION_SECRET = process.env.SESSION_JWT_SECRET ?? "dev-only-insecure-secret-change-me";
+const SESSION_SECRET = readSecret("SESSION_JWT_SECRET") || "dev-only-insecure-secret-change-me";
 const SESSION_TTL = "12h";
 const MFA_PENDING_TTL = "5m";
+
+// Persistent per-account lockout (audit finding M-2, Phase 3 Enterprise
+// Production Readiness Audit, 2026-07-08): the earlier pass added IP-based
+// rate limiting on the login/MFA routes but deliberately deferred this —
+// IP throttling alone doesn't stop a distributed attack rotating source IPs
+// against one username, which is the actual gap this closes.
+const LOCKOUT_THRESHOLD = parseInt(process.env.ACCOUNT_LOCKOUT_THRESHOLD ?? "5", 10);
+const LOCKOUT_MINUTES = parseInt(process.env.ACCOUNT_LOCKOUT_MINUTES ?? "15", 10);
+
+export class AccountLockedError extends Error {
+  constructor(public lockedUntil: Date) {
+    super("Account temporarily locked due to repeated failed login attempts");
+    this.name = "AccountLockedError";
+  }
+}
 
 export interface SessionPayload {
   type: "session";
@@ -25,6 +41,14 @@ export interface SessionPayload {
   username: string;
   displayName: string;
   partyRole: string;
+  // Self-serve signup tenant-scoping keys (migrations/002_signup_isolation.sql).
+  // Business: the CAC registration number their BusinessOnboarding was
+  // created with — undefined until their first submission. Financer: the
+  // Canton party dynamically allocated for them at signup (canton.ts's
+  // fiPartyKey(userId) is the registry key that resolves to it) — undefined
+  // for the legacy shared-party demo account and for non-financer roles.
+  cacRegNumber?: string;
+  financialInstitutionPartyId?: string;
 }
 
 // Layer 4: issued after password verifies but before a required TOTP code is
@@ -50,6 +74,8 @@ export function issueSessionToken(user: GovernanceUser): string {
     username: user.username,
     displayName: user.displayName,
     partyRole: user.partyRole,
+    ...(user.cacRegNumber ? { cacRegNumber: user.cacRegNumber } : {}),
+    ...(user.cantonPartyId ? { financialInstitutionPartyId: user.cantonPartyId } : {}),
   };
   return jwt.sign(payload, SESSION_SECRET, { expiresIn: SESSION_TTL });
 }
@@ -120,9 +146,22 @@ export async function authenticate(username: string, password: string): Promise<
   if (!user || !user.active) {
     throw new Error("Invalid username or password");
   }
+  if (user.lockedUntil && new Date(user.lockedUntil) > new Date()) {
+    throw new AccountLockedError(new Date(user.lockedUntil));
+  }
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) {
+    const lockedUntil = await recordFailedLogin(user.id, LOCKOUT_THRESHOLD, LOCKOUT_MINUTES);
+    // If *this* failure is the one that crossed the threshold, report the
+    // lockout on this same response — live-tested: without this check, the
+    // triggering attempt returned a generic "invalid password" and the
+    // account only revealed itself as locked on the next attempt, one
+    // request later than the client should have been told.
+    if (lockedUntil) throw new AccountLockedError(lockedUntil);
     throw new Error("Invalid username or password");
+  }
+  if (user.failedLoginAttempts > 0 || user.lockedUntil) {
+    await resetFailedLogins(user.id);
   }
   return user;
 }
