@@ -26,7 +26,7 @@ import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
-import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache } from "./util.js";
+import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache, checkpointConfig } from "./util.js";
 import { VerificationEvidenceSchema, ComplianceEvidenceSchema, ProviderEvidenceSchema } from "./evidence-schemas.js";
 import { scoreVerification } from "../scoring/verification.js";
 import { scoreCompliance } from "../scoring/compliance.js";
@@ -148,88 +148,101 @@ Report exactly what the tool returned — do not soften, round, or reinterpret a
 export async function runVerifierProviderStage(contractId: string, contractPayload: unknown): Promise<void> {
   const payload = contractPayload as Record<string, unknown>;
 
-  const evidenceMcp = new MultiServerMCPClient({
-    mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
-  });
-  const evidenceTools = await evidenceMcp.getTools();
-  const evidenceAgent = createDeepAgent({
-    model: buildModel(),
-    tools: evidenceTools,
-    systemPrompt: PROVIDER_EVIDENCE_PROMPT,
-    backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
-    skills: ["skills/verifier"],
-    checkpointer: new MemorySaver(),
-  });
+  // Each MultiServerMCPClient spawns real child processes (npm run mcp:* -> node),
+  // so .close() must run even when the code between creation and the previous
+  // sequential close() call throws — otherwise the process tree leaks. Confirmed
+  // live: a single failing contract, redispatched every ~10s by the Supervisor
+  // with no backoff, leaked 20+ orphaned process trees in under 15 minutes and
+  // starved the whole poll loop of resources.
+  const evidence = await (async () => {
+    const evidenceMcp = new MultiServerMCPClient({
+      mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
+    });
+    try {
+      const evidenceTools = await evidenceMcp.getTools();
+      const evidenceAgent = createDeepAgent({
+        model: buildModel(),
+        tools: evidenceTools,
+        systemPrompt: PROVIDER_EVIDENCE_PROMPT,
+        backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
+        skills: ["skills/verifier"],
+        checkpointer: new MemorySaver(),
+      });
 
-  const task = `
+      const task = `
 Gather Stage 0 registration evidence for the following FinancingProviderOnboarding.
 
 Contract ID: ${contractId}
 CAC registration number to look up: ${String(payload.cacRegNumber ?? "")}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
-  `.trim();
+      `.trim();
 
-  const result = await withLlmResilience("Verifier provider evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
-  await evidenceMcp.close();
-  const lastMessage = result.messages[result.messages.length - 1];
-  const evidence = parseEvidence(lastMessage.content, ProviderEvidenceSchema, "Verifier Agent (provider)");
+      const result = await withLlmResilience("Verifier provider evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
+      const lastMessage = result.messages[result.messages.length - 1];
+      return parseEvidence(lastMessage.content, ProviderEvidenceSchema, "Verifier Agent (provider)");
+    } finally {
+      await evidenceMcp.close();
+    }
+  })();
 
   const cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
-  const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
+  try {
+    const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
 
-  const activePolicy = await fetchActivePolicy(cantonTools, T_PROVIDER_VERIFICATION_POLICY);
-  const weights = activePolicy?.payload.scoringWeights
-    ? numifyWeights<ProviderVerificationScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
-    : DEFAULT_PROVIDER_VERIFICATION_WEIGHTS;
-  const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_PROVIDER_VERIFICATION_POLICY_VERSION;
-  // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2 — RecordProviderScore/RejectProvider
-  // now take the active policy's ContractId explicitly instead of resolving it via lookupByKey.
-  const policyCid = activePolicy?.contractId ?? null;
+    const activePolicy = await fetchActivePolicy(cantonTools, T_PROVIDER_VERIFICATION_POLICY);
+    const weights = activePolicy?.payload.scoringWeights
+      ? numifyWeights<ProviderVerificationScoringWeights>(activePolicy.payload.scoringWeights as Record<string, unknown>)
+      : DEFAULT_PROVIDER_VERIFICATION_WEIGHTS;
+    const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_PROVIDER_VERIFICATION_POLICY_VERSION;
+    // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2 — RecordProviderScore/RejectProvider
+    // now take the active policy's ContractId explicitly instead of resolving it via lookupByKey.
+    const policyCid = activePolicy?.contractId ?? null;
 
-  const scoring = scoreProviderVerification(
-    toCacResult(evidence.cac),
-    payload.providerType as ProviderType,
-    (payload.regulatoryBody as string | null) ?? null,
-    (payload.licenseNumber as string | null) ?? null,
-    weights,
-    policyVersion,
-  );
+    const scoring = scoreProviderVerification(
+      toCacResult(evidence.cac),
+      payload.providerType as ProviderType,
+      (payload.regulatoryBody as string | null) ?? null,
+      (payload.licenseNumber as string | null) ?? null,
+      weights,
+      policyVersion,
+    );
 
-  switch (scoring.decision.action) {
-    case "FlagForManualReview":
-      await invokeTool(cantonTools, "exercise_choice", {
-        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "FlagProviderForManualReview", party: "vetify",
-        argument: {
-          score: scoring.riskScore, risk: scoring.riskLevel,
-          note: scoring.decision.note, version: scoring.scoringPolicyVersion,
-        },
-      });
-      break;
-    case "Reject":
-      await invokeTool(cantonTools, "exercise_choice", {
-        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RejectProvider", party: "vetify",
-        argument: {
-          reason: scoring.decision.reason,
-          agentScore: scoring.riskScore, agentRisk: scoring.riskLevel, agentVersion: scoring.scoringPolicyVersion,
-          policyCid,
-        },
-      });
-      break;
-    case "RecordScore":
-      await invokeTool(cantonTools, "exercise_choice", {
-        templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RecordProviderScore", party: "vetify",
-        argument: {
-          score: scoring.riskScore, risk: scoring.riskLevel,
-          note: null, version: scoring.scoringPolicyVersion,
-          policyCid,
-        },
-      });
-      break;
+    switch (scoring.decision.action) {
+      case "FlagForManualReview":
+        await invokeTool(cantonTools, "exercise_choice", {
+          templateId: T_PROVIDER_ONBOARDING, contractId, choice: "FlagProviderForManualReview", party: "vetify",
+          argument: {
+            score: scoring.riskScore, risk: scoring.riskLevel,
+            note: scoring.decision.note, version: scoring.scoringPolicyVersion,
+          },
+        });
+        break;
+      case "Reject":
+        await invokeTool(cantonTools, "exercise_choice", {
+          templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RejectProvider", party: "vetify",
+          argument: {
+            reason: scoring.decision.reason,
+            agentScore: scoring.riskScore, agentRisk: scoring.riskLevel, agentVersion: scoring.scoringPolicyVersion,
+            policyCid,
+          },
+        });
+        break;
+      case "RecordScore":
+        await invokeTool(cantonTools, "exercise_choice", {
+          templateId: T_PROVIDER_ONBOARDING, contractId, choice: "RecordProviderScore", party: "vetify",
+          argument: {
+            score: scoring.riskScore, risk: scoring.riskLevel,
+            note: null, version: scoring.scoringPolicyVersion,
+            policyCid,
+          },
+        });
+        break;
+    }
+  } finally {
+    await cantonMcp.close();
   }
-
-  await cantonMcp.close();
 }
 
 // ─── Stage 2: Verification — evidence gathering only ───────────────────────
@@ -290,10 +303,17 @@ function toTinResult(raw: unknown): TinResult {
 export async function runVerifierVerificationStage(contractId: string, contractPayload: unknown): Promise<void> {
   const payload = contractPayload as Record<string, unknown>;
 
+  // Both MCP clients are tracked here and closed in the outer finally below —
+  // each spawns real child processes (npm run mcp:* -> node), so .close() must
+  // run even when the code in between throws, or the process tree leaks (see
+  // runVerifierProviderStage's comment for the live-confirmed blast radius).
+  let evidenceMcp: MultiServerMCPClient | undefined;
+  let cantonMcp: MultiServerMCPClient | undefined;
+  try {
   // Evidence-gathering agent: mono.co tools only. It cannot reach the Canton
   // MCP server at all, so it is architecturally incapable of exercising any
   // choice, not merely instructed not to.
-  const evidenceMcp = new MultiServerMCPClient({
+  evidenceMcp = new MultiServerMCPClient({
     mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
   });
   const evidenceTools = await evidenceMcp.getTools();
@@ -313,8 +333,9 @@ Contract ID: ${contractId}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
+  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
   await evidenceMcp.close();
+  evidenceMcp = undefined;
   const lastMessage = result.messages[result.messages.length - 1];
   // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
   // no decision reaches the ledger on unvalidated shapes.
@@ -322,7 +343,7 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
 
   // Deterministic decision execution from here — no LLM involved. A single
   // canton client is reused for the policy fetch and the choice exercise.
-  const cantonMcp = new MultiServerMCPClient({
+  cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
@@ -434,8 +455,10 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
       break;
     }
   }
-
-  await cantonMcp.close();
+  } finally {
+    if (evidenceMcp) await (evidenceMcp as MultiServerMCPClient).close().catch(() => {});
+    if (cantonMcp) await cantonMcp.close().catch(() => {});
+  }
 }
 
 // ─── Stage 3: Compliance — evidence gathering only ─────────────────────────
@@ -493,7 +516,14 @@ export async function runVerifierComplianceStage(contractId: string, contractPay
   const payload = contractPayload as Record<string, unknown>;
   const shariahVerdict = ((payload.shariahVerdict as Record<string, unknown> | null)?.verdict ?? "REQUIRES_REVIEW") as ShariahVerdict;
 
-  const cantonMcp = new MultiServerMCPClient({
+  // Both MCP clients are tracked here and closed in the outer finally below —
+  // each spawns real child processes (npm run mcp:* -> node), so .close() must
+  // run even when the code in between throws, or the process tree leaks (see
+  // runVerifierProviderStage's comment for the live-confirmed blast radius).
+  let cantonMcp: MultiServerMCPClient | undefined;
+  let evidenceMcp: MultiServerMCPClient | undefined;
+  try {
+  cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
@@ -512,13 +542,22 @@ export async function runVerifierComplianceStage(contractId: string, contractPay
   const policyVersion = (activePolicy?.payload.policyVersion as string | undefined) ?? DEFAULT_COMPLIANCE_POLICY_VERSION;
   const policyCid = activePolicy?.contractId ?? null;
 
-  // StartReview always runs first, deterministically — Pending → UnderReview.
-  await invokeTool(cantonTools, "exercise_choice", {
-    templateId: T_COMPLIANCE, contractId, choice: "StartReview", party: "vetify", argument: { policyCid },
-  });
+  // StartReview only applies once (its own Daml guard asserts status == Pending) —
+  // skip it on a retry dispatch, i.e. a contract already in UnderReview because a
+  // prior attempt got this far but failed later (evidence-schema validation, LLM
+  // timeout). Without this guard, retrying a partially-failed review would throw
+  // "Can only start a Pending review" every time instead of ever reaching the
+  // evidence-gathering step again (see supervisor.ts's dispatch condition for the
+  // matching fix — a status this permanently stuck used to never get redispatched
+  // at all).
+  if (payload.status === "Pending") {
+    await invokeTool(cantonTools, "exercise_choice", {
+      templateId: T_COMPLIANCE, contractId, choice: "StartReview", party: "vetify", argument: { policyCid },
+    });
+  }
 
   // Evidence-gathering agent: mono.co + youverify tools only, no canton access.
-  const evidenceMcp = new MultiServerMCPClient({
+  evidenceMcp = new MultiServerMCPClient({
     mcpServers: {
       mono:      { command: "npm", args: ["run", "mcp:mono"] },
       youverify: { command: "npm", args: ["run", "mcp:youverify"] },
@@ -541,8 +580,9 @@ Contract ID: ${contractId}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
+  const result = await withLlmResilience("Verifier evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
   await evidenceMcp.close();
+  evidenceMcp = undefined;
   const lastMessage = result.messages[result.messages.length - 1];
   // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
   // no decision reaches the ledger on unvalidated shapes.
@@ -642,6 +682,8 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
       // a human. Guard against a future scorer regression silently approving.
       throw new Error("scoreCompliance returned ApproveCompliance — this should never happen without human sign-off");
   }
-
-  await cantonMcp.close();
+  } finally {
+    if (cantonMcp) await (cantonMcp as MultiServerMCPClient).close().catch(() => {});
+    if (evidenceMcp) await (evidenceMcp as MultiServerMCPClient).close().catch(() => {});
+  }
 }

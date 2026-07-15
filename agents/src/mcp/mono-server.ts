@@ -11,14 +11,25 @@
  * Run with: npm run mcp:mono
  * Requires: MONO_API_KEY
  */
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// This server is spawned as a child process by MultiServerMCPClient (verifier.ts/
+// underwriting.ts: `{ command: "npm", args: ["run", "mcp:mono"] }`). Confirmed live: that
+// spawn does not reliably forward the parent's process.env (a real Supervisor run hit
+// mono.co's live API with a 401 despite MONO_BASE_URL=http://localhost:4100 being set in
+// agents/.env and already loaded into the parent process via verifier.ts's own
+// `import "dotenv/config"`) — loading .env independently here, same as every top-level
+// agent entry point, is the only reliable fix.
 const API_KEY = process.env.MONO_API_KEY ?? "";
-const V1 = "https://api.withmono.com/v1";
-const V2 = "https://api.withmono.com/v2";
-const V3 = "https://api.withmono.com/v3";
+// Overridable so a local mock (agents/src/mock/mock-provider-server.ts) can stand in for
+// mono.co during a demo/offline run — same pattern youverify-server.ts already uses.
+const MONO_BASE_URL = process.env.MONO_BASE_URL ?? "https://api.withmono.com";
+const V1 = `${MONO_BASE_URL}/v1`;
+const V2 = `${MONO_BASE_URL}/v2`;
+const V3 = `${MONO_BASE_URL}/v3`;
 
 const HEADERS = { "mono-sec-key": API_KEY, "Content-Type": "application/json" };
 

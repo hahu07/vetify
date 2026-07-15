@@ -21,7 +21,7 @@ import { createDeepAgent, FilesystemBackend } from "deepagents";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
 import { classifyShariahCompliance } from "../scoring/shariah-policy.js";
-import { buildModel, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience } from "./util.js";
+import { buildModel, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, checkpointConfig } from "./util.js";
 import { ShariahNarrativeSchema } from "./evidence-schemas.js";
 import type { ShariahVerdict } from "../scoring/shariah-policy.js";
 
@@ -107,7 +107,7 @@ REQUIRES_REVIEW and is not yours to decide.
 
   const result = await withLlmResilience("Shariah narrative", () => agent.invoke({
     messages: [{ role: "user", content: task }],
-  }));
+  }, checkpointConfig()));
   await mcpClient.close();
 
   const lastMessage = result.messages[result.messages.length - 1];

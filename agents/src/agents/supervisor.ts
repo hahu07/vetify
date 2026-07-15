@@ -76,11 +76,28 @@ async function queryContracts(templateId: string): Promise<Array<{ contractId: s
 // No contract keys on SDK 3.4.11 / Daml-LF 2.1/2.2, so RecordShariahPreCheck can no
 // longer resolve the AuthorizedAdvisor registry entry itself via lookupByKey — this
 // resolves it off-ledger first and passes the ContractId in explicitly.
-async function recordShariahPreCheck(contractId: string, verdict: unknown): Promise<void> {
+async function recordShariahPreCheck(
+  contractId: string,
+  result: { verdict: string; reasoning: string; citations: string[] },
+  businessActivity: string,
+): Promise<void> {
   const advisors = await queryActiveContracts("Vetify.Governance:AuthorizedAdvisor", "vetify");
   const advisorParty = partyId("advisor");
   const advisorCid = advisors.find((a) => (a.payload as { advisor?: string }).advisor === advisorParty)?.contractId;
   if (!advisorCid) throw new Error("advisor is not a registered AuthorizedAdvisor");
+  // ShariahResult (shariah.ts: {verdict, reasoning, citations}) doesn't share field names
+  // with Daml's ShariahAssessment record — mapped here rather than passed straight through
+  // (confirmed live: passing the raw ShariahResult object fails ledger-side with
+  // COMMAND_PREPROCESSING_FAILED "Missing non-optional field: activitiesScreened").
+  const verdict = {
+    verdict: result.verdict,
+    activitiesScreened: [businessActivity],
+    prohibitedRevenuePct: null,
+    aaoifiStandards: result.citations,
+    scholarDecision: null,
+    rationale: result.reasoning,
+    screenedAt: new Date().toISOString(),
+  };
   await exerciseLedgerChoice(T_COMPLIANCE_REVIEW, contractId, "RecordShariahPreCheck", { verdict, advisorCid }, ["advisor", "vetify"]);
 }
 
@@ -151,9 +168,21 @@ async function tick() {
   const complianceContracts = await queryContracts(T_COMPLIANCE_REVIEW);
   for (const contract of complianceContracts) {
     const payload = contract.payload as Record<string, unknown>;
-    if (payload["status"] !== "Pending") continue;
+    // RecordShariahPreCheck's own Daml guard requires status == Pending, so the
+    // Shariah Agent branch stays scoped to that. But runVerifierComplianceStage's
+    // StartReview transitions Pending -> UnderReview *before* the evidence-gathering
+    // step that can fail (LLM timeout, malformed evidence) — a failure there used
+    // to permanently strand the contract in UnderReview, since this loop previously
+    // only ever matched status === "Pending" and never dispatched to it again
+    // (confirmed live: a single schema-validation failure left a ComplianceReview
+    // stuck forever, invisible to every subsequent poll tick). Once shariahVerdict
+    // is recorded, both Pending (fresh) and UnderReview (retry after a partial
+    // failure) are valid states to (re)dispatch the compliance stage to —
+    // runVerifierComplianceStage itself now skips StartReview when it's already
+    // been done (see its own guard).
+    if (payload["status"] !== "Pending" && payload["status"] !== "UnderReview") continue;
 
-    if (payload["shariahVerdict"] == null) {
+    if (payload["status"] === "Pending" && payload["shariahVerdict"] == null) {
       await dispatch("Shariah Agent", contract.contractId, async () => {
         // ComplianceReview carries businessSector/businessActivity directly
         // (carried over from BusinessOnboarding.profile at creation time).
@@ -166,9 +195,9 @@ async function tick() {
         const financingPurpose = "general business financing";
         const verdict = await runShariahAgent(businessSector, businessActivity, financingPurpose);
         logger.info({ contractId: contract.contractId, verdict: verdict.verdict }, `Shariah verdict for ${contract.contractId}: ${verdict.verdict}`);
-        await recordShariahPreCheck(contract.contractId, verdict);
+        await recordShariahPreCheck(contract.contractId, verdict, businessActivity);
       });
-    } else {
+    } else if (payload["shariahVerdict"] != null) {
       await dispatch("Verifier Agent (compliance stage)", contract.contractId, () =>
         runVerifierComplianceStage(contract.contractId, payload));
     }

@@ -29,7 +29,7 @@ import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
-import { type McpTool, invokeTool, buildModel, parseEvidence, extractJsonObject, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience } from "./util.js";
+import { type McpTool, invokeTool, buildModel, parseEvidence, extractJsonObject, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, checkpointConfig } from "./util.js";
 import { MonitoringEvidenceSchema } from "./evidence-schemas.js";
 import { scoreDelinquency } from "../scoring/monitoring.js";
 import { partyId } from "../mcp/canton-client.js";
@@ -83,7 +83,14 @@ export async function runDelinquencyMonitor(contractId: string, contractPayload:
   const payload = contractPayload as Record<string, unknown>;
   const status = payload.status as MonitoringContractSnapshot["status"];
 
-  const evidenceMcp = new MultiServerMCPClient({
+  // Both MCP clients are tracked here and closed in the outer finally below —
+  // each spawns real child processes (npm run mcp:* -> node), so .close() must
+  // run even when the code in between throws, or the process tree leaks
+  // (confirmed live in verifier.ts's identical pattern — see its comment).
+  let evidenceMcp: MultiServerMCPClient | undefined;
+  let cantonMcp: MultiServerMCPClient | undefined;
+  try {
+  evidenceMcp = new MultiServerMCPClient({
     mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
   });
   const evidenceTools = await evidenceMcp.getTools();
@@ -103,8 +110,9 @@ Contract ID: ${contractId}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await withLlmResilience("Delinquency evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
+  const result = await withLlmResilience("Delinquency evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
   await evidenceMcp.close();
+  evidenceMcp = undefined;
   const lastMessage = result.messages[result.messages.length - 1];
   // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
   // no decision reaches the ledger on unvalidated shapes.
@@ -130,7 +138,7 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
   const { decision } = scoreDelinquency(snapshot, transactions);
   if (decision.action === "NoOp") return;
 
-  const cantonMcp = new MultiServerMCPClient({
+  cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
@@ -161,8 +169,10 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
       });
       break;
   }
-
-  await cantonMcp.close();
+  } finally {
+    if (evidenceMcp) await (evidenceMcp as MultiServerMCPClient).close().catch(() => {});
+    if (cantonMcp) await (cantonMcp as MultiServerMCPClient).close().catch(() => {});
+  }
 }
 
 // ─── Collections: Direct Debit retries + GSM escalation ─────────────────────
@@ -245,28 +255,33 @@ export async function runCollectionsAgent(contractId: string, contractPayload: u
     },
   });
 
-  const tools = await mcpClient.getTools();
-  const model = buildModel();
+  // try/finally guarantees .close() runs even if the agent invocation throws —
+  // otherwise the MCP server's child process tree leaks (see runDelinquencyMonitor).
+  try {
+    const tools = await mcpClient.getTools();
+    const model = buildModel();
 
-  const agent = createDeepAgent({
-    model,
-    tools,
-    systemPrompt: COLLECTIONS_SYSTEM_PROMPT,
-    backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
-    skills: ["skills/collections"],
-    checkpointer: new MemorySaver(),
-  });
+    const agent = createDeepAgent({
+      model,
+      tools,
+      systemPrompt: COLLECTIONS_SYSTEM_PROMPT,
+      backend: new FilesystemBackend({ rootDir: ".", virtualMode: true }),
+      skills: ["skills/collections"],
+      checkpointer: new MemorySaver(),
+    });
 
-  const today = new Date().toISOString().split("T")[0];
+    const today = new Date().toISOString().split("T")[0];
 
-  const task = `
+    const task = `
 Manage Direct Debit collections and GSM escalation for the following MurabahahContract.
 Today's date is ${today}.
 
 Contract ID: ${contractId}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
-  `.trim();
+    `.trim();
 
-  await withLlmResilience("Collections run", () => agent.invoke({ messages: [{ role: "user", content: task }] }));
-  await mcpClient.close();
+    await withLlmResilience("Collections run", () => agent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
+  } finally {
+    await mcpClient.close();
+  }
 }

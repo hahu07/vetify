@@ -23,6 +23,7 @@
  * - capText — length cap for the one place LLM-authored prose is persisted
  *   on-ledger (PortfolioReport.summary).
  */
+import { randomUUID } from "node:crypto";
 import { ChatAnthropic } from "@langchain/anthropic";
 import { z } from "zod";
 import { logger } from "../logger.js";
@@ -35,10 +36,29 @@ export async function invokeTool(tools: McpTool[], name: string, input: Record<s
   return tool.invoke(input);
 }
 
+// Every agent below configures `checkpointer: new MemorySaver()` (required for the Model C
+// human-in-the-loop interrupt path) but invoked the graph with no `configurable.thread_id` —
+// undiscovered until the Supervisor's live agent pipeline (as opposed to the dev-only
+// routes/dev.ts simulator, which bypasses the LLM/checkpointer entirely) was actually run
+// end-to-end: LangGraph's MemorySaver.put() throws "missing a required thread_id field" the
+// moment it tries to persist a checkpoint, crashing the whole Node process uncaught (not just
+// failing that one dispatch — the Supervisor's per-contract try/catch never gets a chance to
+// catch it). Agents are stateless per invocation (CLAUDE.md), so a fresh random thread_id per
+// call is correct — there is no real conversation to resume across invocations.
+export function checkpointConfig() {
+  return { configurable: { thread_id: randomUUID() } };
+}
+
 export function buildModel(): ChatAnthropic {
   return new ChatAnthropic({
     model: process.env.LLM_MODEL ?? "claude-sonnet-4-6",
     temperature: 0,
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    // Overridable so a local mock (agents/src/mock/mock-llm-server.ts) can stand in for the
+    // real Anthropic API during a demo/offline run — same pattern as MONO_BASE_URL/
+    // YOUVERIFY_BASE_URL. Every agent shares this one construction, so setting
+    // ANTHROPIC_BASE_URL mocks all of them at once.
+    anthropicApiUrl: process.env.ANTHROPIC_BASE_URL || undefined,
   });
 }
 

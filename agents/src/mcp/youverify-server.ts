@@ -11,10 +11,14 @@
  *
  * Docs: https://doc.youverify.co
  */
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// Spawned as a child process by MultiServerMCPClient — see mono-server.ts's comment on
+// this same fix for why loading .env independently here (rather than relying on the
+// spawn to forward the parent's process.env) is required.
 const BASE_URL = process.env.YOUVERIFY_BASE_URL ?? "https://api.youverify.co";
 const API_KEY = process.env.YOUVERIFY_API_KEY ?? "";
 

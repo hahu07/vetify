@@ -7,10 +7,15 @@
  * CANTON_VERIFIER_JWT, CANTON_ASSESSOR_JWT, CANTON_VETIFY_PARTY_ID,
  * CANTON_VERIFIER_PARTY_ID, CANTON_ASSESSOR_PARTY_ID
  */
+import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { queryActiveContracts, exerciseLedgerChoice, createLedgerContract } from "./canton-client.js";
+
+// Spawned as a child process by MultiServerMCPClient — see mono-server.ts's comment on
+// this same fix for why loading .env independently here (rather than relying on the
+// spawn to forward the parent's process.env) is required.
 
 const server = new McpServer({
   name: "canton-ledger",

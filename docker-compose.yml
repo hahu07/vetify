@@ -39,37 +39,39 @@ services:
       - "pipeline"
       - "ledger"
       - "postgres-document"
-    # `host.docker.internal` is what actually reaches the host-only-bound
-    # `dpm sandbox` gRPC port (:6865) from inside a container. The
-    # `host-gateway` special value makes this resolve on native Linux Docker
-    # Engine (20.10+) too, not just Docker Desktop, where it's built in.
-    # A prior `network_mode: host` attempt here does NOT work when Docker
-    # itself runs as Docker Desktop (a VM, e.g. `linuxkit` kernel — check
-    # `docker info | grep "Operating System"`): "host" networking is then
-    # scoped to the VM's network namespace, not the real host, so the
-    # sandbox process on the actual host stays unreachable (verified live —
-    # confirmed via `docker info` showing `Operating System: Docker Desktop`
-    # and a raw TCP probe to host.docker.internal:6865 succeeding while
-    # network_mode: host's localhost:6865 got connection-refused). Plain
-    # native `dockerd` (no Desktop VM) shares the host network namespace for
-    # real under `network_mode: host`, so that mode isn't wrong everywhere —
-    # just not portable across both setups, whereas host.docker.internal is.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    # `network_mode: host`, not `host.docker.internal` + bridge networking. Re-verified live
+    # (2026-07-15, native Ubuntu dockerd, Docker Engine Community 29.1.2): `dpm sandbox`'s
+    # ledger API binds `127.0.0.1` only, confirmed via `ss -tlnp` regardless of
+    # --ledger-api-port. On Docker Desktop, `host.docker.internal` has special-cased magic
+    # that can reach a loopback-only host service — which is what an earlier version of this
+    # comment verified — but on plain native `dockerd` it resolves to the bridge gateway IP
+    # (`host-gateway`), a real routable address the kernel treats normally, and a
+    # loopback-bound service refuses a connection arriving from any non-loopback interface
+    # (confirmed live: Scribe logged a 30s connect timeout to
+    # `host.docker.internal/172.17.0.1:<port>` and never ingested anything). `network_mode:
+    # host` sidesteps this entirely by sharing the host's real network namespace, so
+    # "127.0.0.1" inside the container *is* the host's own loopback. If you're on Docker
+    # Desktop instead of native dockerd (`docker info | grep "Operating System"`), switch
+    # back to the `extra_hosts`/`host.docker.internal` form — host networking does NOT work
+    # there, since "host" is then scoped to the Desktop VM, not the real host.
+    network_mode: host
     environment:
-      SCRIBE_SOURCE_LEDGER_HOST: host.docker.internal
-      SCRIBE_SOURCE_LEDGER_PORT: "6865"
+      SCRIBE_SOURCE_LEDGER_HOST: localhost
+      # Overridable because the default 6865 is frequently already bound by another
+      # Canton sandbox on a dev machine running more than one Daml project at once
+      # (confirmed live) — keep in sync with LEDGER_API_PORT passed to
+      # `dpm sandbox --ledger-api-port` in scripts/demo-setup.sh.
+      SCRIBE_SOURCE_LEDGER_PORT: "${LEDGER_API_PORT:-6865}"
       # No auth for local sandbox (dpm sandbox runs without auth by default).
       # Verified against a real Scribe 0.6.11 container: only "NoAuth" or
       # "OAuth" are accepted — "Unsafe" is rejected at startup with a format
       # error ("--source-ledger-auth ... constant string 'NoAuth'/'OAuth'").
       SCRIBE_SOURCE_LEDGER_AUTH: NoAuth
-      # Reached via the compose-internal service name/port, not the
-      # host-published port above — this is deliberately immune to whatever
-      # POSTGRES_HOST_PORT is set to, since both containers share the
-      # default bridge network's internal DNS.
-      SCRIBE_TARGET_POSTGRES_HOST: postgres
-      SCRIBE_TARGET_POSTGRES_PORT: "5432"
+      # A host-networked container can't resolve the `postgres` compose service by name
+      # (no bridge network, no compose-internal DNS) — reached via its host-published port
+      # instead, so this must track POSTGRES_HOST_PORT, not the internal 5432.
+      SCRIBE_TARGET_POSTGRES_HOST: localhost
+      SCRIBE_TARGET_POSTGRES_PORT: "${POSTGRES_HOST_PORT:-5432}"
       SCRIBE_TARGET_POSTGRES_USERNAME: vetify
       SCRIBE_TARGET_POSTGRES_PASSWORD: vetify
       SCRIBE_TARGET_POSTGRES_DATABASE: vetify-pqs

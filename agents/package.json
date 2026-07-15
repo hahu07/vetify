@@ -13,6 +13,8 @@
     "mcp:mono": "tsx src/mcp/mono-server.ts",
     "mcp:youverify": "tsx src/mcp/youverify-server.ts",
     "mcp:shariah": "tsx src/mcp/shariah-server.ts",
+    "mock:providers": "tsx src/mock/mock-provider-server.ts",
+    "mock:llm": "tsx src/mock/mock-llm-server.ts",
     "rag:ingest:shariah": "tsx src/rag/shariah/ingest.ts",
     "test": "tsx --test src/scoring/*.test.ts"
   },

@@ -57,7 +57,7 @@ import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
-import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache } from "./util.js";
+import { type McpTool, invokeTool, buildModel, extractJsonObject, parseEvidence, fenceUntrusted, UNTRUSTED_DATA_GUIDANCE, withLlmResilience, withPolicyCache, checkpointConfig } from "./util.js";
 import { UnderwritingEvidenceSchema } from "./evidence-schemas.js";
 import { scoreUnderwriting } from "../scoring/underwriting.js";
 import { classifyFinancingPurpose } from "../scoring/shariah-policy.js";
@@ -168,6 +168,16 @@ export async function runUnderwritingAgent(contractId: string, contractPayload: 
   const payload = contractPayload as Record<string, unknown>;
   const terms = payload.terms as Record<string, unknown> | undefined;
 
+  // All three MCP clients below are tracked here and closed in the outer
+  // finally — each spawns real child processes (npm run mcp:* -> node), so
+  // .close() must run even when the code in between throws, or the process
+  // tree leaks (confirmed live: a single failing contract, redispatched every
+  // ~10s by the Supervisor with no backoff, leaked 20+ orphaned process trees
+  // in under 15 minutes and starved the whole poll loop of resources).
+  let rejectMcp: MultiServerMCPClient | undefined;
+  let evidenceMcp: MultiServerMCPClient | undefined;
+  let cantonMcp: MultiServerMCPClient | undefined;
+  try {
   // Shariah purpose re-screen (review gap G4): Stage 3's pre-check ran before
   // this FinancingRequest existed, so the prohibited-STRUCTURE table
   // (refinancing, working capital, cash advance) was never exercised against
@@ -179,7 +189,7 @@ export async function runUnderwritingAgent(contractId: string, contractPayload: 
   const purpose = String(terms?.purpose ?? "");
   const purposeHit = classifyFinancingPurpose(purpose);
   if (purposeHit) {
-    const rejectMcp = new MultiServerMCPClient({
+    rejectMcp = new MultiServerMCPClient({
       mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
     });
     const rejectTools = (await rejectMcp.getTools()) as unknown as McpTool[];
@@ -201,14 +211,13 @@ export async function runUnderwritingAgent(contractId: string, contractPayload: 
         assessorCid,
       },
     });
-    await rejectMcp.close();
     return;
   }
 
   // Evidence-gathering agent: mono.co tools only. It cannot reach the Canton
   // MCP server at all, so it is architecturally incapable of exercising any
   // choice, not merely instructed not to.
-  const evidenceMcp = new MultiServerMCPClient({
+  evidenceMcp = new MultiServerMCPClient({
     mcpServers: { mono: { command: "npm", args: ["run", "mcp:mono"] } },
   });
   const evidenceTools = await evidenceMcp.getTools();
@@ -228,15 +237,16 @@ Contract ID: ${contractId}
 ${fenceUntrusted("canton-contract-payload", contractPayload)}
   `.trim();
 
-  const result = await withLlmResilience("Underwriting evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }));
+  const result = await withLlmResilience("Underwriting evidence", () => evidenceAgent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
   await evidenceMcp.close();
+  evidenceMcp = undefined;
   const lastMessage = result.messages[result.messages.length - 1];
   // Schema-validated (G3/G13): malformed evidence throws here — fails closed,
   // no decision reaches the ledger on unvalidated shapes.
   const evidence = parseEvidence(lastMessage.content, UnderwritingEvidenceSchema, "Underwriting Agent");
 
   // Deterministic decision execution from here — no LLM involved.
-  const cantonMcp = new MultiServerMCPClient({
+  cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
   const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
@@ -358,6 +368,9 @@ ${fenceUntrusted("canton-contract-payload", contractPayload)}
       });
       break;
   }
-
-  await cantonMcp.close();
+  } finally {
+    if (rejectMcp) await (rejectMcp as MultiServerMCPClient).close().catch(() => {});
+    if (evidenceMcp) await (evidenceMcp as MultiServerMCPClient).close().catch(() => {});
+    if (cantonMcp) await (cantonMcp as MultiServerMCPClient).close().catch(() => {});
+  }
 }

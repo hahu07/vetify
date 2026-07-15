@@ -22,7 +22,7 @@ import "dotenv/config";
 import { createDeepAgent, FilesystemBackend } from "deepagents";
 import { MultiServerMCPClient } from "@langchain/mcp-adapters";
 import { MemorySaver } from "@langchain/langgraph";
-import { type McpTool, invokeTool, buildModel, extractJsonObject, capText, withLlmResilience } from "./util.js";
+import { type McpTool, invokeTool, buildModel, extractJsonObject, capText, withLlmResilience, checkpointConfig } from "./util.js";
 import { aggregatePortfolio } from "../scoring/reporting.js";
 import type { MurabahahContractSnapshot, PortfolioMetrics } from "../scoring/reporting.js";
 import { partyId } from "../mcp/canton-client.js";
@@ -64,46 +64,51 @@ export async function runReportingAgent(
   const cantonMcp = new MultiServerMCPClient({
     mcpServers: { canton: { command: "npm", args: ["run", "mcp:canton"] } },
   });
-  const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
+  // try/finally guarantees .close() runs even if a step below throws —
+  // otherwise the MCP server's child process tree leaks (see verifier.ts's
+  // identical pattern for the live-confirmed blast radius).
+  try {
+    const cantonTools = (await cantonMcp.getTools()) as unknown as McpTool[];
 
-  const raw = await invokeTool(cantonTools, "get_active_contracts", { templateId: T_CONTRACT, party: "vetify" });
-  const parsed = extractJsonObject(raw) as { result?: Array<{ payload: Record<string, unknown> }> };
-  const contracts: MurabahahContractSnapshot[] = (parsed.result ?? []).map(({ payload }) => {
-    const murabahahTerms = payload.murabahahTerms as Record<string, unknown>;
-    return {
-      status: payload.status as MurabahahContractSnapshot["status"],
-      salePrice: Number(murabahahTerms.salePrice),
-      outstandingBalance: Number(payload.outstandingBalance),
-    };
-  });
+    const raw = await invokeTool(cantonTools, "get_active_contracts", { templateId: T_CONTRACT, party: "vetify" });
+    const parsed = extractJsonObject(raw) as { result?: Array<{ payload: Record<string, unknown> }> };
+    const contracts: MurabahahContractSnapshot[] = (parsed.result ?? []).map(({ payload }) => {
+      const murabahahTerms = payload.murabahahTerms as Record<string, unknown>;
+      return {
+        status: payload.status as MurabahahContractSnapshot["status"],
+        salePrice: Number(murabahahTerms.salePrice),
+        outstandingBalance: Number(payload.outstandingBalance),
+      };
+    });
 
-  const metrics: PortfolioMetrics = aggregatePortfolio(contracts);
-  const summary = await writeNarrative(metrics);
+    const metrics: PortfolioMetrics = aggregatePortfolio(contracts);
+    const summary = await writeNarrative(metrics);
 
-  const today = new Date().toISOString().split("T")[0];
-  await invokeTool(cantonTools, "create_contract", {
-    templateId: T_REPORT,
-    payload: {
-      // No source contract to copy vetify's real Party ID from here (unlike
-      // verifier.ts, which copies business/vetify/verifier off an existing
-      // BusinessOnboarding) — create_contract passes the payload straight
-      // through with no party-name resolution of its own, so this must
-      // already be a real Party ID string, not the role name "vetify".
-      vetify: partyId("vetify"),
-      financialInstitution,
-      regulator,
-      reportDate: today,
-      totalActiveContracts: metrics.totalActiveContracts,
-      totalDisbursed: metrics.totalDisbursed,
-      totalOutstanding: metrics.totalOutstanding,
-      delinquentCount: metrics.delinquentCount,
-      completedCount: metrics.completedCount,
-      defaultedCount: metrics.defaultedCount,
-      summary,
-    },
-  });
-
-  await cantonMcp.close();
+    const today = new Date().toISOString().split("T")[0];
+    await invokeTool(cantonTools, "create_contract", {
+      templateId: T_REPORT,
+      payload: {
+        // No source contract to copy vetify's real Party ID from here (unlike
+        // verifier.ts, which copies business/vetify/verifier off an existing
+        // BusinessOnboarding) — create_contract passes the payload straight
+        // through with no party-name resolution of its own, so this must
+        // already be a real Party ID string, not the role name "vetify".
+        vetify: partyId("vetify"),
+        financialInstitution,
+        regulator,
+        reportDate: today,
+        totalActiveContracts: metrics.totalActiveContracts,
+        totalDisbursed: metrics.totalDisbursed,
+        totalOutstanding: metrics.totalOutstanding,
+        delinquentCount: metrics.delinquentCount,
+        completedCount: metrics.completedCount,
+        defaultedCount: metrics.defaultedCount,
+        summary,
+      },
+    });
+  } finally {
+    await cantonMcp.close();
+  }
 }
 
 /** Hard cap on the LLM-authored summary persisted on-ledger (G3) —
@@ -134,7 +139,7 @@ Write the PortfolioReport narrative summary from these pre-computed metrics:
 - Completion rate: ${metrics.completionRatePct.toFixed(1)}%
   `.trim();
 
-  const result = await withLlmResilience("Report narrative", () => agent.invoke({ messages: [{ role: "user", content: task }] }));
+  const result = await withLlmResilience("Report narrative", () => agent.invoke({ messages: [{ role: "user", content: task }] }, checkpointConfig()));
   const lastMessage = result.messages[result.messages.length - 1];
   const text = typeof lastMessage.content === "string" ? lastMessage.content : JSON.stringify(lastMessage.content);
   return capText(text, MAX_SUMMARY_CHARS);
