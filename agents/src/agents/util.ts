@@ -56,9 +56,15 @@ export function buildModel(): ChatAnthropic {
     apiKey: process.env.ANTHROPIC_API_KEY,
     // Overridable so a local mock (agents/src/mock/mock-llm-server.ts) can stand in for the
     // real Anthropic API during a demo/offline run — same pattern as MONO_BASE_URL/
-    // YOUVERIFY_BASE_URL. Every agent shares this one construction, so setting
-    // ANTHROPIC_BASE_URL mocks all of them at once.
-    anthropicApiUrl: process.env.ANTHROPIC_BASE_URL || undefined,
+    // YOUVERIFY_BASE_URL, and same LLM_* naming convention as LLM_MODEL/LLM_TIMEOUT_MS above.
+    // Deliberately NOT named ANTHROPIC_BASE_URL: confirmed live that this exact dev sandbox
+    // already has a real ANTHROPIC_BASE_URL set at the OS/shell level (part of the Claude Code
+    // host environment, unrelated to this project), and dotenv's default `import "dotenv/config"`
+    // never overrides an already-set env var — reusing Anthropic's own var name would silently
+    // lose to that ambient value on any machine where it happens to be set, exactly the failure
+    // mode this was built to avoid. Every agent shares this one construction, so setting
+    // LLM_BASE_URL mocks all of them at once.
+    anthropicApiUrl: process.env.LLM_BASE_URL || undefined,
   });
 }
 

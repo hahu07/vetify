@@ -18,7 +18,7 @@
  */
 import { createServer } from "node:http";
 
-const PORT = Number(process.env.MOCK_PROVIDER_PORT ?? 4100);
+const PORT = Number(process.env.MOCK_PROVIDER_PORT ?? 4101);
 const SCENARIO = (process.env.MOCK_SCENARIO ?? "clean") as "clean" | "flag" | "reject";
 
 const BUSINESS_NAME = "Ahmadu Trading Ventures";

@@ -75,3 +75,9 @@ docs/*
 *.key
 *.p12
 *.gz
+.secrets/
+
+# ─── Canton Network LocalNet (digital-asset/cn-quickstart) ───────────────────
+# Cloned locally for devnet-alternative testing — not part of this project's
+# own source.
+.localnet/

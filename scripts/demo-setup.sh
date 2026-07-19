@@ -12,10 +12,33 @@
 # second set of parties) — if the sandbox is still the one you set up last time, skip straight
 # to starting the app.
 # ./scripts/demo-setup.sh --start-app 2>&1 | tail -150
+#./scripts/demo-setup.sh          # brings up sandbox, PQS, parties, governance registries, demo FI
+# then, in separate terminals:
+#cd backend  && npm run dev
+#cd frontend && npm run dev
+#cd agents   && npm run mock:providers   # or point at real mono.co/Youverify keys
+#cd agents   && npm run mock:llm         # or point ANTHROPIC_API_KEY at the real API
+#cd agents   && npm run dev              # the Supervisor
+#./scripts/fast-forward-stage8-10.sh --cac RC1016635
+# inventory and raw materials acquisition
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DPM="${DPM:-$HOME/.dpm/bin/dpm}"
+
+# Root .env is the single source of truth for port overrides (docker-compose.yml already
+# reads it automatically; this makes the script agree with it instead of needing every var
+# exported by hand). A shell env var set before invoking this script still wins over .env,
+# which still wins over the hardcoded fallback — set -a exports what .env defines, but
+# ${VAR:-default} below only fills in what's still unset.
+if [ -f "$ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
 JSON_API_PORT="${JSON_API_PORT:-7575}"
 # Overridable for machines running more than one Canton sandbox at once (confirmed live
 # need: a second, unrelated Daml project already held the *entire* default 6865-6869
@@ -28,6 +51,9 @@ ADMIN_API_PORT="${ADMIN_API_PORT:-6866}"
 SEQUENCER_PUBLIC_PORT="${SEQUENCER_PUBLIC_PORT:-6867}"
 SEQUENCER_ADMIN_PORT="${SEQUENCER_ADMIN_PORT:-6868}"
 MEDIATOR_ADMIN_PORT="${MEDIATOR_ADMIN_PORT:-6869}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+MOCK_PROVIDER_PORT="${MOCK_PROVIDER_PORT:-4100}"
+MOCK_LLM_PORT="${MOCK_LLM_PORT:-4200}"
 START_APP="${START_APP:-0}"
 for arg in "$@"; do
   [ "$arg" = "--start-app" ] && START_APP=1
@@ -310,31 +336,35 @@ if [ "$START_APP" = "1" ]; then
   cd "$ROOT/backend" && nohup npx tsx src/index.ts > "$ROOT/backend.log" 2>&1 &
   echo "  backend pid: $! (log: $ROOT/backend.log)"
   for i in $(seq 1 30); do curl -s -o /dev/null localhost:3000/health && break; sleep 1; done
-  cd "$ROOT/frontend" && nohup npm run dev > "$ROOT/frontend.log" 2>&1 &
+  cd "$ROOT/frontend" && PORT="$FRONTEND_PORT" nohup npm run dev > "$ROOT/frontend.log" 2>&1 &
   echo "  frontend pid: $! (log: $ROOT/frontend.log)"
-  for i in $(seq 1 30); do curl -s -o /dev/null localhost:5173 && break; sleep 1; done
-  ok "backend: http://localhost:3000  frontend: http://localhost:5173"
+  for i in $(seq 1 30); do curl -s -o /dev/null "localhost:${FRONTEND_PORT}" && break; sleep 1; done
+  ok "backend: http://localhost:3000  frontend: http://localhost:${FRONTEND_PORT}"
 fi
 
 cat <<EOF
 
 Setup $([ "$SETUP_FAILED" -eq 1 ] && echo "finished WITH WARNINGS (see above)" || echo "complete"). Next:
 
-1. Put a real key in agents/.env: ANTHROPIC_API_KEY (the only one that's hard-required —
-   party IDs are already filled in by this script). MONO_API_KEY/YOUVERIFY_API_KEY are left
-   as "mock-key" and MONO_BASE_URL/YOUVERIFY_BASE_URL point at localhost:4100 — the local
-   mock server standing in for mono.co/Youverify, so no third-party signup is needed. Point
-   those two BASE_URLs back at the real APIs (+ real keys) if you'd rather go live.
+1. Put a real key in agents/.env: ANTHROPIC_API_KEY (only needed if you point ANTHROPIC_BASE_URL
+   back at the real API — left as "mock-key" by default, since ANTHROPIC_BASE_URL points at
+   localhost:${MOCK_LLM_PORT}, the local mock standing in for Claude itself). MONO_API_KEY/
+   YOUVERIFY_API_KEY are likewise left as "mock-key" with MONO_BASE_URL/YOUVERIFY_BASE_URL
+   pointing at localhost:${MOCK_PROVIDER_PORT} — the local mock standing in for mono.co/Youverify.
+   No third-party signup or real LLM spend needed at all. Point any of these back at the real
+   APIs (+ real keys) if you'd rather go live for one piece at a time.
 
 2. $([ "$START_APP" = "1" ] && echo "backend + frontend are already running in the background (see above)." || echo "In separate terminals:
      cd backend  && npm run dev
-     cd frontend && npm run dev")
-     cd agents   && npm run mock:providers   # canned mono.co/Youverify responses on :4100
+     cd frontend && PORT=$FRONTEND_PORT npm run dev")
+     cd agents   && npm run mock:providers   # canned mono.co/Youverify responses on :${MOCK_PROVIDER_PORT}
+     cd agents   && npm run mock:llm         # scripted Claude stand-in on :${MOCK_LLM_PORT}
      cd agents   && npm run dev              # Supervisor — polls every 10s, dispatches agents
 
-   MOCK_SCENARIO=flag or MOCK_SCENARIO=reject (env var on the mock:providers process) switches
-   the canned identity/AML data to demo the Medium-risk-flag or hard-reject branches instead
-   of the default clean/auto-approve path.
+   MOCK_SCENARIO=flag or MOCK_SCENARIO=reject (env var — set it identically on BOTH the
+   mock:providers and mock:llm processes, they must agree) switches the canned identity/AML
+   data to demo the Medium-risk-flag or hard-reject branches instead of the default
+   clean/auto-approve path.
 
 3. Walk the demo:
      - Log in as business@vetify.ng / password123, submit a BusinessOnboarding,

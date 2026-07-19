@@ -34,6 +34,7 @@
 import "dotenv/config";
 import { readSecret } from "./secrets.js";
 import { requestScopedCommandId } from "./idempotency.js";
+import { getOidcAccessToken, isOidcAuthConfigured } from "./canton-oidc.js";
 
 const BASE_URL  = process.env.CANTON_LEDGER_URL ?? "http://localhost:7575";
 const USER_ID   = process.env.CANTON_USER_ID     ?? "vetify-backend";
@@ -119,7 +120,11 @@ export function resolveFinancerParty(
   return authUser.financialInstitutionPartyId ? fiPartyKey(authUser.userId) : "financialInstitution";
 }
 
-function jwt(party: string): string {
+// OIDC mode (CANTON_OIDC_CLIENT_ID/SECRET set — see canton-oidc.ts) uses one
+// shared machine token for every party, superseding the static per-party JWTs
+// below entirely; falls back to those for the unauthenticated local sandbox.
+async function jwt(party: string): Promise<string> {
+  if (isOidcAuthConfigured()) return getOidcAccessToken();
   if (DYNAMIC_PARTY_JWTS.has(party)) return DYNAMIC_PARTY_JWTS.get(party)!;
   if (party in PARTY_JWTS) return PARTY_JWTS[party];
   throw new Error(`No JWT configured for party "${party}"`);
@@ -141,9 +146,14 @@ export function partyId(party: string): string {
  * confirm live" discipline this file's top comment describes for the rest
  * of the v2 migration. */
 export async function allocateParty(partyIdHint: string): Promise<string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Unlike the local sandbox, an authenticated participant (OIDC mode) requires
+  // a bearer token to allocate a party at all — confirmed live against the
+  // devnet validator (see canton-oidc.ts's doc comment for the auth model).
+  if (isOidcAuthConfigured()) headers.Authorization = `Bearer ${await getOidcAccessToken()}`;
   const res = await fetch(`${BASE_URL}/v2/parties`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({ partyIdHint }),
   });
   const text = await res.text();
@@ -249,7 +259,7 @@ function toLedgerError(path: string, httpStatus: number, code: string, cause: st
 }
 
 async function ledgerFetch(path: string, party: string, body: unknown): Promise<unknown> {
-  const token = jwt(party);
+  const token = await jwt(party);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   // Omit the header entirely when unconfigured — a present-but-empty bearer
   // token is rejected as malformed by a sandbox with auth enabled, whereas a
@@ -294,7 +304,12 @@ interface TransactionV2 {
 }
 
 async function ledgerEnd(): Promise<number> {
-  const res = await fetch(`${BASE_URL}/v2/state/ledger-end`);
+  // Party-agnostic ledger metadata call — the unauthenticated local sandbox
+  // never needed a header here, but an authenticated participant (OIDC mode)
+  // rejects it without one.
+  const headers: Record<string, string> = {};
+  if (isOidcAuthConfigured()) headers.Authorization = `Bearer ${await getOidcAccessToken()}`;
+  const res = await fetch(`${BASE_URL}/v2/state/ledger-end`, { headers });
   if (!res.ok) throw new Error(`Canton /v2/state/ledger-end failed [${res.status}]`);
   const data = (await res.json()) as { offset: number };
   return data.offset;

@@ -1115,8 +1115,12 @@ function adaptCertification({ contractId, payload }: RawContract<RawShariahContr
 
 // ─── Axios Instance ───────────────────────────────────────────────────────────
 
+// Relative '/api' only resolves when something in front of this app proxies it to the
+// backend — true for Vite's local dev server (see vite.config.ts), but not for a static
+// build deployed on its own domain (e.g. Vercel), which has nothing to proxy to. Overridable
+// via VITE_API_BASE_URL (e.g. an ngrok URL + "/api") for that case.
 export const apiClient = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -1952,7 +1956,7 @@ export function useFlagOnboardingForManualReview() {
 export function useApproveCompliance() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, completedChecks, riskScore, riskLevel, eddCaseCid }: {
+    mutationFn: ({ id, completedChecks, riskScore, riskLevel, eddCaseCid, overrideJustification }: {
       id: string
       completedChecks: ComplianceCheck
       riskScore: number
@@ -1960,9 +1964,14 @@ export function useApproveCompliance() {
       // G14 hard gate: a PEP-driven case can only approve once its EDDCase is EddClosed —
       // see ComplianceReview.daml's ApproveCompliance assertion.
       eddCaseCid?: string
+      // Required by the same assertion whenever a human approves a case the agent already
+      // scored (autoDecided=false + agentScore is Some) — omitting it 422s every time, since
+      // Stage 3 is designed to reach a human reviewer with a prior agent score nearly always.
+      overrideJustification?: string
     }) =>
       apiClient.post(`/onboarding/compliance/${id}/approve`, {
         completedChecks, riskScore, riskLevel, autoDecided: false, eddCaseCid: eddCaseCid ?? null,
+        overrideJustification: overrideJustification ?? null,
       }).then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['compliance-queue'] })
@@ -1974,15 +1983,19 @@ export function useApproveCompliance() {
 export function useRejectCompliance() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ id, completedChecks, riskScore, riskLevel, reason }: {
+    mutationFn: ({ id, completedChecks, riskScore, riskLevel, reason, overrideJustification }: {
       id: string
       completedChecks: ComplianceCheck
       riskScore: number
       riskLevel: RiskLevel
       reason: string
+      // Same assertion as ApproveCompliance — required whenever a human decides a case the
+      // agent already scored.
+      overrideJustification?: string
     }) =>
       apiClient.post(`/onboarding/compliance/${id}/reject`, {
         completedChecks, riskScore, riskLevel, autoDecided: false, reason,
+        overrideJustification: overrideJustification ?? null,
       }).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['compliance-queue'] }),
   })

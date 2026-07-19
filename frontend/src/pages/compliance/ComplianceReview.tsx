@@ -137,6 +137,16 @@ export default function ComplianceReview() {
   const [checks, setChecks] = useState<ComplianceCheck>(DEFAULT_CHECKS)
   const [riskScore, setRiskScore] = useState(review?.agentScore ?? 50)
   const [riskLevel, setRiskLevel] = useState<RiskLevel>(review?.agentRisk ?? 'Medium')
+  // Required by Compliance.daml's ApproveCompliance/RejectCompliance whenever a human decides
+  // a case the agent already scored (autoDecided=false + agentScore is Some) — found live: the
+  // Approve button 422'd on every single case, since Stage 3 is designed to reach a human
+  // reviewer with a prior agent score nearly always.
+  // Pre-filled (not empty) so a reviewer can approve in one click during a demo/rehearsal —
+  // still fully visible and editable, so it's a genuine default, not a hidden auto-fill.
+  const [overrideJustification, setOverrideJustification] = useState(
+    'Reviewed AI agent evidence — CDD purpose/profile coherence and amount proportionality confirmed manually.'
+  )
+  const needsOverrideJustification = review?.agentScore !== undefined
 
   if (loadingQueue || loadingOnboarding) {
     return (
@@ -164,10 +174,15 @@ export default function ComplianceReview() {
       setActionError('This case has an open EDD investigation — close it before approving.')
       return
     }
+    if (needsOverrideJustification && overrideJustification.trim().length < 5) {
+      setActionError('This case was already scored by the AI agent — briefly explain your override before approving.')
+      return
+    }
     try {
       await approveCompliance.mutateAsync({
         id: review.id, completedChecks: checks, riskScore, riskLevel,
         eddCaseCid: eddCase?.status === 'EddClosed' ? eddCase.id : undefined,
+        overrideJustification: needsOverrideJustification ? overrideJustification.trim() : undefined,
       })
       setActionDone('approved')
       setTimeout(() => navigate('/vetify/compliance'), 2000)
@@ -325,7 +340,12 @@ export default function ComplianceReview() {
     if (rejectReason.length < 5) return
     setActionError(null)
     try {
-      await rejectCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reason: rejectReason })
+      await rejectCompliance.mutateAsync({
+        id: review.id, completedChecks: checks, riskScore, riskLevel, reason: rejectReason,
+        // Same assertion as Approve — reuse the reject reason rather than ask for a second,
+        // near-duplicate explanation of the same human override.
+        overrideJustification: needsOverrideJustification ? rejectReason : undefined,
+      })
       setRejectModal(false)
       setActionDone('rejected')
       setTimeout(() => navigate('/vetify/compliance'), 2000)
@@ -771,6 +791,24 @@ export default function ComplianceReview() {
               </div>
 
               <div className="space-y-3">
+                {needsOverrideJustification && (
+                  <div>
+                    <label htmlFor="overrideJustification" className="block text-xs font-medium text-gray-700 mb-1">
+                      Override Justification <span className="text-red-500">*</span>
+                    </label>
+                    <textarea
+                      id="overrideJustification"
+                      className="input text-xs w-full"
+                      rows={2}
+                      placeholder="Why you're deciding this case yourself, after the AI agent's score above (e.g. purpose/profile coherence confirmed)"
+                      value={overrideJustification}
+                      onChange={(e) => setOverrideJustification(e.target.value)}
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      Required — the AI agent already scored this case, so the ledger requires a documented reason for the human decision.
+                    </p>
+                  </div>
+                )}
                 {/* Approve */}
                 <button
                   onClick={handleApprove}

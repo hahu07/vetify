@@ -22,6 +22,7 @@
 import "dotenv/config";
 import { readSecret } from "../secrets.js";
 import { logger } from "../logger.js";
+import { getOidcAccessToken, isOidcAuthConfigured } from "../canton-oidc.js";
 
 const BASE_URL     = process.env.CANTON_LEDGER_URL ?? "http://localhost:7575";
 const USER_ID      = process.env.CANTON_USER_ID     ?? "vetify-agents";
@@ -51,7 +52,11 @@ const PARTY_IDS: Record<string, string> = {
   financialInstitution: process.env.CANTON_FI_PARTY_ID   ?? "",
 };
 
-function jwt(party: string): string {
+// OIDC mode (CANTON_OIDC_CLIENT_ID/SECRET set — see canton-oidc.ts) uses one
+// shared machine token for every party, superseding the static per-party JWTs
+// below entirely; falls back to those for the unauthenticated local sandbox.
+async function jwt(party: string): Promise<string> {
+  if (isOidcAuthConfigured()) return getOidcAccessToken();
   if (party in PARTY_JWTS) return PARTY_JWTS[party];
   // Not one of the static role names — treated as an already-resolved
   // literal Party ID (e.g. a self-serve-signed-up FI's own dynamically-
@@ -98,7 +103,7 @@ function stringifyNumbers(value: unknown): unknown {
 }
 
 async function ledgerFetch(path: string, party: string, body: unknown): Promise<unknown> {
-  const token = jwt(party);
+  const token = await jwt(party);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${BASE_URL}${path}`, { method: "POST", headers, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
@@ -120,7 +125,12 @@ type TransactionEventV2 = { CreatedEvent: CreatedEventV2 } | { ArchivedEvent: Ar
 interface TransactionV2 { updateId: string; events: TransactionEventV2[] }
 
 async function ledgerEnd(): Promise<number> {
-  const res = await fetch(`${BASE_URL}/v2/state/ledger-end`, { signal: AbortSignal.timeout(30_000) });
+  // Party-agnostic ledger metadata call — the unauthenticated local sandbox
+  // never needed a header here, but an authenticated participant (OIDC mode)
+  // rejects it without one.
+  const headers: Record<string, string> = {};
+  if (isOidcAuthConfigured()) headers.Authorization = `Bearer ${await getOidcAccessToken()}`;
+  const res = await fetch(`${BASE_URL}/v2/state/ledger-end`, { headers, signal: AbortSignal.timeout(30_000) });
   if (!res.ok) throw new Error(`Canton /v2/state/ledger-end failed [${res.status}]`);
   const data = (await res.json()) as { offset: number };
   return data.offset;

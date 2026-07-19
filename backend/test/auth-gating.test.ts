@@ -13,6 +13,18 @@ import request from "supertest";
 import type { Express } from "express";
 
 process.env.MONO_WEBHOOK_SECRET = "test-webhook-secret";
+// Pin the "NO database and NO ledger" environment this file documents (see
+// header). The developer's real backend/.env may point at a live devnet
+// (READS_VIA_LEDGER=1 + real OIDC credentials), which would silently turn
+// these sanitized-failure assertions into live remote ledger calls. Set (not
+// delete) each var: dotenv only fills vars that are still unset, so values
+// pinned here before app.ts's dynamic import always win over .env.
+process.env.READS_VIA_LEDGER = "0";
+process.env.CANTON_LEDGER_URL = "http://127.0.0.1:9";  // unreachable (discard port)
+process.env.CANTON_OIDC_CLIENT_ID = "";                 // "" = OIDC mode off
+process.env.CANTON_OIDC_CLIENT_SECRET = "";
+process.env.PQS_POSTGRES_HOST = "127.0.0.1";
+process.env.PQS_POSTGRES_PORT = "9";                    // unreachable
 const SECRET = process.env.SESSION_JWT_SECRET ?? "dev-only-insecure-secret-change-me";
 
 function sessionToken(partyRole: string): string {

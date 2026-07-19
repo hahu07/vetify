@@ -16,9 +16,56 @@
 import "dotenv/config";
 import { readSecret } from "./secrets.js";
 import { pgSslConfig } from "./pg-ssl.js";
+import { queryContracts } from "./canton.js";
 import pg from "pg";
 
 const { Pool } = pg;
+
+// ── Devnet read mode (READS_VIA_LEDGER=1) ────────────────────────────────────
+// The Seaport devnet validator exposes only the HTTPS/WebSocket JSON Ledger
+// API — no gRPC endpoint for Scribe/PQS to subscribe to — so in devnet mode
+// every read helper below reroutes to the ledger's own ACS via canton.ts's
+// queryContracts() (read as vetify, who is signatory/observer on every
+// template by design) instead of PQS-Postgres. The SQL WHERE clauses
+// repository.ts passes are uniformly single-field JSON-path equality
+// (`payload->>'x' = $2`, `payload->'kyc'->>'cacRegNumber' = $2`), interpreted
+// in JS by ledgerWhereFilter below — anything it can't parse throws loudly
+// rather than silently returning everything. Trade-offs, accepted for the
+// hackathon-demo dataset size: each call pulls the template's full ACS
+// (queryContracts' 1000-row tripwire still applies and would throw first),
+// and archived-contract history (latestArchived) is unavailable from an ACS
+// by definition, so that one helper returns null in this mode.
+const READS_VIA_LEDGER = process.env.READS_VIA_LEDGER === "1";
+
+/** Interprets the narrow SQL-WHERE dialect repository.ts actually uses
+ * (single `payload->…->>'field' = $N` equality) as a JS payload predicate. */
+function ledgerWhereFilter(where: string | undefined, params: unknown[]): (payload: unknown) => boolean {
+  if (!where) return () => true;
+  const m = where.trim().match(/^payload((?:->>?'[^']+')+)\s*=\s*\$(\d+)$/);
+  if (!m) throw new Error(`READS_VIA_LEDGER cannot interpret WHERE clause: ${where}`);
+  const segments = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
+  // $1 is always the templateId, so $N maps to params[N - 2]
+  const expected = params[Number(m[2]) - 2];
+  return (payload: unknown) => {
+    let v: unknown = payload;
+    for (const s of segments) v = (v as Record<string, unknown> | null | undefined)?.[s];
+    if (v === null || v === undefined) return expected === null;
+    return String(v) === String(expected);
+  };
+}
+
+async function activeViaLedger<T>(
+  templateId: string,
+  where?: string,
+  ...params: unknown[]
+): Promise<PqsContract<T>[]> {
+  const match = ledgerWhereFilter(where, params);
+  const rows = await queryContracts(templateId);
+  return rows.filter((r) => match(r.payload)).map((r) => ({
+    contractId: r.contractId,
+    payload:    r.payload as T,
+  }));
+}
 
 const pool = new Pool({
   host:     process.env.PQS_POSTGRES_HOST     ?? "localhost",
@@ -75,6 +122,15 @@ export async function activePaged<T = Record<string, unknown>>(
   where?: string,
   ...params: unknown[]
 ): Promise<PagedResult<T>> {
+  if (READS_VIA_LEDGER) {
+    const all = await activeViaLedger<T>(templateId, where, ...params);
+    return {
+      rows:    all.slice(page.offset, page.offset + page.limit),
+      limit:   page.limit,
+      offset:  page.offset,
+      hasMore: all.length > page.offset + page.limit,
+    };
+  }
   const limitIdx  = params.length + 2;   // $1 = templateId, then WHERE params, then LIMIT/OFFSET
   const offsetIdx = params.length + 3;
   const base = where
@@ -102,6 +158,7 @@ export async function active<T = Record<string, unknown>>(
   where?: string,
   ...params: unknown[]
 ): Promise<PqsContract<T>[]> {
+  if (READS_VIA_LEDGER) return activeViaLedger<T>(templateId, where, ...params);
   const sql = where
     ? `SELECT contract_id, payload FROM active($1) WHERE ${where}`
     : `SELECT contract_id, payload FROM active($1)`;
@@ -131,6 +188,11 @@ export async function latestArchived<T = Record<string, unknown>>(
   where?: string,
   ...params: unknown[]
 ): Promise<PqsContract<T> | null> {
+  if (READS_VIA_LEDGER) {
+    // An ACS by definition holds only live contracts — archived history is a
+    // PQS-only capability. Callers already treat null as "no archived record".
+    return null;
+  }
   const sql = where
     ? `SELECT contract_id, payload FROM archives($1) WHERE ${where} ORDER BY archived_at_offset DESC LIMIT 1`
     : `SELECT contract_id, payload FROM archives($1) ORDER BY archived_at_offset DESC LIMIT 1`;
@@ -152,6 +214,10 @@ export async function contractById<T = Record<string, unknown>>(
   templateId: string,
   contractId: string,
 ): Promise<PqsContract<T> | null> {
+  if (READS_VIA_LEDGER) {
+    const rows = await activeViaLedger<T>(templateId);
+    return rows.find((r) => r.contractId === contractId) ?? null;
+  }
   const result = await pool.query(
     `SELECT contract_id, payload FROM active($1) WHERE contract_id = $2`,
     [templateId, contractId],
@@ -180,6 +246,8 @@ export async function contractByIdWithRetry<T = Record<string, unknown>>(
   attempts = 3,
   delayMs = 150,
 ): Promise<PqsContract<T> | null> {
+  // Ledger mode reads the ledger itself — there is no Scribe lag to retry over.
+  if (READS_VIA_LEDGER) return contractById<T>(templateId, contractId);
   for (let i = 0; i < attempts; i++) {
     const found = await contractById<T>(templateId, contractId);
     if (found) return found;
@@ -195,8 +263,19 @@ export async function query<T = Record<string, unknown>>(
   sql: string,
   params: unknown[] = [],
 ): Promise<T[]> {
+  // Loud, not silent: local PQS-Postgres may still be up with *stale local-
+  // sandbox data* — answering from it in ledger mode would quietly show wrong
+  // ledger state. Callers needing aggregations in ledger mode branch to a
+  // JS aggregation over active() instead (see computePortfolioSummary).
+  if (READS_VIA_LEDGER) {
+    throw new Error(`READS_VIA_LEDGER=1: raw PQS SQL is unavailable in ledger-read mode (query: ${sql.slice(0, 80)}...)`);
+  }
   const result = await pool.query(sql, params);
   return result.rows as T[];
 }
+
+/** True when reads are rerouted to the ledger ACS (devnet mode) — lets
+ * repository.ts branch its one raw-SQL aggregation to a JS equivalent. */
+export const readsViaLedger = () => READS_VIA_LEDGER;
 
 export { pool };

@@ -9,6 +9,7 @@ import {
   XCircle,
   Info,
   TrendingUp,
+  Sparkles,
 } from 'lucide-react'
 import Layout from '../../components/Layout'
 import StatusBadge from '../../components/StatusBadge'
@@ -316,6 +317,26 @@ export default function UnderwritingQueue() {
               <p className="text-xs font-semibold text-primary">{approveModal.businessName}</p>
               <p className="text-xs text-primary/80 mt-0.5">Requested: {formatNaira(approveModal.terms.amount)}</p>
             </div>
+
+            {import.meta.env.DEV && myApprovedProvider && myCreditOfficers.length > 0 && (
+              <button
+                type="button"
+                onClick={() => resetApprove({
+                  description: '5 units of retail display equipment and inventory stock',
+                  supplier: 'Lagos Wholesale Supplies Ltd',
+                  supplierRef: `INV-2026-${Math.floor(1000 + Math.random() * 9000)}`,
+                  estimatedCost: approveModal.terms.amount,
+                  approvingOfficerId: myCreditOfficers[0].officerId,
+                  approvedByName: '',
+                  reasonCode: 'LOW_RISK_AUTO',
+                  decisionFactors: 'Strong DSCR, established business, clean credit history',
+                })}
+                className="w-full mb-4 inline-flex items-center justify-center gap-1.5 text-xs font-medium text-primary bg-primary-50 hover:bg-primary-100 rounded-lg px-3 py-1.5 transition-colors"
+              >
+                <Sparkles size={13} />
+                Fill Demo Data
+              </button>
+            )}
 
             {!myApprovedProvider ? (
               <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 flex items-start gap-2">

@@ -6,7 +6,7 @@
  *
  * Template IDs match the namespaced Daml module: "Vetify.<Module>:<TemplateName>"
  */
-import { active, activePaged, contractById, contractByIdWithRetry, latestArchived, query, type Page } from "./pqs.js";
+import { active, activePaged, contractById, contractByIdWithRetry, latestArchived, query, readsViaLedger, type Page } from "./pqs.js";
 
 const T = {
   ONBOARDING:         "Vetify.Onboarding:BusinessOnboarding",
@@ -295,6 +295,42 @@ export interface PortfolioSummary {
 }
 
 async function computePortfolioSummary(financialInstitution?: string): Promise<PortfolioSummary> {
+  // Ledger-read mode (devnet): raw PQS SQL is unavailable — aggregate in JS
+  // over the ACS instead, mirroring the GROUP BY below exactly.
+  if (readsViaLedger()) {
+    const contracts = financialInstitution
+      ? await active(T.MURABAHAH, `payload->>'financialInstitution' = $2`, financialInstitution)
+      : await active(T.MURABAHAH);
+    const summary: PortfolioSummary = {
+      totalActive: 0, totalDisbursed: 0, totalOutstanding: 0,
+      delinquentCount: 0, completedCount: 0, defaultedCount: 0,
+    };
+    for (const { payload } of contracts) {
+      const p = payload as Record<string, any>;
+      const disbursed   = parseFloat(p?.murabahahTerms?.salePrice ?? "0");
+      const outstanding = parseFloat(p?.outstandingBalance ?? "0");
+      summary.totalDisbursed += Number.isFinite(disbursed) ? disbursed : 0;
+      switch (p?.status) {
+        case "Active":
+          summary.totalActive      += 1;
+          summary.totalOutstanding += Number.isFinite(outstanding) ? outstanding : 0;
+          break;
+        case "Delinquent":
+          summary.totalActive      += 1;
+          summary.totalOutstanding += Number.isFinite(outstanding) ? outstanding : 0;
+          summary.delinquentCount  += 1;
+          break;
+        case "Completed":
+          summary.completedCount += 1;
+          break;
+        case "Defaulted":
+          summary.defaultedCount += 1;
+          break;
+      }
+    }
+    return summary;
+  }
+
   const where = financialInstitution ? `WHERE payload->>'financialInstitution' = $2` : "";
   const params = financialInstitution ? [T.MURABAHAH, financialInstitution] : [T.MURABAHAH];
   const rows = await query<{

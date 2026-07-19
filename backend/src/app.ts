@@ -24,7 +24,7 @@ import { requireAuth } from "./auth.js";
 import { logger } from "./logger.js";
 import { registry, httpRequestDuration, httpRequestsTotal } from "./metrics.js";
 import { pool as appPool } from "./appdb.js";
-import { pool as pqsPool } from "./pqs.js";
+import { pool as pqsPool, readsViaLedger } from "./pqs.js";
 import { idempotencyMiddleware } from "./idempotency.js";
 
 export function buildApp() {
@@ -41,7 +41,14 @@ export function buildApp() {
   // directly, so HSTS is only meaningful once that's in place.
   app.use(helmet());
 
-  app.use(cors({ origin: process.env.CORS_ORIGIN ?? "http://localhost:5173" }));
+  // Comma-separated so a deployed frontend (e.g. a Vercel URL) can be allowed
+  // alongside the local dev origin at the same time, without needing a code
+  // change to swap between them.
+  const corsOrigins = (process.env.CORS_ORIGIN ?? "http://localhost:5173")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  app.use(cors({ origin: corsOrigins }));
 
   // Structured, per-request logging (audit finding C-2). Attaches req.id /
   // req.log, both consumed by errorHandler.ts so a client-visible
@@ -102,14 +109,20 @@ export function buildApp() {
   // surface as 502s from the routes that actually touch it, not as this
   // process reporting itself globally unready.
   app.get("/ready", async (_req, res) => {
-    const checks: Record<string, "ok" | "unreachable"> = {};
-    const results = await Promise.allSettled([
-      appPool.query("SELECT 1").then(() => { checks.appDb = "ok"; }),
-      pqsPool.query("SELECT 1").then(() => { checks.pqsDb = "ok"; }),
-    ]);
+    const checks: Record<string, "ok" | "unreachable" | "skipped (ledger-read mode)"> = {};
+    const probes: Promise<void>[] = [appPool.query("SELECT 1").then(() => { checks.appDb = "ok"; })];
+    // Ledger-read mode (READS_VIA_LEDGER=1, devnet): PQS-Postgres is not a
+    // dependency at all — probing it would report unready over a service the
+    // running configuration never touches.
+    if (readsViaLedger()) {
+      checks.pqsDb = "skipped (ledger-read mode)";
+    } else {
+      probes.push(pqsPool.query("SELECT 1").then(() => { checks.pqsDb = "ok"; }));
+    }
+    const results = await Promise.allSettled(probes);
     if (results[0].status === "rejected") checks.appDb = "unreachable";
-    if (results[1].status === "rejected") checks.pqsDb = "unreachable";
-    const ready = Object.values(checks).every((v) => v === "ok");
+    if (!readsViaLedger() && results[1].status === "rejected") checks.pqsDb = "unreachable";
+    const ready = Object.values(checks).every((v) => v !== "unreachable");
     res.status(ready ? 200 : 503).json({ ready, checks });
   });
 

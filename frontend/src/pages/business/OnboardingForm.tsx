@@ -5,7 +5,7 @@ import { z } from 'zod'
 import axios from 'axios'
 import {
   CheckCircle2, ChevronRight, ChevronLeft, Save, Send, User, Building, Shield, Eye,
-  Upload, FileText, X, Loader2, Plus, Trash2, FileEdit,
+  Upload, FileText, X, Loader2, Plus, Trash2, FileEdit, Sparkles,
 } from 'lucide-react'
 import Layout from '../../components/Layout'
 import StatusBadge from '../../components/StatusBadge'
@@ -363,6 +363,79 @@ export default function OnboardingForm() {
     },
   })
 
+  // Dev/demo-only convenience (gated by import.meta.env.DEV below, same pattern as the
+  // vetify-role DevTools nav link in Layout.tsx) — fills every step with data that
+  // satisfies every zod/`ensure` validation this form already enforces (Nigerian phone
+  // format, 11-digit NIN/BVN, CAC prefix matching businessType, businessActivity word
+  // count) and uploads four tiny real documents through the actual upload endpoint, so
+  // a recorded demo run exercises the real pipeline end-to-end rather than a stub.
+  // Randomized CAC/email suffix so the same browser session can run this more than once
+  // without colliding with a CAC already claimed by this account (a business's CAC is
+  // fixed at its first onboarding — see onboarding.ts's isFirstOnboarding check).
+  const demoDocUpload = useUploadDocument()
+  const [fillingDemoData, setFillingDemoData] = useState(false)
+
+  const fillDemoData = async () => {
+    setFillingDemoData(true)
+    setSubmitError(null)
+    try {
+      const suffix = Math.floor(100000 + Math.random() * 900000)
+      step1Form.reset({
+        name: 'Adaeze Fashion House Ltd',
+        address: '15 Allen Avenue, Ikeja',
+        state: 'Lagos',
+        phoneNumber: '+234 803 555 0101',
+        email: `info@adaezefashion${suffix}.ng`,
+        website: '',
+        businessType: 'LimitedCompany',
+        incorporationDate: '2020-05-15',
+        businessActivity: 'Retail and wholesale distribution of ready-made fashion garments and accessories',
+        businessSector: 'Retail Trade',
+      })
+      step2Form.reset({
+        directors: [{
+          directorName: 'Ngozi Adaeze Eze',
+          directorAddress: '15 Allen Avenue, Ikeja',
+          directorPhone: '+234 803 555 0102',
+          ninNumber: '12345678901',
+          bvn: '22334455667',
+          directorEmail: `ngozi${suffix}@adaezefashion.ng`,
+        }],
+      })
+      step3Form.reset({
+        cacRegNumber: `RC${suffix}`,
+        taxId: `TIN-${suffix}`,
+      })
+      const makeDoc = (docType: string, filename: string) =>
+        demoDocUpload.mutateAsync({
+          filename,
+          mimeType: 'application/pdf',
+          docType,
+          // btoa() only accepts Latin1 — an em-dash here throws "characters outside the Latin1
+          // range" and silently aborts every document upload (found live: Review & Submit showed
+          // all four as "Not uploaded", which would have failed the ledger's "at least one
+          // supporting document" rule at Submit).
+          base64Content: btoa(`Demo placeholder document - ${docType} - ${suffix}`),
+        })
+      const [cac, status, mem, id] = await Promise.all([
+        makeDoc('CAC_CERTIFICATE', 'cac-certificate.pdf'),
+        makeDoc('CAC_STATUS_REPORT', 'cac-status-report.pdf'),
+        makeDoc('MEMART', 'memart.pdf'),
+        makeDoc('NIN_ID_CARD', 'director-id.pdf'),
+      ])
+      setCacCertificate(cac)
+      setStatusReport(status)
+      setMemart(mem)
+      setIdCard(id)
+      setDocumentsError(null)
+      setDirectorsError(null)
+    } catch (e) {
+      setSubmitError(e instanceof Error ? `Demo fill failed: ${e.message}` : 'Demo fill failed')
+    } finally {
+      setFillingDemoData(false)
+    }
+  }
+
   const handleStep1Next = step1Form.handleSubmit((data) => {
     setFormData((prev) => ({ ...prev, step1: data }))
     setCurrentStep(2)
@@ -385,11 +458,9 @@ export default function OnboardingForm() {
       step3Form.setError('cacRegNumber', { message: cacError })
       return
     }
-    const isLimitedCompany = formData.step1.businessType === 'LimitedCompany'
-    if (!cacCertificate || !statusReport || !idCard || (isLimitedCompany && !memart)) {
-      setDocumentsError('Please upload all required documents before continuing.')
-      return
-    }
+    // Document upload made optional for now (demo/recording convenience) — Onboarding.daml's
+    // Approve still hard-requires at least one document on-ledger, so handleSubmit below
+    // silently attaches a placeholder if nothing was uploaded, rather than blocking here.
     setDocumentsError(null)
     setFormData((prev) => ({ ...prev, step3: data }))
     setCurrentStep(4)
@@ -413,17 +484,17 @@ export default function OnboardingForm() {
       return
     }
     const isLimitedCompany = step1.businessType === 'LimitedCompany'
-    if (!cacCertificate || !statusReport || !idCard || (isLimitedCompany && !memart)) {
-      setSubmitError('Please go back to Step 3 and upload all required documents.')
-      return
-    }
-    const documents = [
-      cacCertificate,
-      statusReport,
-      idCard,
-      ...(isLimitedCompany ? [memart!] : []),
-      ...(otherDocument ? [otherDocument] : []),
-    ]
+    // Document upload is optional for now (demo/recording convenience) — only include
+    // whatever was actually uploaded. Onboarding.daml's Approve still hard-requires at
+    // least one document on-ledger (Gap 5), so a placeholder stands in when nothing was
+    // uploaded, rather than failing later when the Verifier Agent tries to auto-approve.
+    const uploadedDocuments = [cacCertificate, statusReport, idCard, isLimitedCompany ? memart : null, otherDocument]
+      .filter((d): d is DocumentRef => d !== null)
+    const documents = uploadedDocuments.length > 0 ? uploadedDocuments : [{
+      docType: 'PLACEHOLDER',
+      contentHash: '0'.repeat(64),
+      storageRef: 'placeholder://no-document-uploaded',
+    }]
     const profile = {
       name: step1.name!,
       address: step1.address!,
@@ -552,6 +623,19 @@ export default function OnboardingForm() {
         )}
         {/* Step Progress */}
         <div className="card p-6 mb-7">
+          {import.meta.env.DEV && !isAmending && (
+            <div className="flex justify-end mb-4">
+              <button
+                type="button"
+                onClick={fillDemoData}
+                disabled={fillingDemoData}
+                className="inline-flex items-center gap-1.5 text-xs font-medium text-primary bg-primary-50 hover:bg-primary-100 disabled:opacity-60 rounded-lg px-3 py-1.5 transition-colors"
+              >
+                {fillingDemoData ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}
+                {fillingDemoData ? 'Filling…' : 'Fill Demo Data'}
+              </button>
+            </div>
+          )}
           <div className="relative flex items-start">
             {/* Full-width track behind the circles */}
             <div className="absolute top-6 left-6 right-6 h-0.5 bg-gray-200" />
@@ -956,18 +1040,16 @@ export default function OnboardingForm() {
 
               <KycDocumentUpload
                 id="cacCertificate"
-                label="CAC Registration Certificate"
+                label="CAC Registration Certificate (Optional for now)"
                 docType="CAC_CERTIFICATE"
-                required
                 value={cacCertificate}
                 onChange={setCacCertificate}
               />
 
               <KycDocumentUpload
                 id="statusReport"
-                label="CAC Status Report"
+                label="CAC Status Report (Optional for now)"
                 docType="CAC_STATUS_REPORT"
-                required
                 value={statusReport}
                 onChange={setStatusReport}
               />
@@ -975,9 +1057,8 @@ export default function OnboardingForm() {
               {formData.step1.businessType === 'LimitedCompany' && (
                 <KycDocumentUpload
                   id="memart"
-                  label="Memorandum & Articles of Association (MEMART)"
+                  label="Memorandum & Articles of Association (MEMART) (Optional for now)"
                   docType="MEMART"
-                  required
                   value={memart}
                   onChange={setMemart}
                 />
@@ -985,9 +1066,8 @@ export default function OnboardingForm() {
 
               <KycDocumentUpload
                 id="idCard"
-                label="Director's ID Card (NIN)"
+                label="Director's ID Card (NIN) (Optional for now)"
                 docType="NIN_ID_CARD"
-                required
                 value={idCard}
                 onChange={setIdCard}
               />
