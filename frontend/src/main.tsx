@@ -12,6 +12,12 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 30_000,
       retry: 1,
+      // Every page polls the ledger every 10s — this is a live multi-party
+      // workflow (staff, business, FI, advisor all acting on the same
+      // contracts from different sessions), so a page left open needs to
+      // pick up another party's action without a manual reload.
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: true,
     },
   },
 })
