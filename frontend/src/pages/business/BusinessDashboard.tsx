@@ -132,11 +132,19 @@ export default function BusinessDashboard() {
     : latestByDecidedAt(complianceResultList)?.outcome === 'Rejected'
       ? latestByDecidedAt(complianceResultList)
       : undefined
+  // Found live: a VerificationResult with outcome Approved falls into a second gap the
+  // comment above only partly covers — Approve archives BusinessOnboarding and creates
+  // VerificationResult synchronously, but ComplianceReview is created separately by the
+  // Verifier Agent's own follow-up call, not atomically by the same Daml choice. Whenever
+  // that follow-up hasn't run yet (agent pipeline lag, or not running at all), there is a
+  // real window where a business is genuinely "Stage 2 approved, Stage 3 not started" with
+  // no ComplianceReview/ComplianceResult/ApprovedBusiness to read from — previously this
+  // read as "No application yet" despite a real, approved verification existing. Only
+  // skipped once a live ComplianceReview/ComplianceResult exists (the checks above), same
+  // "most recent wins" precedent as complianceResult/underwritingRejection.
   const verificationResult = skipInterimQueries || complianceReview || complianceResult
     ? undefined
-    : latestByDecidedAt(verificationResultList)?.outcome === 'Rejected'
-      ? latestByDecidedAt(verificationResultList)
-      : undefined
+    : latestByDecidedAt(verificationResultList)
 
   const activeContract = contracts?.find((c) => c.status === 'Active')
 
@@ -216,7 +224,9 @@ export default function BusinessDashboard() {
     ? 3
     : complianceResult
     ? 3
-    : 2 // verificationResult (rejected)
+    : verificationResult!.outcome === 'Rejected'
+    ? 2
+    : 3 // verificationResult (approved, ComplianceReview not yet created)
   const displayName =
     latestContract?.businessName ??
     latestFinancingRequest?.businessName ??
