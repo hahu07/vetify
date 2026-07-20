@@ -791,6 +791,16 @@ export default function ComplianceReview() {
               </div>
 
               <div className="space-y-3">
+                {/* ApproveCompliance/RejectCompliance/FlagComplianceForManualReview all require
+                    status UnderReview or ManualReview on the ledger (Compliance.daml) — Pending
+                    means "Start Review" hasn't been clicked yet. Found live: these buttons used
+                    to be enabled regardless of status, so clicking Approve on a Pending review
+                    failed with a bare "Request failed with status code 422" and no explanation. */}
+                {review.status === 'Pending' && (
+                  <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    Click "Start Review" above before approving, rejecting, or flagging this case.
+                  </p>
+                )}
                 {needsOverrideJustification && (
                   <div>
                     <label htmlFor="overrideJustification" className="block text-xs font-medium text-gray-700 mb-1">
@@ -812,13 +822,13 @@ export default function ComplianceReview() {
                 {/* Approve */}
                 <button
                   onClick={handleApprove}
-                  disabled={!checks.amlCleared || !checks.kycValidated || approveCompliance.isPending || (!!eddCase && eddCase.status !== 'EddClosed')}
+                  disabled={review.status === 'Pending' || !checks.amlCleared || !checks.kycValidated || approveCompliance.isPending || (!!eddCase && eddCase.status !== 'EddClosed')}
                   className="w-full btn-primary flex items-center justify-center gap-2 disabled:opacity-40"
                 >
                   <CheckCircle2 size={15} />
                   {approveCompliance.isPending ? 'Approving…' : 'Approve Compliance'}
                 </button>
-                {(!checks.amlCleared || !checks.kycValidated) && (
+                {review.status !== 'Pending' && (!checks.amlCleared || !checks.kycValidated) && (
                   <p className="text-xs text-gray-500 text-center">
                     AML and KYC must be checked before approving
                   </p>
@@ -832,7 +842,8 @@ export default function ComplianceReview() {
                 {/* Reject */}
                 <button
                   onClick={() => setRejectModal(true)}
-                  className="w-full btn-danger flex items-center justify-center gap-2"
+                  disabled={review.status === 'Pending'}
+                  className="w-full btn-danger flex items-center justify-center gap-2 disabled:opacity-40"
                 >
                   <XCircle size={15} />
                   Reject Application
@@ -842,7 +853,7 @@ export default function ComplianceReview() {
                 {review.status !== 'ManualReview' && (
                   <button
                     onClick={handleFlag}
-                    disabled={flagCompliance.isPending}
+                    disabled={review.status === 'Pending' || flagCompliance.isPending}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 text-sm font-medium transition-colors disabled:opacity-40"
                   >
                     <AlertTriangle size={15} />
