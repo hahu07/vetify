@@ -1,0 +1,54 @@
+name: Refresh Canton devnet OIDC token
+
+# The Seaport devnet's OIDC token endpoint rejects Render's outbound IP
+# (invalid_grant, confirmed live 2026-07-20 — reads/writes to the ledger
+# otherwise work fine) but accepts requests from most other networks,
+# including GitHub's own Actions runners. This workflow mints a fresh
+# 8h-lived token from a runner and pushes it into Render's
+# CANTON_OIDC_STATIC_TOKEN env var (backend/src/canton-oidc.ts's escape
+# hatch), independent of any laptop or chat session staying open. Runs more
+# often than the 8h token lifetime so a single missed/failed run doesn't
+# leave the deployed app stuck on an expired token.
+#
+# Remove this workflow once Seaport/fivenorth allowlists the deployment's
+# real IP and CANTON_OIDC_STATIC_TOKEN is unset — canton-oidc.ts falls back
+# to its normal token-exchange-on-demand flow automatically at that point.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch a fresh access token and push it to Render
+        env:
+          CANTON_OIDC_CLIENT_SECRET: ${{ secrets.CANTON_OIDC_CLIENT_SECRET }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          set -euo pipefail
+
+          token=$(curl -sS -X POST 'https://auth.sandbox.fivenorth.io/application/o/token/' \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=client_credentials' \
+            --data-urlencode 'client_id=validator-devnet-m2m' \
+            --data-urlencode "client_secret=${CANTON_OIDC_CLIENT_SECRET}" \
+            --data-urlencode 'audience=validator-devnet-m2m' \
+            --data-urlencode 'scope=daml_ledger_api' \
+            | python3 -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
+
+          if [ -z "$token" ]; then
+            echo "::error::Token exchange returned empty — check CANTON_OIDC_CLIENT_SECRET"
+            exit 1
+          fi
+
+          curl -sS --fail-with-body -X PUT \
+            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/env-vars/CANTON_OIDC_STATIC_TOKEN" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header 'Content-Type: application/json' \
+            --data "{\"value\": \"${token}\"}"
+
+          echo "Token refreshed and pushed to Render."
