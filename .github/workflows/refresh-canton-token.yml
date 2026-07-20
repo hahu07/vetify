@@ -51,4 +51,13 @@ jobs:
             --header 'Content-Type: application/json' \
             --data "{\"value\": \"${token}\"}"
 
-          echo "Token refreshed and pushed to Render."
+          # Confirmed live: updating an env var via this API does NOT restart
+          # the running process on its own (process.env is read once at
+          # startup) — an explicit deploy trigger is required for the new
+          # token to actually take effect.
+          curl -sS --fail-with-body -X POST \
+            "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
+            --header "Authorization: Bearer ${RENDER_API_KEY}" \
+            --header 'Content-Type: application/json'
+
+          echo "Token refreshed, pushed to Render, and a deploy was triggered."
