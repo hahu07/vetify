@@ -75,8 +75,39 @@ async function fetchToken(): Promise<TokenCache> {
 
 /** Returns a cached token if it still has more than REFRESH_BUFFER_MS of life
  * left, otherwise fetches a fresh one. Concurrent callers during a refresh
- * share the same in-flight request rather than each firing their own. */
+ * share the same in-flight request rather than each firing their own.
+ *
+ * Emergency escape hatch: CANTON_OIDC_STATIC_TOKEN, set only when the token
+ * endpoint itself rejects this deployment's outbound IP (confirmed live,
+ * 2026-07-20, against the Render-hosted deploy — invalid_grant on every
+ * attempt from Render's network while identical credentials succeed from
+ * every other network tested). A token minted from a network the IdP does
+ * accept, pasted in as this env var, bypasses fetchToken() entirely. Time-
+ * bounded by the token's own `exp` — decoded here (not re-verified, we
+ * trust our own minting) purely so an expired paste fails loudly with a
+ * clear error instead of silently 403ing at the Ledger API layer. Remove
+ * once the IdP allowlists this deployment's IP. */
+const STATIC_TOKEN = process.env.CANTON_OIDC_STATIC_TOKEN;
+
+function decodeJwtExp(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+    const exp = JSON.parse(json).exp;
+    return typeof exp === "number" ? exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getOidcAccessToken(): Promise<string> {
+  if (STATIC_TOKEN) {
+    const exp = decodeJwtExp(STATIC_TOKEN);
+    if (exp !== null && exp < Date.now()) {
+      throw new Error("CANTON_OIDC_STATIC_TOKEN has expired — mint a fresh one and update the env var (or unset it to resume normal token exchange, once the IdP allows this deployment's IP).");
+    }
+    return STATIC_TOKEN;
+  }
   if (cache && cache.expiresAt - REFRESH_BUFFER_MS > Date.now()) {
     return cache.accessToken;
   }
