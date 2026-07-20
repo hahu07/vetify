@@ -563,7 +563,7 @@ export default function BusinessDashboard() {
                 </p>
               </>
             )}
-            {verificationResult && (
+            {verificationResult && verificationResult.outcome === 'Rejected' && (
               <>
                 <AlertTriangle size={14} className="text-red-500 flex-shrink-0" />
                 <p className="text-sm text-gray-600">
@@ -572,6 +572,18 @@ export default function BusinessDashboard() {
                     ? <>: <span className="text-gray-700">{verificationResult.note}</span></>
                     : '.'}{' '}
                   Contact support if you'd like to discuss reapplying.
+                </p>
+              </>
+            )}
+            {/* Same "identity verified, approved, compliance review not started yet" gap the
+                complianceReview block above already covers — this is the case where even that
+                ComplianceReview contract doesn't exist yet (see the verificationResult
+                derivation above the early-return check). */}
+            {verificationResult && verificationResult.outcome !== 'Rejected' && !complianceReview && (
+              <>
+                <Clock size={14} className="text-indigo-500 flex-shrink-0" />
+                <p className="text-sm text-gray-600">
+                  Identity verified — your application will move to compliance review shortly.
                 </p>
               </>
             )}
