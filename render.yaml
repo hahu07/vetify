@@ -81,4 +81,4 @@ services:
       - key: MONO_WEBHOOK_SECRET
         generateValue: true
       - key: CORS_ORIGIN
-        value: "*"
+        value: "https://vetify.onrender.com"
