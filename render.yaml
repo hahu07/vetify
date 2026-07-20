@@ -1,0 +1,81 @@
+databases:
+  - name: vetify-db
+    databaseName: vetify
+    user: vetify
+    plan: free
+
+services:
+  - type: web
+    name: vetify
+    runtime: node
+    plan: free
+    buildCommand: "cd frontend && npm install && npm run build && cd ../backend && npm install && npm run build"
+    startCommand: "cd backend && npm run start"
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: STRICT_CONFIG
+        value: "0"
+      - key: READS_VIA_LEDGER
+        value: "1"
+      - key: CANTON_LEDGER_URL
+        sync: false
+      - key: CANTON_OIDC_TOKEN_URL
+        sync: false
+      - key: CANTON_OIDC_CLIENT_ID
+        sync: false
+      - key: CANTON_OIDC_CLIENT_SECRET
+        sync: false
+      - key: CANTON_OIDC_AUDIENCE
+        sync: false
+      - key: CANTON_OIDC_SCOPE
+        sync: false
+      - key: CANTON_USER_ID
+        value: "6"
+      - key: CANTON_BUSINESS_PARTY_ID
+        sync: false
+      - key: CANTON_VETIFY_PARTY_ID
+        sync: false
+      - key: CANTON_VERIFIER_PARTY_ID
+        sync: false
+      - key: CANTON_ASSESSOR_PARTY_ID
+        sync: false
+      - key: CANTON_SENTINEL_PARTY_ID
+        sync: false
+      - key: CANTON_ADVISOR_PARTY_ID
+        sync: false
+      - key: CANTON_FI_PARTY_ID
+        sync: false
+      - key: CANTON_REGULATOR_PARTY_ID
+        sync: false
+      - key: CANTON_RISK_COMMITTEE_PARTY_ID
+        sync: false
+      - key: APP_POSTGRES_HOST
+        fromDatabase:
+          name: vetify-db
+          property: host
+      - key: APP_POSTGRES_PORT
+        fromDatabase:
+          name: vetify-db
+          property: port
+      - key: APP_POSTGRES_USER
+        fromDatabase:
+          name: vetify-db
+          property: user
+      - key: APP_POSTGRES_PASSWORD
+        fromDatabase:
+          name: vetify-db
+          property: password
+      - key: APP_POSTGRES_DATABASE
+        fromDatabase:
+          name: vetify-db
+          property: database
+      - key: SESSION_JWT_SECRET
+        generateValue: true
+      - key: MONO_WEBHOOK_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: "*"

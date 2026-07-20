@@ -5,6 +5,8 @@
  * server entry point).
  */
 import { randomUUID } from "node:crypto";
+import path from "node:path";
+import { existsSync } from "node:fs";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -173,6 +175,22 @@ export function buildApp() {
   // outside a non-production NODE_ENV. Never relax this gate.
   if (process.env.NODE_ENV !== "production") {
     app.use("/api/dev", requireAuth(), devRoutes);
+  }
+
+  // Single-service hosting (hackathon deploy): serve the built frontend from
+  // this same process when frontend/dist exists, so one Render/Fly/etc. web
+  // service covers both — no second static-site deployment, no cross-origin
+  // config, since the SPA's axios client defaults to a same-origin relative
+  // `/api` base URL. No-op locally where the frontend runs via its own Vite
+  // dev server instead. Registered after every /api/* route so an unmatched
+  // API path still 404s through errorHandler rather than serving index.html.
+  const frontendDist = path.resolve(import.meta.dirname, "../../frontend/dist");
+  if (existsSync(frontendDist)) {
+    app.use(express.static(frontendDist));
+    app.get("*", (req, res, next) => {
+      if (req.path.startsWith("/api/")) return next();
+      res.sendFile(path.join(frontendDist, "index.html"));
+    });
   }
 
   app.use(errorHandler);
