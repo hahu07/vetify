@@ -9,7 +9,10 @@ services:
     name: vetify
     runtime: node
     plan: free
-    buildCommand: "cd frontend && npm install && npm run build && cd ../backend && npm install && npm run build"
+    # --include=dev overrides npm's NODE_ENV=production-skips-devDependencies
+    # default — vite/typescript/@types/react etc. are devDependencies but are
+    # needed to actually run the build itself, not just at runtime.
+    buildCommand: "cd frontend && npm install --include=dev && npm run build && cd ../backend && npm install --include=dev && npm run build"
     startCommand: "cd backend && npm run start"
     healthCheckPath: /health
     envVars:
