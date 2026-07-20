@@ -270,12 +270,20 @@ router.post("/:contractId/approve", requireAuth("vetify"), async (req, res, next
       reviewerParty, reviewedBy, agentVersion, aiMetadata, verificationRef,
       overrideJustification, policyVersion, overrideType, reviewNotes,
     } = req.body;
+    // Fetched BEFORE Approve archives BusinessOnboarding — profile/businessSector/
+    // businessActivity/incorporationDate only live on this contract, not on the
+    // VerificationResult Approve creates, and are needed below to auto-create
+    // ComplianceReview (Gap: this manual/staff-portal path used to leave a business
+    // permanently stuck at "Stage 2 approved, Stage 3 never started" whenever the
+    // agents/ Supervisor wasn't running to do this itself — found live, 2026-07-20,
+    // against a real devnet submission manually approved via this route).
+    const onboarding = await getOnboardingById(req.params.contractId);
     // Human portal decisions (this route, session-gated) identify the reviewer from the
     // authenticated session rather than trusting the request body — same Layer 3 pattern as
     // the policy endorse/approve/reject routes. autoDecided=true (agent path) still allows an
     // explicit override, though this route is never called by the agent in practice.
     const policyCid = await getActivePolicyCid(T_VERIFICATION_POLICY);
-    res.json(await exerciseChoice(T_ONBOARDING, req.params.contractId, "Approve",
+    const result = await exerciseChoice(T_ONBOARDING, req.params.contractId, "Approve",
       {
         checks, riskScore, riskLevel, autoDecided, verificationRef,
         checkScores:           checkScores           ?? null,
@@ -288,7 +296,51 @@ router.post("/:contractId/approve", requireAuth("vetify"), async (req, res, next
         overrideType:          overrideType          ?? null,
         reviewNotes:           reviewNotes           ?? null,
         policyCid,
-      }, ["verifier", "vetify"]));
+      }, ["verifier", "vetify"]);
+
+    // Mirrors agents/src/agents/verifier.ts's "Phase D" (the agent's own auto-create,
+    // used when the Verifier Agent itself decides Approve) — same field mapping, so a
+    // business reads identically in the Compliance queue regardless of which path
+    // approved it. Best-effort: Approve already committed above, so a failure here
+    // (e.g. onboarding lookup raced Scribe) surfaces as a 200 with a queue gap rather
+    // than rolling back a real ledger approval — same tradeoff every other best-effort
+    // follow-up in this codebase makes (see setUserCacRegNumber's linkErr handling above).
+    let complianceReview: unknown = null;
+    if (onboarding) {
+      const profile = onboarding.payload.profile as Record<string, unknown> | undefined;
+      const kyc = onboarding.payload.kyc as Record<string, unknown> | undefined;
+      try {
+        complianceReview = await createContract(T_COMPLIANCE, {
+          business: onboarding.payload.business,
+          vetify: onboarding.payload.vetify,
+          verifier: onboarding.payload.verifier,
+          businessName: profile?.name ?? "",
+          cacRegNumber: kyc?.cacRegNumber ?? "",
+          businessSector: profile?.businessSector ?? "",
+          businessActivity: profile?.businessActivity ?? "",
+          incorporationDate: profile?.incorporationDate,
+          verificationRef,
+          complianceRef: `COM-${String(verificationRef ?? "").slice(4) || randomUUID().slice(0, 6).toUpperCase()}`,
+          status: "Pending",
+          checks: null,
+          agentScore: null,
+          agentRisk: null,
+          agentNote: null,
+          agentVersion: null,
+          createdAt: new Date().toISOString(),
+          reviewStartedAt: null,
+          compliancePolicyVersion: null,
+          policySnapshot: null,
+          createdBy: autoDecided ? "Verifier scoring engine (auto, post-Approve)" : `${req.authUser!.displayName} (manual, post-Approve)`,
+          shariahVerdict: null,
+          advisor: partyId("advisor"),
+        }, "vetify");
+      } catch (complianceErr) {
+        req.log?.error?.({ err: complianceErr }, "Auto-create ComplianceReview failed after Approve");
+      }
+    }
+
+    res.json({ ...result, complianceReview });
   } catch (e) { next(e); }
 });
 
