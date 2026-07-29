@@ -255,6 +255,9 @@ interface ApproveComplianceArgs {
   autoDecided: boolean;
   reviewerParty?: string | null;
   reviewedBy?: string | null;
+  // Sixteenth Slice: mandatory in the real Daml choice signature (not
+  // Optional) -- see migrations/019's header.
+  reviewerAuthId: number;
 }
 
 async function approveComplianceImpl(
@@ -298,6 +301,17 @@ async function approveComplianceImpl(
       throw new DomainError("Cannot approve: KYC not validated");
     if (!args.completedChecks.cddCompleted)
       throw new DomainError("Cannot approve: CDD not completed");
+
+    // The officer must be in the authorized reviewer registry -- checked
+    // inline against this same transaction, not governance.ts's own
+    // withTransaction-wrapped helpers, per the Ninth Slice's atomicity rule.
+    const { rows: reviewerRows } = await client.query(
+      "SELECT archived_at FROM authorized_reviewer WHERE id = $1",
+      [args.reviewerAuthId],
+    );
+    const reviewer = reviewerRows[0];
+    if (!reviewer) throw new DomainError("AuthorizedReviewer not found");
+    if (reviewer.archived_at) throw new DomainError("Reviewer is not active");
 
     const { rows: ab } = await client.query(
       `INSERT INTO approved_business
@@ -359,6 +373,7 @@ interface RejectComplianceArgs {
   reviewerParty?: string | null;
   reviewedBy?: string | null;
   reason: string;
+  reviewerAuthId: number;
 }
 
 async function rejectComplianceImpl(
@@ -384,6 +399,14 @@ async function rejectComplianceImpl(
     if (!args.autoDecided && !args.reviewerParty) {
       throw new DomainError("Human decisions require a reviewer party (reviewerParty)");
     }
+
+    const { rows: reviewerRows } = await client.query(
+      "SELECT archived_at FROM authorized_reviewer WHERE id = $1",
+      [args.reviewerAuthId],
+    );
+    const reviewer = reviewerRows[0];
+    if (!reviewer) throw new DomainError("AuthorizedReviewer not found");
+    if (reviewer.archived_at) throw new DomainError("Reviewer is not active");
 
     const { rows: cr } = await client.query(
       `INSERT INTO compliance_result

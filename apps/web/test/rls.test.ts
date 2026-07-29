@@ -1363,3 +1363,47 @@ test("shariah_verdict_correction: vetify can INSERT; the owning business can rea
     await client.query("ROLLBACK");
   }
 });
+// ─── Phase 2, Sixteenth Slice: AuthorizedReviewer ──────────────────────────
+// Each negative assertion gets its own isolated BEGIN/ROLLBACK -- a failed
+// statement poisons the rest of a Postgres transaction (the same trap the
+// Fourteenth Slice's pending_verification_policy test hit and documented;
+// see that entry in the design doc), so a rejects-then-continue shape in
+// one transaction block doesn't work here either.
+
+test("authorized_reviewer: a verifier session cannot INSERT", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("verifier");
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO authorized_reviewer (role, authorized_by) VALUES ('Compliance Officer', 'RLS Test')`,
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("authorized_reviewer: vetify can INSERT and UPDATE; verifier can read but not UPDATE", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO authorized_reviewer (role, authorized_by) VALUES ('Compliance Officer', 'RLS Test') RETURNING id`,
+    );
+    const reviewerId = insert.rows[0].id;
+
+    await setSession("verifier");
+    const asVerifier = await client.query("SELECT id FROM authorized_reviewer WHERE id = $1", [reviewerId]);
+    assert.equal(asVerifier.rows.length, 1);
+
+    await setSession("vetify");
+    const updated = await client.query(
+      "UPDATE authorized_reviewer SET archived_at = now() WHERE id = $1 RETURNING id",
+      [reviewerId],
+    );
+    assert.equal(updated.rows.length, 1);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, ChevronUp, UserPlus, BookOpen, ClipboardCheck, ShieldCheck, ScrollText } from "lucide-react";
+import { ChevronDown, ChevronUp, UserPlus, BookOpen, ClipboardCheck, ShieldCheck, ScrollText, FileSearch } from "lucide-react";
 import Layout from "@/components/Layout";
 import { useAuth } from "@/lib/auth/AuthContext";
 import {
@@ -9,6 +9,7 @@ import {
   useActiveSentinels, useRegisterSentinel, useDeactivateSentinel, useReactivateSentinel,
   useAdvisors, useRegisterAdvisor, useDeactivateAdvisor, useReactivateAdvisor,
   usePolicyApprovers, useRegisterPolicyApprover, useDeactivatePolicyApprover, useReactivatePolicyApprover,
+  useReviewers, useRegisterReviewer, useDeauthorizeReviewer,
 } from "@/lib/apiClient";
 
 // Ported in spirit from frontend/src/pages/vetify/Registries.tsx: same
@@ -307,6 +308,109 @@ function PolicyApproverSection() {
   );
 }
 
+function ReviewerRegisterForm({ onRegister, pending }: { onRegister: (role: string, authorizedBy: string) => Promise<void>; pending: boolean }) {
+  const [role, setRole] = useState("");
+  const [authorizedBy, setAuthorizedBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!role.trim() || !authorizedBy.trim()) {
+      setError("Both fields are required");
+      return;
+    }
+    try {
+      await onRegister(role, authorizedBy);
+      setRole("");
+      setAuthorizedBy("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to register");
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-2 gap-3 pt-3 border-t border-gray-100">
+      <input className="input text-sm" placeholder="Role" value={role} onChange={(e) => setRole(e.target.value)} />
+      <input className="input text-sm" placeholder="Authorized by" value={authorizedBy} onChange={(e) => setAuthorizedBy(e.target.value)} />
+      {error && <p className="text-xs text-red-600 col-span-2">{error}</p>}
+      <button onClick={handleSubmit} disabled={pending} className="btn-primary text-sm col-span-2 flex items-center justify-center gap-2 disabled:opacity-50">
+        <UserPlus size={14} />
+        Register Reviewer
+      </button>
+    </div>
+  );
+}
+
+// Sixteenth Slice: AuthorizedReviewer -- unlike the four registries above,
+// the real Daml template has only a one-way Deauthorize choice (no
+// Reactivate) and no separate identity field, so this section doesn't reuse
+// RegistryTable/RegisterForm (which both assume an identity column and a
+// reactivate path) -- a plain "Active"/"Deauthorized" table and a
+// role/authorizedBy-only form instead.
+function ReviewerSection() {
+  const { data: reviewers, isLoading } = useReviewers();
+  const register = useRegisterReviewer();
+  const deauthorize = useDeauthorizeReviewer();
+
+  return (
+    <CollapsibleSection
+      icon={<FileSearch size={15} className="text-primary" />}
+      title="Compliance Reviewer Registry"
+      description={
+        <>
+          Gates who may exercise <code className="font-mono">ApproveCompliance</code>/<code className="font-mono">RejectCompliance</code> as{" "}
+          <code className="font-mono">verifier</code>. One-way deauthorization only -- no reinstatement choice exists on the real Daml template.
+        </>
+      }
+    >
+      {isLoading ? (
+        <p className="text-xs text-gray-400">Loading…</p>
+      ) : (reviewers ?? []).length === 0 ? (
+        <p className="text-xs text-gray-400 py-2">No entries registered yet</p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Role</th>
+              <th>Authorized By</th>
+              <th>Status</th>
+              <th className="text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(reviewers ?? []).map((r) => (
+              <tr key={r.id}>
+                <td className="text-xs text-gray-600">{r.role}</td>
+                <td className="text-xs text-gray-500">{r.authorized_by}</td>
+                <td>
+                  <span className={`text-xs font-medium ${!r.archived_at ? "text-emerald-600" : "text-gray-400"}`}>
+                    {!r.archived_at ? "Active" : "Deauthorized"}
+                  </span>
+                </td>
+                <td className="text-right">
+                  {!r.archived_at && (
+                    <button
+                      onClick={() => deauthorize.mutate({ id: r.id, reason: "Deauthorized by admin" })}
+                      disabled={deauthorize.isPending}
+                      className="text-xs text-red-600 hover:underline disabled:opacity-50"
+                    >
+                      Deauthorize
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <ReviewerRegisterForm
+        pending={register.isPending}
+        onRegister={(role, authorizedBy) => register.mutateAsync({ role, authorizedBy })}
+      />
+    </CollapsibleSection>
+  );
+}
+
 export default function RegistriesPage() {
   const { user } = useAuth();
   return (
@@ -320,6 +424,7 @@ export default function RegistriesPage() {
         <SentinelSection />
         <AdvisorSection />
         <PolicyApproverSection />
+        <ReviewerSection />
       </div>
     </Layout>
   );

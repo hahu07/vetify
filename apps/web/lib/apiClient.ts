@@ -281,14 +281,16 @@ export function useApproveCompliance() {
       completedChecks,
       riskScore,
       riskLevel,
+      reviewerAuthId,
     }: {
       id: string;
       completedChecks: ComplianceCheck;
       riskScore: number;
       riskLevel: RiskLevel;
+      reviewerAuthId: number;
     }) =>
       apiClient
-        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false })
+        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false, reviewerAuthId })
         .then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
@@ -306,15 +308,17 @@ export function useRejectCompliance() {
       riskScore,
       riskLevel,
       reason,
+      reviewerAuthId,
     }: {
       id: string;
       completedChecks: ComplianceCheck;
       riskScore: number;
       riskLevel: RiskLevel;
       reason: string;
+      reviewerAuthId: number;
     }) =>
       apiClient
-        .post(`/compliance/${id}/reject`, { completedChecks, riskScore, riskLevel, autoDecided: false, reason })
+        .post(`/compliance/${id}/reject`, { completedChecks, riskScore, riskLevel, autoDecided: false, reason, reviewerAuthId })
         .then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
@@ -929,6 +933,38 @@ export function useReactivateAdvisor() {
     mutationFn: ({ id, reason, performedBy }: DeactivateReactivateArgs) =>
       apiClient.post(`/governance/advisors/${id}/reactivate`, { reason, performedBy }).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["advisors"] }),
+  });
+}
+
+// Phase 2, Sixteenth Slice: AuthorizedReviewer -- unlike the four registries
+// above, the real Daml template has only a one-way Deauthorize choice (no
+// Reactivate), so this registry carries archived_at instead of an active
+// boolean -- see migrations/019's header.
+export interface ReviewerEntry {
+  id: number;
+  role: string;
+  authorized_by: string;
+  authorized_at: string;
+  archived_at: string | null;
+}
+
+export function useReviewers() {
+  return useQuery({ queryKey: ["reviewers"], queryFn: async () => (await apiClient.get<ReviewerEntry[]>("/governance/reviewers")).data });
+}
+export function useRegisterReviewer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: { role: string; authorizedBy: string }) =>
+      apiClient.post("/governance/reviewers", payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["reviewers"] }),
+  });
+}
+export function useDeauthorizeReviewer() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
+      apiClient.post(`/governance/reviewers/${id}/deauthorize`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["reviewers"] }),
   });
 }
 

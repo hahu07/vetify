@@ -19,6 +19,7 @@ const registryTables = {
   assessor: "authorized_assessor",
   sentinel: "authorized_sentinel",
   advisor: "authorized_advisor",
+  reviewer: "authorized_reviewer",
 } as const;
 
 // ─── AuthorizedOfficer (financialInstitution's own staff registry) ────────
@@ -335,6 +336,42 @@ export async function requireActiveAdvisor(session: SessionContext, advisorId: n
     if (!rows[0] || !rows[0].active) throw new DomainError("Advisor is not active");
   });
 }
+
+// ─── AuthorizedReviewer (Phase 2, Sixteenth Slice) ─────────────────────────
+// Only a single one-way Deauthorize choice in the real Daml -- see
+// migrations/019's header for why this doesn't get a Reactivate the other
+// four registries above have.
+
+async function registerReviewerImpl(session: SessionContext, args: { role: string; authorizedBy: string }) {
+  if (!args.role) throw new DomainError("role must not be empty");
+  if (!args.authorizedBy) throw new DomainError("authorizedBy must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO authorized_reviewer (role, authorized_by, authorized_at)
+       VALUES ($1, $2, now()) RETURNING id`,
+      [args.role, args.authorizedBy],
+    );
+    return { id: rows[0].id };
+  });
+}
+export const registerReviewer = withAuthorization(["vetify"], registerReviewerImpl);
+
+async function deauthorizeReviewerImpl(session: SessionContext, id: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT archived_at FROM authorized_reviewer WHERE id = $1 FOR UPDATE", [id]);
+    const row = rows[0];
+    if (!row) throw new DomainError("AuthorizedReviewer not found");
+    if (row.archived_at) throw new DomainError("Reviewer is already deauthorized");
+
+    const { rows: updated } = await client.query(
+      `UPDATE authorized_reviewer SET archived_at = now() WHERE id = $1 RETURNING id, archived_at`,
+      [id],
+    );
+    return updated[0];
+  });
+}
+export const deauthorizeReviewer = withAuthorization(["vetify"], deauthorizeReviewerImpl);
 
 // ─── Reads ──────────────────────────────────────────────────────────────
 

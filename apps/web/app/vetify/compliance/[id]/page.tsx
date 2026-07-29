@@ -13,6 +13,7 @@ import {
   useRejectCompliance,
   useFlagComplianceForManualReview,
   useStartReview,
+  useReviewers,
 } from "@/lib/apiClient";
 import type { ComplianceCheck, RiskLevel } from "@/lib/apiClient";
 
@@ -65,10 +66,14 @@ export default function ComplianceReviewDetail() {
 
   const { data: queue, isLoading: loadingQueue } = useComplianceQueue();
   const { data: onboardingList } = useOnboardingList();
+  const { data: reviewers } = useReviewers();
   const approveCompliance = useApproveCompliance();
   const rejectCompliance = useRejectCompliance();
   const flagCompliance = useFlagComplianceForManualReview();
   const startReview = useStartReview();
+  const [reviewerAuthId, setReviewerAuthId] = useState<number | "">("");
+
+  const activeReviewers = (reviewers ?? []).filter((r) => !r.archived_at);
 
   const review = queue?.find((r) => r.id === id);
   const onboarding = onboardingList?.find((o) => o.kyc.cacRegNumber === review?.cacNumber);
@@ -95,8 +100,12 @@ export default function ComplianceReviewDetail() {
 
   const handleApprove = async () => {
     setActionError(null);
+    if (!reviewerAuthId) {
+      setActionError("Please select an authorized reviewer credential");
+      return;
+    }
     try {
-      await approveCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel });
+      await approveCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reviewerAuthId });
       router.push("/vetify/compliance");
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Failed to approve");
@@ -109,8 +118,12 @@ export default function ComplianceReviewDetail() {
       setActionError("Please provide a more detailed rejection reason");
       return;
     }
+    if (!reviewerAuthId) {
+      setActionError("Please select an authorized reviewer credential");
+      return;
+    }
     try {
-      await rejectCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reason: rejectReason });
+      await rejectCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reason: rejectReason, reviewerAuthId });
       router.push("/vetify/compliance");
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Failed to reject");
@@ -262,6 +275,23 @@ export default function ComplianceReviewDetail() {
 
               {user?.realRole === "verifier" && (
                 <div className="space-y-2">
+                  <div className="mb-2">
+                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                      Reviewer Credential <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      className="input text-sm"
+                      value={reviewerAuthId}
+                      onChange={(e) => setReviewerAuthId(e.target.value ? Number(e.target.value) : "")}
+                    >
+                      <option value="">Select…</option>
+                      {activeReviewers.map((r) => (
+                        <option key={r.id} value={r.id}>
+                          {r.role} (authorized by {r.authorized_by})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                   <button onClick={handleApprove} disabled={!canDecide || approveCompliance.isPending} className="btn-primary w-full disabled:opacity-40">
                     {approveCompliance.isPending ? "Approving…" : "Approve Compliance"}
                   </button>

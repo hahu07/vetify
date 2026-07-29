@@ -19,7 +19,7 @@ import {
   recordShariahPreCheck,
   supersedeShariahVerdict,
 } from "@/lib/domain/compliance";
-import { registerAdvisor } from "@/lib/domain/governance";
+import { registerAdvisor, registerReviewer, deauthorizeReviewer } from "@/lib/domain/governance";
 
 function verifierSession(): SessionContext {
   return { userId: 2, username: "test-verifier", displayName: "Test Verifier", partyRole: "verifier", cacRegNumber: null };
@@ -145,6 +145,7 @@ test("approveCompliance: withAuthorization rejects a non-verifier session", asyn
         riskLevel: "Low",
         autoDecided: false,
         reviewerParty: "verifier",
+        reviewerAuthId: 0,
       }),
     AuthorizationError,
   );
@@ -164,6 +165,7 @@ test("approveCompliance: risk score must be consistent with risk level", async (
           riskLevel: "Low", // but claims Low
           autoDecided: false,
           reviewerParty: "verifier",
+          reviewerAuthId: 0,
         }),
       (err: unknown) => err instanceof DomainError && err.message === "Risk score is inconsistent with risk level",
     );
@@ -186,6 +188,7 @@ test("approveCompliance: requires all four compliance checks to pass", async () 
           riskLevel: "Low",
           autoDecided: false,
           reviewerParty: "verifier",
+          reviewerAuthId: 0,
         }),
       (err: unknown) => err instanceof DomainError && err.message === "Cannot approve: Shariah compliance check failed",
     );
@@ -194,9 +197,33 @@ test("approveCompliance: requires all four compliance checks to pass", async () 
   }
 });
 
+test("approveCompliance: fails closed when reviewerAuthId is not a registered active reviewer", async () => {
+  const cac = "RC3000006A";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await startReview(vetifySession(), opened.id);
+    await assert.rejects(
+      () => approveCompliance(verifierSession(), opened.id, {
+        completedChecks: validChecks,
+        riskScore: 90,
+        riskLevel: "Low",
+        autoDecided: false,
+        reviewerParty: "verifier",
+        reviewerAuthId: 999999,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "AuthorizedReviewer not found",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
 test("approveCompliance: full happy path creates ApprovedBusiness + ComplianceResult and archives the review", async () => {
   const cac = "RC3000006";
+  const tag = "TEST-REVIEWER-3000006";
   try {
+    const reviewer = await registerReviewer(vetifySession(), { role: "Senior Compliance Officer", authorizedBy: tag });
     const verificationId = await makeApprovedVerification(cac);
     const opened = await openComplianceReview(vetifySession(), verificationId);
     await startReview(vetifySession(), opened.id);
@@ -206,6 +233,7 @@ test("approveCompliance: full happy path creates ApprovedBusiness + ComplianceRe
       riskLevel: "Low",
       autoDecided: false,
       reviewerParty: "verifier",
+      reviewerAuthId: reviewer.id,
     });
     assert.ok(result.approvedBusinessId);
     assert.ok(result.complianceResultId);
@@ -224,6 +252,7 @@ test("approveCompliance: full happy path creates ApprovedBusiness + ComplianceRe
     assert.equal(businessRows[0].status, "BusinessActive");
   } finally {
     await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_reviewer WHERE authorized_by = $1`, [tag]);
   }
 });
 
@@ -242,11 +271,63 @@ test("rejectCompliance: rejection reason must not be empty", async () => {
           autoDecided: false,
           reviewerParty: "verifier",
           reason: "",
+          reviewerAuthId: 0,
         }),
       (err: unknown) => err instanceof DomainError && err.message === "Rejection reason must not be empty",
     );
   } finally {
     await cleanup(cac);
+  }
+});
+
+test("rejectCompliance: fails closed when reviewerAuthId is not a registered active reviewer", async () => {
+  const cac = "RC3000007A";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await startReview(vetifySession(), opened.id);
+    await assert.rejects(
+      () => rejectCompliance(verifierSession(), opened.id, {
+        completedChecks: { shariahCompliant: false, amlCleared: true, kycValidated: true, cddCompleted: true },
+        riskScore: 20,
+        riskLevel: "High",
+        autoDecided: false,
+        reviewerParty: "verifier",
+        reason: "AML hit confirmed",
+        reviewerAuthId: 999999,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "AuthorizedReviewer not found",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("rejectCompliance: fails closed when the reviewer has been deauthorized", async () => {
+  const cac = "RC3000007B";
+  const tag = "TEST-REVIEWER-3000007B";
+  try {
+    const reviewer = await registerReviewer(vetifySession(), { role: "Compliance Officer", authorizedBy: tag });
+    await deauthorizeReviewer(vetifySession(), reviewer.id, { reason: "Left the company" });
+
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await startReview(vetifySession(), opened.id);
+    await assert.rejects(
+      () => rejectCompliance(verifierSession(), opened.id, {
+        completedChecks: { shariahCompliant: false, amlCleared: true, kycValidated: true, cddCompleted: true },
+        riskScore: 20,
+        riskLevel: "High",
+        autoDecided: false,
+        reviewerParty: "verifier",
+        reason: "AML hit confirmed",
+        reviewerAuthId: reviewer.id,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "Reviewer is not active",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_reviewer WHERE authorized_by = $1`, [tag]);
   }
 });
 
