@@ -76,6 +76,139 @@ async function startReviewImpl(session: SessionContext, reviewId: number) {
 }
 export const startReview = withAuthorization(["vetify"], startReviewImpl);
 
+// ─── Choice: RecordShariahPreCheck (advisor, vetify dual-controller) ──────
+// Phase 2, Fifteenth Slice. Records the decoupled Shariah Agent's (or a
+// human advisor's) verdict before StartReview picks up AML/KYB/CDD -- does
+// not transition status, mirroring the Daml original exactly. Gated by
+// requireActiveAdvisor's Postgres equivalent, checked inline against the
+// same client/transaction (not governance.ts's requireActiveAdvisor, which
+// opens its own withTransaction -- the atomicity-composition rule the Ninth
+// Slice's collections work established: a helper meant to compose inside an
+// existing transaction takes a client, never opens its own).
+
+interface ShariahAssessmentArgs {
+  verdict: "COMPLIANT" | "REQUIRES_REVIEW" | "NON_COMPLIANT";
+  activitiesScreened: string[];
+  prohibitedRevenuePct?: number | null;
+  aaoifiStandards: string[];
+  scholarDecision?: string | null;
+  rationale: string;
+}
+
+async function recordShariahPreCheckImpl(
+  session: SessionContext,
+  reviewId: number,
+  args: { verdict: ShariahAssessmentArgs; advisorId: number },
+) {
+  if (!args.verdict.rationale) throw new DomainError("rationale must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows: advisorRows } = await client.query(
+      "SELECT active FROM authorized_advisor WHERE id = $1",
+      [args.advisorId],
+    );
+    const advisor = advisorRows[0];
+    if (!advisor) throw new DomainError(`Advisor ${args.advisorId} not found`);
+    if (!advisor.active) throw new DomainError(`Advisor ${args.advisorId} is not active`);
+
+    const { rows } = await client.query(
+      "SELECT status, shariah_verdict FROM compliance_review WHERE id = $1 FOR UPDATE",
+      [reviewId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Compliance review not found");
+    if (row.status !== "Pending") {
+      throw new DomainError("Can only record a Shariah pre-check on a Pending review");
+    }
+    if (row.shariah_verdict != null) {
+      throw new DomainError("Shariah pre-check already recorded for this review");
+    }
+
+    const { rows: updated } = await client.query(
+      `UPDATE compliance_review
+         SET shariah_verdict = $2, shariah_activities_screened = $3, shariah_prohibited_revenue_pct = $4,
+             shariah_aaoifi_standards = $5, shariah_scholar_decision = $6, shariah_rationale = $7,
+             shariah_screened_at = now(), updated_at = now()
+         WHERE id = $1
+         RETURNING id, shariah_verdict, shariah_screened_at`,
+      [
+        reviewId, args.verdict.verdict, JSON.stringify(args.verdict.activitiesScreened),
+        args.verdict.prohibitedRevenuePct ?? null, JSON.stringify(args.verdict.aaoifiStandards),
+        args.verdict.scholarDecision ?? null, args.verdict.rationale,
+      ],
+    );
+    return updated[0];
+  });
+}
+export const recordShariahPreCheck = withAuthorization(["advisor", "vetify"], recordShariahPreCheckImpl);
+
+// ─── Choice: SupersedeShariahVerdict (vetify alone) ────────────────────────
+// Post-hoc audit correction mirroring VerificationResult/ComplianceResult's
+// own Supersede choices exactly, including the deliberate choice of
+// controller vetify alone: advisor made the original call and should not
+// unilaterally correct its own past decision. Usable regardless of
+// ComplianceReview.status (a documented correction for the record, not a
+// reversal of whatever already happened downstream). Nonconsuming in the
+// Daml original -- the review row itself is field-replaced (design doc §3's
+// "create this with" collapse rule), not archived.
+
+async function supersedeShariahVerdictImpl(
+  session: SessionContext,
+  reviewId: number,
+  args: { correctionRef: string; newVerdict: ShariahAssessmentArgs; reason: string; correctedBy: string },
+) {
+  if (!args.correctionRef) throw new DomainError("Correction reference must not be empty");
+  if (!args.reason) throw new DomainError("Correction reason must not be empty");
+  if (!args.correctedBy) throw new DomainError("correctedBy must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM compliance_review WHERE id = $1 FOR UPDATE",
+      [reviewId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Compliance review not found");
+    if (row.shariah_verdict == null) {
+      throw new DomainError("Cannot supersede a Shariah verdict that was never recorded");
+    }
+
+    const originalVerdict = {
+      verdict: row.shariah_verdict,
+      activitiesScreened: row.shariah_activities_screened ?? [],
+      prohibitedRevenuePct: row.shariah_prohibited_revenue_pct != null ? Number(row.shariah_prohibited_revenue_pct) : null,
+      aaoifiStandards: row.shariah_aaoifi_standards ?? [],
+      scholarDecision: row.shariah_scholar_decision,
+      rationale: row.shariah_rationale,
+    };
+
+    await client.query(
+      `UPDATE compliance_review
+         SET shariah_verdict = $2, shariah_activities_screened = $3, shariah_prohibited_revenue_pct = $4,
+             shariah_aaoifi_standards = $5, shariah_scholar_decision = $6, shariah_rationale = $7,
+             shariah_screened_at = now(), updated_at = now()
+         WHERE id = $1`,
+      [
+        reviewId, args.newVerdict.verdict, JSON.stringify(args.newVerdict.activitiesScreened),
+        args.newVerdict.prohibitedRevenuePct ?? null, JSON.stringify(args.newVerdict.aaoifiStandards),
+        args.newVerdict.scholarDecision ?? null, args.newVerdict.rationale,
+      ],
+    );
+
+    const { rows: correction } = await client.query(
+      `INSERT INTO shariah_verdict_correction
+         (compliance_review_id, business_name, cac_reg_number, compliance_ref, original_verdict,
+          correction_ref, corrected_verdict, reason, corrected_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        reviewId, row.business_name, row.cac_reg_number, row.compliance_ref, JSON.stringify(originalVerdict),
+        args.correctionRef, JSON.stringify(args.newVerdict), args.reason, args.correctedBy,
+      ],
+    );
+
+    return { shariahVerdictCorrectionId: correction[0].id };
+  });
+}
+export const supersedeShariahVerdict = withAuthorization(["vetify"], supersedeShariahVerdictImpl);
+
 // ─── Choice: FlagComplianceForManualReview (vetify) ────────────────────────
 
 async function flagComplianceForManualReviewImpl(

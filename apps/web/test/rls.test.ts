@@ -1273,3 +1273,93 @@ test("pending_compliance_policy: vetify can INSERT; both vetify and riskCommitte
     await client.query("ROLLBACK");
   }
 });
+// ─── Phase 2, Fifteenth Slice: Shariah pre-check on ComplianceReview ───────
+
+async function buildComplianceReviewFixture(cac: string, complianceRef: string): Promise<number> {
+  await setSession("business", cac);
+  const onboarding = await client.query(
+    `INSERT INTO business_onboarding (cac_reg_number, profile, kyc, documents, onboarding_ref)
+     VALUES ($1, '{}', '{}', '[]', $2) RETURNING id`,
+    [cac, `REF-${complianceRef}`],
+  );
+  await setSession("verifier");
+  const verification = await client.query(
+    `INSERT INTO verification_result
+       (business_onboarding_id, cac_reg_number, business_name, checks, risk_score,
+        risk_level, outcome, auto_decided, verification_ref, decided_at)
+     VALUES ($1, $2, 'Test Co', '{}', 90, 'Low', 'Approved', false, $3, now())
+     RETURNING id`,
+    [onboarding.rows[0].id, cac, `VER-${complianceRef}`],
+  );
+  await setSession("vetify");
+  const review = await client.query(
+    `INSERT INTO compliance_review
+       (verification_result_id, cac_reg_number, business_name, business_sector,
+        business_activity, incorporation_date, verification_ref, compliance_ref)
+     VALUES ($1, $2, 'Test Co', 'Retail', 'Retail', '2020-01-01', $3, $4)
+     RETURNING id`,
+    [verification.rows[0].id, cac, `VER-${complianceRef}`, complianceRef],
+  );
+  return review.rows[0].id;
+}
+
+test("compliance_review: an advisor session can read and UPDATE (RecordShariahPreCheck's real write pattern)", async () => {
+  await client.query("BEGIN");
+  try {
+    const reviewId = await buildComplianceReviewFixture("RLSTEST-A", "COM-RLS-SHARIAH-1");
+
+    await setSession("advisor");
+    const asAdvisor = await client.query("SELECT id FROM compliance_review WHERE id = $1", [reviewId]);
+    assert.equal(asAdvisor.rows.length, 1);
+
+    const updated = await client.query(
+      "UPDATE compliance_review SET shariah_verdict = 'COMPLIANT' WHERE id = $1 RETURNING id",
+      [reviewId],
+    );
+    assert.equal(updated.rows.length, 1);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("shariah_verdict_correction: only a vetify session can INSERT; vetify/verifier/business/advisor can read", async () => {
+  await client.query("BEGIN");
+  try {
+    const reviewId = await buildComplianceReviewFixture("RLSTEST-A", "COM-RLS-SHARIAH-2");
+
+    await setSession("advisor");
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO shariah_verdict_correction
+           (compliance_review_id, business_name, cac_reg_number, compliance_ref, original_verdict, correction_ref, corrected_verdict, reason, corrected_by)
+         VALUES ($1, 'Test Co', 'RLSTEST-A', 'COM-RLS-SHARIAH-2', '{}', 'COR-1', '{}', 'test', 'Ops')`,
+        [reviewId],
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("shariah_verdict_correction: vetify can INSERT; the owning business can read", async () => {
+  await client.query("BEGIN");
+  try {
+    const reviewId = await buildComplianceReviewFixture("RLSTEST-A", "COM-RLS-SHARIAH-3");
+
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO shariah_verdict_correction
+         (compliance_review_id, business_name, cac_reg_number, compliance_ref, original_verdict, correction_ref, corrected_verdict, reason, corrected_by)
+       VALUES ($1, 'Test Co', 'RLSTEST-A', 'COM-RLS-SHARIAH-3', '{}', 'COR-2', '{}', 'test', 'Ops')
+       RETURNING id`,
+      [reviewId],
+    );
+    const correctionId = insert.rows[0].id;
+
+    await setSession("business", "RLSTEST-A");
+    const asOwner = await client.query("SELECT id FROM shariah_verdict_correction WHERE id = $1", [correctionId]);
+    assert.equal(asOwner.rows.length, 1);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});

@@ -16,13 +16,19 @@ import {
   approveCompliance,
   rejectCompliance,
   flagComplianceForManualReview,
+  recordShariahPreCheck,
+  supersedeShariahVerdict,
 } from "@/lib/domain/compliance";
+import { registerAdvisor } from "@/lib/domain/governance";
 
 function verifierSession(): SessionContext {
   return { userId: 2, username: "test-verifier", displayName: "Test Verifier", partyRole: "verifier", cacRegNumber: null };
 }
 function vetifySession(): SessionContext {
   return { userId: 3, username: "test-vetify", displayName: "Test Vetify", partyRole: "vetify", cacRegNumber: null };
+}
+function advisorSession(): SessionContext {
+  return { userId: 6, username: "test-advisor", displayName: "Test Advisor", partyRole: "advisor", cacRegNumber: null };
 }
 
 
@@ -277,3 +283,144 @@ test("flagComplianceForManualReview: withAuthorization rejects a non-vetify sess
     AuthorizationError,
   );
 });
+// ─── RecordShariahPreCheck / SupersedeShariahVerdict (Phase 2, Fifteenth Slice) ──
+
+async function cleanupAdvisor(tag: string) {
+  await fixtureClient.query(`DELETE FROM authorized_advisor WHERE authorized_by = $1`, [tag]);
+}
+
+const validShariahVerdict = {
+  verdict: "COMPLIANT" as const,
+  activitiesScreened: ["Retail sale of textiles"],
+  aaoifiStandards: ["Std No. 8"],
+  rationale: "Retail trade is a permissible-sector activity per the keyword table.",
+};
+
+test("recordShariahPreCheck: fails closed when the advisor is not a registered active advisor", async () => {
+  const cac = "RC6000001";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await assert.rejects(
+      () => recordShariahPreCheck(advisorSession(), opened.id, { verdict: validShariahVerdict, advisorId: 999999 }),
+      (err: unknown) => err instanceof DomainError && err.message === "Advisor 999999 not found",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("recordShariahPreCheck: only advisor or vetify sessions may call", async () => {
+  await assert.rejects(
+    () => recordShariahPreCheck(verifierSession(), 1, { verdict: validShariahVerdict, advisorId: 1 }),
+    AuthorizationError,
+  );
+});
+
+test("recordShariahPreCheck: can only record on a Pending review, and only once", async () => {
+  const cac = "RC6000002";
+  const tag = "TEST-ADVISOR-6000002";
+  try {
+    const advisor = await registerAdvisor(vetifySession(), { advisor: "Sheikh Test", role: "SSB Member", authorizedBy: tag });
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+
+    const recorded = await recordShariahPreCheck(advisorSession(), opened.id, { verdict: validShariahVerdict, advisorId: advisor.id });
+    assert.equal(recorded.shariah_verdict, "COMPLIANT");
+
+    await assert.rejects(
+      () => recordShariahPreCheck(advisorSession(), opened.id, { verdict: validShariahVerdict, advisorId: advisor.id }),
+      (err: unknown) => err instanceof DomainError && err.message === "Shariah pre-check already recorded for this review",
+    );
+
+    // Moving off Pending (via startReview) should also block a fresh attempt.
+    const cac2 = "RC6000002B";
+    const verificationId2 = await makeApprovedVerification(cac2);
+    const opened2 = await openComplianceReview(vetifySession(), verificationId2);
+    await startReview(vetifySession(), opened2.id);
+    await assert.rejects(
+      () => recordShariahPreCheck(advisorSession(), opened2.id, { verdict: validShariahVerdict, advisorId: advisor.id }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only record a Shariah pre-check on a Pending review",
+    );
+    await cleanup(cac2);
+  } finally {
+    await cleanup(cac);
+    await cleanupAdvisor(tag);
+  }
+});
+
+test("supersedeShariahVerdict: cannot supersede a verdict that was never recorded", async () => {
+  const cac = "RC6000003";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await assert.rejects(
+      () => supersedeShariahVerdict(vetifySession(), opened.id, {
+        correctionRef: "COR-1", newVerdict: validShariahVerdict, reason: "typo fix", correctedBy: "Ops",
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "Cannot supersede a Shariah verdict that was never recorded",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("supersedeShariahVerdict: only a vetify session may call (advisor cannot correct its own verdict)", async () => {
+  await assert.rejects(
+    () => supersedeShariahVerdict(advisorSession(), 1, {
+      correctionRef: "COR-1", newVerdict: validShariahVerdict, reason: "test", correctedBy: "Ops",
+    }),
+    AuthorizationError,
+  );
+});
+
+test("full lifecycle: recordShariahPreCheck -> supersedeShariahVerdict creates a correction record and updates the live verdict", async () => {
+  const cac = "RC6000004";
+  const tag = "TEST-ADVISOR-6000004";
+  try {
+    const advisor = await registerAdvisor(vetifySession(), { advisor: "Sheikh Test 2", role: "SSB Member", authorizedBy: tag });
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await recordShariahPreCheck(advisorSession(), opened.id, { verdict: validShariahVerdict, advisorId: advisor.id });
+
+    const correctedVerdict = {
+      verdict: "REQUIRES_REVIEW" as const,
+      activitiesScreened: ["Retail sale of textiles", "Ancillary consulting services"],
+      aaoifiStandards: ["Std No. 8", "Std No. 28"],
+      rationale: "Reassessed: ancillary consulting revenue share was not screened in the original pass.",
+    };
+    const correction = await supersedeShariahVerdict(vetifySession(), opened.id, {
+      correctionRef: "COR-2026-001",
+      newVerdict: correctedVerdict,
+      reason: "Original screening missed a secondary business line",
+      correctedBy: "Amina Compliance Lead",
+    });
+    assert.ok(correction.shariahVerdictCorrectionId);
+
+    const { rows: reviewRows } = await fixtureClient.query(
+      "SELECT shariah_verdict, shariah_rationale FROM compliance_review WHERE id = $1",
+      [opened.id],
+    );
+    assert.equal(reviewRows[0].shariah_verdict, "REQUIRES_REVIEW");
+    assert.equal(reviewRows[0].shariah_rationale, correctedVerdict.rationale);
+
+    const { rows: correctionRows } = await fixtureClient.query(
+      "SELECT original_verdict, corrected_verdict, correction_ref FROM shariah_verdict_correction WHERE id = $1",
+      [correction.shariahVerdictCorrectionId],
+    );
+    assert.equal(correctionRows[0].original_verdict.verdict, "COMPLIANT");
+    assert.equal(correctionRows[0].corrected_verdict.verdict, "REQUIRES_REVIEW");
+    assert.equal(correctionRows[0].correction_ref, "COR-2026-001");
+  } finally {
+    // Must run before cleanup(cac) -- shariah_verdict_correction has a FK
+    // into compliance_review, which cleanup(cac) deletes.
+    await fixtureClient.query(
+      `DELETE FROM shariah_verdict_correction WHERE compliance_review_id IN
+         (SELECT id FROM compliance_review WHERE cac_reg_number = $1)`,
+      [cac],
+    );
+    await cleanup(cac);
+    await cleanupAdvisor(tag);
+  }
+});
+
