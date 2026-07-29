@@ -1771,3 +1771,136 @@ export function useForfeitDeposit() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["hamish-jiddiyyah"] }),
   });
 }
+// ─── Phase 2, Eleventh/Twelfth Slice: Stage 0 (FinancingProviderOnboarding) ──
+
+export type ProviderType =
+  | "CBNLicensedNIFI" | "SECFundManager" | "PenComPensionManager" | "CooperativeSociety"
+  | "InvestmentClub" | "WaqfFund" | "ZakatFund" | "Philanthropy";
+export type FinancingInstrument = "Murabahah" | "Ijarah" | "QardHasan";
+
+export interface ProviderOnboarding {
+  id: string;
+  providerName: string;
+  address: string;
+  cacRegNumber: string;
+  providerType: ProviderType;
+  regulatoryBody?: string;
+  licenseNumber?: string;
+  governingDocRef: DocumentRef;
+  declaredInstruments: FinancingInstrument[];
+  status: ReviewStatus | "PendingAmendment";
+  submittedAt?: string;
+  amendmentCount: number;
+  agentScore?: number;
+  agentRisk?: RiskLevel;
+  agentNote?: string;
+  agentVersion?: string;
+}
+
+export interface ApprovedProviderEntry {
+  id: string;
+  financingProviderOnboardingId: string;
+  providerName: string;
+  providerType: ProviderType;
+  regulatoryBody?: string;
+  licenseNumber?: string;
+  approvedInstruments: FinancingInstrument[];
+  approvedAt: string;
+  regulator?: string;
+}
+
+export function useProviderOnboardings() {
+  return useQuery({ queryKey: ["providers"], queryFn: async () => (await apiClient.get<ProviderOnboarding[]>("/providers")).data });
+}
+
+export function useApprovedProviders() {
+  return useQuery({ queryKey: ["approved-providers"], queryFn: async () => (await apiClient.get<ApprovedProviderEntry[]>("/providers/approved")).data });
+}
+
+export interface CreateProviderPayload {
+  providerName: string;
+  address: string;
+  cacRegNumber: string;
+  providerType: ProviderType;
+  regulatoryBody?: string | null;
+  licenseNumber?: string | null;
+  governingDocRef: DocumentRef;
+  declaredInstruments: FinancingInstrument[];
+}
+
+export function useCreateProviderOnboarding() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: CreateProviderPayload) => apiClient.post("/providers", payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useSubmitProviderForReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.post(`/providers/${id}/submit`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useAmendProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, ...rest
+    }: {
+      id: string; updatedProviderName: string; updatedAddress: string; updatedCacRegNumber: string;
+      updatedLicenseNumber?: string | null; updatedGoverningDocRef: DocumentRef; updatedDeclaredInstruments: FinancingInstrument[];
+    }) => apiClient.post(`/providers/${id}/amend`, rest).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useRecordProviderScore() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, score, risk, note, version }: { id: string; score: number; risk: RiskLevel; note?: string; version: string }) =>
+      apiClient.post(`/providers/${id}/score`, { score, risk, note, version }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useFlagProviderForManualReview() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, score, risk, note }: { id: string; score: number; risk: RiskLevel; note: string }) =>
+      apiClient.post(`/providers/${id}/flag`, { score, risk, note, version: "manual-review" }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useRequestProviderAmendment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiClient.post(`/providers/${id}/request-amendment`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}
+
+export function useApproveProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, approvedInstruments, regulator }: { id: string; approvedInstruments: FinancingInstrument[]; regulator?: string | null }) =>
+      apiClient.post(`/providers/${id}/approve`, { approvedInstruments, regulator }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["providers"] });
+      qc.invalidateQueries({ queryKey: ["approved-providers"] });
+    },
+  });
+}
+
+export function useRejectProvider() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/providers/${id}/reject`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
+  });
+}

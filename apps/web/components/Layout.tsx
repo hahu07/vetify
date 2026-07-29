@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   FileText, Shield, Menu, X, ChevronRight, LogOut, Users, TrendingUp, ClipboardCheck, Landmark,
-  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel,
+  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel, Building2,
 } from "lucide-react";
 import { useAuth, ROLE_DASHBOARD, type UserRole } from "@/lib/auth/AuthContext";
 
@@ -38,10 +38,12 @@ const roleNav: Record<UserRole, NavItem[]> = {
     { label: "Collateral Oversight", path: "/vetify/collateral", icon: <Lock size={16} /> },
     { label: "Dispute Resolution", path: "/vetify/disputes", icon: <Gavel size={16} /> },
     { label: "Registries", path: "/vetify/registries", icon: <KeyRound size={16} /> },
+    { label: "Provider Registrations", path: "/vetify/providers", icon: <Building2 size={16} /> },
     { label: "Portfolio Reports", path: "/vetify/reports", icon: <FileBarChart size={16} /> },
   ],
   financialInstitution: [
     { label: "Financing Decisions", path: "/fi/financing", icon: <Landmark size={16} /> },
+    { label: "Provider Registration", path: "/fi/provider-registration", icon: <Building2 size={16} /> },
     { label: "Asset Acquisition", path: "/fi/acquisition", icon: <Package size={16} /> },
     { label: "Contracts", path: "/fi/contracts", icon: <BookOpen size={16} /> },
     { label: "Officer Registry", path: "/fi/officers", icon: <KeyRound size={16} /> },

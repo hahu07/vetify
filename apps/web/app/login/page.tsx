@@ -6,11 +6,19 @@ import { useRouter } from "next/navigation";
 import { Eye, EyeOff, ArrowLeft, Loader2 } from "lucide-react";
 import axios from "axios";
 import { useQueryClient } from "@tanstack/react-query";
+import { ROLE_DASHBOARD, type RealRole, type UserRole } from "@/lib/auth/AuthContext";
 
 // Adapted from frontend/src/pages/LoginPage.tsx: email -> username (this
 // slice's users table has no email column), MFA step and signup link
 // dropped (not in Phase 1 scope), demo credentials hint updated to the
 // three seeded accounts (npm run seed).
+
+// Duplicates AuthContext.tsx's inline role-derivation logic rather than
+// exporting/sharing it -- that version lives inline in a query callback, not
+// as a standalone function.
+function toUserRole(partyRole: RealRole): UserRole {
+  return partyRole === "business" ? "business" : partyRole === "financialInstitution" ? "financialInstitution" : partyRole === "regulator" ? "regulator" : "vetify";
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -28,11 +36,7 @@ export default function LoginPage() {
     try {
       const { data } = await axios.post("/api/auth/login", { username, password });
       queryClient.clear();
-      if (data.partyRole === "business") {
-        router.push("/business/onboarding");
-      } else {
-        router.push("/vetify/onboarding");
-      }
+      router.push(ROLE_DASHBOARD[toUserRole(data.partyRole)]);
       router.refresh();
     } catch (err) {
       if (axios.isAxiosError(err) && err.response) {
