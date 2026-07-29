@@ -72,6 +72,60 @@ jobs:
       # threshold in case this package's exception profile diverges again.
       - run: npm audit --audit-level=high
 
+  web:
+    # apps/web (web2-migration branch): the Postgres/Next.js rewrite, kept
+    # entirely separate from the Canton/Daml stack above. Needs a real
+    # Postgres service (not just typecheck+unit) since check-rls-symmetry.ts
+    # reads pg_policies and the domain function tests exercise real
+    # withTransaction/RLS round-trips against it -- see
+    # docs/web2-migration-design.md's own "last mile" note calling for this
+    # wiring once real git history existed.
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: apps/web } }
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: vetify_web
+          POSTGRES_PASSWORD: vetify_web
+          POSTGRES_DB: vetify_web
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # WEB_POSTGRES_* is this Postgres image's own superuser bootstrap role
+      # (migrations/002_app_role.sql's own header explains why migrations
+      # must run as this role, never the app). APP_POSTGRES_* is
+      # deliberately left unset -- lib/db.ts and test/rls.test.ts both
+      # default to the NOSUPERUSER/NOBYPASSRLS role migration 002 creates
+      # ('vetify_web_app'), which is exactly what should be exercised here.
+      WEB_POSTGRES_HOST: localhost
+      WEB_POSTGRES_PORT: 5434
+      WEB_POSTGRES_DATABASE: vetify_web
+      WEB_POSTGRES_USER: vetify_web
+      WEB_POSTGRES_PASSWORD: vetify_web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: apps/web/package-lock.json }
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run migrate
+      - name: check:rls + check:routes + tests
+        run: npm run check
+      # Known exception, not a silent gap (same disclosure style as
+      # frontend's/backend's own audit steps below): as of the Eighteenth
+      # Slice, `npm audit` reports 3 high-severity findings (postcss, sharp)
+      # transitively pulled in by next@16.2.12; the only fix available is a
+      # breaking downgrade to next@9.x, not worth taking for this. Enforcing
+      # at --audit-level=critical (none present today) rather than =high
+      # until that's revisited.
+      - run: npm audit --audit-level=critical
+
   daml:
     # Requires a self-hosted runner with dpm preinstalled — see header comment.
     if: ${{ vars.DAML_CI_ENABLED == 'true' }}
