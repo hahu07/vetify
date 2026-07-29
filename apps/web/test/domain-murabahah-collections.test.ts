@@ -30,6 +30,7 @@ import {
   cancelMandate,
   recordCollectionAttempt,
   recordRecoveryPayment,
+  writeOffContract,
   createGsmInvocation,
   recordGsmSweep,
   cancelGsm,
@@ -106,6 +107,10 @@ async function cleanup(cac: string) {
     [cac],
   );
   await fixtureClient.query(
+    `DELETE FROM write_off_record WHERE murabahah_contract_id IN (SELECT id FROM murabahah_contract WHERE cac_reg_number = $1)`,
+    [cac],
+  );
+  await fixtureClient.query(
     `DELETE FROM direct_debit_collection_attempt WHERE murabahah_contract_id IN (SELECT id FROM murabahah_contract WHERE cac_reg_number = $1)`,
     [cac],
   );
@@ -176,6 +181,14 @@ async function registerActiveSentinel(tag: string): Promise<number> {
     [tag],
   );
   return rows[0].id;
+}
+
+async function registerOfficer(officerId: string, role: string): Promise<void> {
+  await fixtureClient.query(
+    `INSERT INTO authorized_officer (officer_id, officer_name, roles, authorized_by, authorized_at, active)
+     VALUES ($1, $2, $3, 'Test Setup', now(), true)`,
+    [officerId, `Test ${role}`, JSON.stringify([role])],
+  );
 }
 
 async function buildDefaultedContractFixture(cac: string, facilityRef: string, tag: string): Promise<number> {
@@ -378,6 +391,85 @@ test("recordRecoveryPayment: rejects an amount exceeding the outstanding balance
   } finally {
     await cleanup(cac);
     await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+// ─── writeOffContract ───────────────────────────────────────────────────────
+
+test("writeOffContract: rejects on a non-Defaulted contract", async () => {
+  const cac = "RC8300011";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await assert.rejects(
+      () => writeOffContract(fiSession(), contractId, {
+        writeOffDate: "2026-06-01", writeOffRef: "WO-1", totalRecovered: 0,
+        writeOffApprovedBy: "Test RiskOfficer", proposedByOfficerId: "REC-1", confirmedByOfficerId: "RISK-1",
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only write off a Defaulted contract",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("writeOffContract: writeOffApprovedBy must match the confirming officer's registered name", async () => {
+  const cac = "RC8300012";
+  const tag = "TEST-SENTINEL-COLLECTIONS-3";
+  const recoveryOfficerId = "REC-8300012";
+  const riskOfficerId = "RISK-8300012";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    await assert.rejects(
+      () => writeOffContract(fiSession(), contractId, {
+        writeOffDate: "2026-06-01", writeOffRef: "WO-1", totalRecovered: 0,
+        writeOffApprovedBy: "Someone Else", proposedByOfficerId: recoveryOfficerId, confirmedByOfficerId: riskOfficerId,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "writeOffApprovedBy must match the confirming officer's registered name",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [recoveryOfficerId, riskOfficerId]);
+  }
+});
+
+test("writeOffContract: happy path -- four-eyes RecoveryOfficer/RiskOfficer writes off the residual balance", async () => {
+  const cac = "RC8300013";
+  const tag = "TEST-SENTINEL-COLLECTIONS-4";
+  const recoveryOfficerId = "REC-8300013";
+  const riskOfficerId = "RISK-8300013";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    await recordRecoveryPayment(fiSession(), contractId, { amountRecovered: 50_000, recoveryDate: "2026-05-01", recoverySource: "VOLUNTARY" });
+
+    const result = await writeOffContract(fiSession(), contractId, {
+      writeOffDate: "2026-06-01",
+      writeOffRef: "WO-2026-001",
+      totalRecovered: 50_000,
+      writeOffApprovedBy: "Test RiskOfficer",
+      proposedByOfficerId: recoveryOfficerId,
+      confirmedByOfficerId: riskOfficerId,
+    });
+    assert.ok(result.writeOffRecordId);
+
+    const { rows: contract } = await fixtureClient.query("SELECT status, outstanding_balance FROM murabahah_contract WHERE id = $1", [contractId]);
+    assert.equal(contract[0].status, "Completed");
+    assert.equal(Number(contract[0].outstanding_balance), 0);
+
+    const { rows: record } = await fixtureClient.query(
+      "SELECT total_recovered, amount_written_off, write_off_ref FROM write_off_record WHERE id = $1",
+      [result.writeOffRecordId],
+    );
+    assert.equal(Number(record[0].total_recovered), 50_000);
+    assert.equal(record[0].write_off_ref, "WO-2026-001");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [recoveryOfficerId, riskOfficerId]);
   }
 });
 

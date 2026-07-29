@@ -716,6 +716,16 @@ The first slice to reach into the ~52-template remainder rather than close a nam
 
 **Net**: the first dent in the ~52-template remainder. What's left, unchanged in shape from every prior "Net" note: the much larger body of narrower audit/correction/exception records and alternate-path choices elsewhere in the schema, now with three fewer entries.
 
+## Phase 2, Twenty-Second Slice — WriteOffContract (Closes the Default → Recovery → Write-Off Lifecycle)
+
+Closes out a lifecycle two earlier slices left one step short: `default_record` (Fifth Slice) and `recovery_payment_record` (Ninth Slice, `recordRecoveryPayment`) were both already ported, but `MurabahahContract.WriteOffContract` — the terminal step that formally writes off the residual balance after recovery is exhausted — was still missing. One template ported (`WriteOffRecord`), 49 templates now ported total.
+
+**Reuses the shared `checkFourEyes()` helper directly, not a new copy.** `GrantIbra`/`ReleaseCollateral`/`EnforceCollateral` already established the segregation-of-duties pattern this choice needs (a proposing officer and a distinct confirming officer, each checked against a specific required role via the `AuthorizedOfficer` registry) — `WriteOffContract` calls the exact same `checkFourEyes(client, proposedByOfficerId, "RecoveryOfficer", confirmedByOfficerId, "RiskOfficer")` `EnforceCollateral` already uses for the identical role pair, rather than re-deriving the checks inline. One thing the shared helper doesn't cover, added inline here: the real Daml choice also asserts `writeOffApprovedBy == confirmer.officerName` — the same "supplied name must match the registered officer's own name" check `ApproveFunding` already applies (Thirteenth Slice).
+
+**Verified**: `npx tsc --noEmit` clean. `npm run check` — 265/265 tests passing (3 new in `test/domain-murabahah-collections.test.ts`, alongside `recordRecoveryPayment`'s own tests: status guard, the registered-name mismatch check, and a full happy path confirming `status → Completed`, `outstanding_balance → 0`, and a `write_off_record` with every field intact), RLS symmetry clean (55 tables), route coverage clean (148 exports). **Not live-verified via API this pass** — no `Defaulted` `MurabahahContract` existed in the freshly-provisioned local Postgres, and reconstructing the full acquisition-through-default chain via live API calls (financing request → underwriting → funding → Wad/Wakala → asset purchase → delivery → proposal → Shariah certification → acceptance → flag delinquent → default) was disproportionate for a backend-only pass already covered by three tests exercising the real domain function against the same live database, not mocks.
+
+**Net**: the second dent in the ~52-template remainder — one more narrower record closed.
+
 ## Overall Readiness Assessment — Phase 1 + Four Phase 2 Slices
 
 Requested as a step back after five backend slices and five matching frontend passes. Numbers first, then the honest read against addendum C's original gate criteria.
