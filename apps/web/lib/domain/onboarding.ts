@@ -489,6 +489,59 @@ async function rejectImpl(session: SessionContext, onboardingId: number, args: R
 }
 export const reject = withAuthorization(["verifier", "vetify"], rejectImpl);
 
+// ─── Choice: Supersede on VerificationResult (vetify) ──────────────────────
+// Phase 2, Twenty-First Slice. Consuming in the real Daml ("archives this
+// VerificationResult and creates an immutable VerificationCorrection audit
+// record") -- unlike ComplianceResult's own Supersede (nonconsuming, both
+// rows coexist), so this one sets archived_at rather than just inserting a
+// correction row. correctedBy is Party in the real Daml signature -- ported
+// as a plain string, the same "individual human, not a genuine multi-tenant
+// Canton party" collapse this migration applies everywhere else.
+
+interface SupersedeVerificationResultArgs {
+  correctionRef: string;
+  correctedOutcome: "Approved" | "Rejected";
+  reason: string;
+  correctedBy: string;
+}
+
+async function supersedeVerificationResultImpl(
+  session: SessionContext,
+  verificationResultId: number,
+  args: SupersedeVerificationResultArgs,
+) {
+  if (!args.reason) throw new DomainError("Correction reason must not be empty");
+  if (!args.correctionRef) throw new DomainError("Correction reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM verification_result WHERE id = $1 FOR UPDATE",
+      [verificationResultId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Verification result not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO verification_correction
+         (verification_result_id, business_name, cac_reg_number, original_ref, original_outcome,
+          correction_ref, corrected_outcome, reason, corrected_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        verificationResultId, row.business_name, row.cac_reg_number, row.verification_ref, row.outcome,
+        args.correctionRef, args.correctedOutcome, args.reason, args.correctedBy,
+      ],
+    );
+
+    await client.query(
+      "UPDATE verification_result SET archived_at = now() WHERE id = $1",
+      [verificationResultId],
+    );
+
+    return { verificationCorrectionId: created[0].id };
+  });
+}
+export const supersedeVerificationResult = withAuthorization(["vetify"], supersedeVerificationResultImpl);
+
 // ─── Reads ──────────────────────────────────────────────────────────────
 // RLS (not an application-level filter) is what actually scopes these --
 // the WHERE-less SELECT below relies entirely on the business_onboarding_select
