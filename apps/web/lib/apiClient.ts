@@ -282,15 +282,17 @@ export function useApproveCompliance() {
       riskScore,
       riskLevel,
       reviewerAuthId,
+      eddCaseId,
     }: {
       id: string;
       completedChecks: ComplianceCheck;
       riskScore: number;
       riskLevel: RiskLevel;
       reviewerAuthId: number;
+      eddCaseId?: number | null;
     }) =>
       apiClient
-        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false, reviewerAuthId })
+        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false, reviewerAuthId, eddCaseId: eddCaseId ?? null })
         .then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
@@ -324,6 +326,64 @@ export function useRejectCompliance() {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
       qc.invalidateQueries({ queryKey: ["compliance-results"] });
     },
+  });
+}
+
+// ─── Phase 2, Twentieth Slice: EDDCase (G14) checklist UI ──────────────────
+// Raw row shape matches lib/domain/compliance.ts's SELECT * -- snake_case,
+// same pre-existing convention every other registry/case row already has.
+
+export interface EddCaseEntry {
+  id: number;
+  compliance_review_id: number;
+  business_name: string;
+  cac_reg_number: string;
+  trigger_reason: string;
+  source_of_wealth_verified: boolean;
+  source_of_wealth_note: string | null;
+  enhanced_media_search_done: boolean;
+  senior_management_signoff: string | null;
+  monitoring_frequency: string | null;
+  status: "EddOpen" | "EddClosed";
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+}
+
+export function useEddCases() {
+  return useQuery({ queryKey: ["edd-cases"], queryFn: async () => (await apiClient.get<EddCaseEntry[]>("/edd-cases")).data });
+}
+export function useOpenEddCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ reviewId, triggerReason }: { reviewId: string; triggerReason: string }) =>
+      apiClient.post(`/compliance/${reviewId}/open-edd-case`, { triggerReason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
+  });
+}
+export function useUpdateEddChecklist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...fields
+    }: {
+      id: number;
+      sourceOfWealthVerified?: boolean | null;
+      sourceOfWealthNote?: string | null;
+      enhancedMediaSearchDone?: boolean | null;
+      seniorManagementSignoff?: string | null;
+      monitoringFrequency?: string | null;
+    }) => apiClient.post(`/edd-cases/${id}/update-checklist`, fields).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
+  });
+}
+export function useCloseEddCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, closedBy }: { id: number; closedBy: string }) =>
+      apiClient.post(`/edd-cases/${id}/close`, { closedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
   });
 }
 
@@ -846,6 +906,161 @@ export function useReactivatePolicyApprover() {
     mutationFn: ({ id, reason, performedBy }: DeactivateReactivateArgs) =>
       apiClient.post(`/governance/policy-approvers/${id}/reactivate`, { reason, performedBy }).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["policy-approvers"] }),
+  });
+}
+
+// ─── Phase 2, Nineteenth Slice: VerificationPolicy/CompliancePolicy governance UI ──
+// Raw row shapes match lib/domain/policy.ts's SELECT * -- snake_case, same
+// pre-existing inconsistency governance registry rows already have (no
+// camelCase serializer exists for either).
+
+export interface VerificationPolicyEntry {
+  id: number;
+  max_amendments: number;
+  sla_hours: number;
+  auto_approve_min: number;
+  auto_reject_max: number;
+  required_doc_types: string[];
+  policy_version: string;
+  scoring_weights: Record<string, number>;
+  created_at: string;
+  archived_at: string | null;
+}
+
+export interface PendingVerificationPolicyEntry extends VerificationPolicyEntry {
+  proposed_by: string;
+  reason: string;
+  proposed_at: string;
+  risk_committee_endorsed_by: string | null;
+  risk_committee_endorsed_at: string | null;
+}
+
+export interface CompliancePolicyEntry {
+  id: number;
+  auto_approve_min: number;
+  auto_reject_max: number;
+  escalation_sla_hours: number;
+  shariah_policy_version: string;
+  policy_version: string;
+  effective_from: string;
+  effective_to: string | null;
+  scoring_weights: Record<string, number>;
+  created_at: string;
+  archived_at: string | null;
+}
+
+export interface PendingCompliancePolicyEntry extends CompliancePolicyEntry {
+  proposed_by: string;
+  reason: string;
+  proposed_at: string;
+  risk_committee_endorsed_by: string | null;
+  risk_committee_endorsed_at: string | null;
+}
+
+export interface ProposeVerificationPolicyPayload {
+  maxAmendments: number;
+  slaHours: number;
+  autoApproveMin: number;
+  autoRejectMax: number;
+  requiredDocTypes: string[];
+  policyVersion: string;
+  scoringWeights: Record<string, number>;
+  proposedBy: string;
+  reason: string;
+}
+
+export interface ProposeCompliancePolicyPayload {
+  autoApproveMin: number;
+  autoRejectMax: number;
+  escalationSlaHours: number;
+  shariahPolicyVersion: string;
+  policyVersion: string;
+  effectiveFrom: string;
+  effectiveTo?: string | null;
+  scoringWeights: Record<string, number>;
+  proposedBy: string;
+  reason: string;
+}
+
+export function useVerificationPolicies() {
+  return useQuery({ queryKey: ["verification-policies"], queryFn: async () => (await apiClient.get<VerificationPolicyEntry[]>("/policy/verification")).data });
+}
+export function usePendingVerificationPolicies() {
+  return useQuery({ queryKey: ["pending-verification-policies"], queryFn: async () => (await apiClient.get<PendingVerificationPolicyEntry[]>("/policy/verification/pending")).data });
+}
+export function useProposeVerificationPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ProposeVerificationPolicyPayload) => apiClient.post("/policy/verification", payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-verification-policies"] }),
+  });
+}
+export function useEndorseVerificationPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, endorsedBy }: { id: number; endorsedBy: string }) =>
+      apiClient.post(`/policy/verification/${id}/endorse`, { endorsedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-verification-policies"] }),
+  });
+}
+export function useApproveVerificationPolicyChange() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, approvedBy }: { id: number; approvedBy: string }) =>
+      apiClient.post(`/policy/verification/${id}/approve`, { approvedBy }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-verification-policies"] });
+      qc.invalidateQueries({ queryKey: ["verification-policies"] });
+    },
+  });
+}
+export function useRejectVerificationPolicyChange() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, rejectedBy, rejectionReason }: { id: number; rejectedBy: string; rejectionReason: string }) =>
+      apiClient.post(`/policy/verification/${id}/reject`, { rejectedBy, rejectionReason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-verification-policies"] }),
+  });
+}
+
+export function useCompliancePolicies() {
+  return useQuery({ queryKey: ["compliance-policies"], queryFn: async () => (await apiClient.get<CompliancePolicyEntry[]>("/policy/compliance")).data });
+}
+export function usePendingCompliancePolicies() {
+  return useQuery({ queryKey: ["pending-compliance-policies"], queryFn: async () => (await apiClient.get<PendingCompliancePolicyEntry[]>("/policy/compliance/pending")).data });
+}
+export function useProposeCompliancePolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: ProposeCompliancePolicyPayload) => apiClient.post("/policy/compliance", payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-compliance-policies"] }),
+  });
+}
+export function useEndorseCompliancePolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, endorsedBy }: { id: number; endorsedBy: string }) =>
+      apiClient.post(`/policy/compliance/${id}/endorse`, { endorsedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-compliance-policies"] }),
+  });
+}
+export function useApproveCompliancePolicyChange() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, approvedBy }: { id: number; approvedBy: string }) =>
+      apiClient.post(`/policy/compliance/${id}/approve`, { approvedBy }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-compliance-policies"] });
+      qc.invalidateQueries({ queryKey: ["compliance-policies"] });
+    },
+  });
+}
+export function useRejectCompliancePolicyChange() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, rejectedBy, rejectionReason }: { id: number; rejectedBy: string; rejectionReason: string }) =>
+      apiClient.post(`/policy/compliance/${id}/reject`, { rejectedBy, rejectionReason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-compliance-policies"] }),
   });
 }
 

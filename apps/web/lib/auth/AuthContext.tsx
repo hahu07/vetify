@@ -19,9 +19,16 @@ import axios from "axios";
  * `regulator` (added for the Reporting slice) gets its own bucket too: a
  * genuinely distinct, read-only supervisory observer, never "vetify's own
  * team" the way verifier/assessor/sentinel are.
+ * `riskCommittee` (added for the Nineteenth Slice's policy-governance UI)
+ * gets its own bucket too, same reasoning as `regulator` -- CLAUDE.md's own
+ * framing is that it's genuinely independent of `vetify`, not "vetify's own
+ * team" the way verifier/assessor/sentinel/advisor are (advisor still maps
+ * onto the vetify bucket above only because the real frontend never gave it
+ * a separate portal either -- that reasoning doesn't apply to riskCommittee,
+ * which never had a real-frontend precedent to begin with).
  */
-export type UserRole = "business" | "vetify" | "financialInstitution" | "regulator";
-export type RealRole = "business" | "vetify" | "verifier" | "assessor" | "financialInstitution" | "advisor" | "sentinel" | "regulator";
+export type UserRole = "business" | "vetify" | "financialInstitution" | "regulator" | "riskCommittee";
+export type RealRole = "business" | "vetify" | "verifier" | "assessor" | "financialInstitution" | "advisor" | "sentinel" | "regulator" | "riskCommittee";
 
 export interface User {
   name: string;
@@ -35,6 +42,7 @@ export const ROLE_DASHBOARD: Record<UserRole, string> = {
   vetify: "/vetify/onboarding",
   financialInstitution: "/fi/financing",
   regulator: "/regulator/reports",
+  riskCommittee: "/riskcommittee/policies",
 };
 
 interface AuthContextValue {
@@ -60,6 +68,7 @@ const ROLE_ORG: Record<RealRole, string> = {
   advisor: "Vetify Platform",
   financialInstitution: "Financial Institution Portal",
   regulator: "Regulator Portal",
+  riskCommittee: "Risk Committee Portal",
 };
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -86,7 +95,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               ? "financialInstitution"
               : session.partyRole === "regulator"
                 ? "regulator"
-                : "vetify",
+                : session.partyRole === "riskCommittee"
+                  ? "riskCommittee"
+                  : "vetify",
         realRole: session.partyRole,
       }
     : null;

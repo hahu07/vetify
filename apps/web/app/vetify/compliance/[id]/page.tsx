@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ChevronLeft, Building, User, FileSearch } from "lucide-react";
+import { ChevronLeft, Building, User, FileSearch, ShieldAlert } from "lucide-react";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -14,16 +14,21 @@ import {
   useFlagComplianceForManualReview,
   useStartReview,
   useReviewers,
+  useEddCases,
+  useOpenEddCase,
+  useUpdateEddChecklist,
+  useCloseEddCase,
+  type EddCaseEntry,
 } from "@/lib/apiClient";
 import type { ComplianceCheck, RiskLevel } from "@/lib/apiClient";
 
 // Trimmed port of frontend/src/pages/compliance/ComplianceReview.tsx. Dropped
-// for this Phase 1 slice (no backend support): EDD case management,
-// assign/reassign officer, Shariah verdict Supersede, EscalateOverdue --
-// none of those choices exist in this slice's backend (see
-// migrations/001_stage1_4_vertical_slice.sql's scope note). The RiskGauge,
-// business-info panel, and reviewer checklist + approve/reject/flag actions
-// are kept.
+// for this Phase 1 slice (no backend support): assign/reassign officer,
+// Shariah verdict Supersede, EscalateOverdue -- none of those choices exist
+// in this slice's backend (see migrations/001_stage1_4_vertical_slice.sql's
+// scope note). The RiskGauge, business-info panel, and reviewer checklist +
+// approve/reject/flag actions are kept. EDD case management (G14, Twentieth
+// Slice) was added back in once its backend landed (Seventeenth Slice).
 
 function RiskGauge({ score }: { score: number }) {
   const circumference = 2 * Math.PI * 40;
@@ -54,6 +59,175 @@ function RiskGauge({ score }: { score: number }) {
 
 const DEFAULT_CHECKS: ComplianceCheck = { shariahCompliant: false, amlCleared: false, kycValidated: false, cddCompleted: false };
 
+// G14 (Seventeenth/Twentieth Slice): OpenEddCase is vetify-controlled and
+// nonconsuming (doesn't itself change status); UpdateEddChecklist/
+// CloseEddCase are verifier-controlled. A review has at most one live EDD
+// case in practice (nothing in this UI re-opens a closed one), so this
+// section renders either an "open a case" action or the one case's
+// checklist, never a list.
+function EddCaseSection({ reviewId, realRole }: { reviewId: string; realRole?: string }) {
+  const { data: allCases } = useEddCases();
+  const openCase = useOpenEddCase();
+  const updateChecklist = useUpdateEddChecklist();
+  const closeCase = useCloseEddCase();
+  const { user } = useAuth();
+
+  const [showOpen, setShowOpen] = useState(false);
+  const [triggerReason, setTriggerReason] = useState("");
+  const [sourceOfWealthNote, setSourceOfWealthNote] = useState("");
+  const [seniorManagementSignoff, setSeniorManagementSignoff] = useState("");
+  const [monitoringFrequency, setMonitoringFrequency] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const eddCase: EddCaseEntry | undefined = (allCases ?? []).find((c) => String(c.compliance_review_id) === reviewId);
+
+  const handleOpen = async () => {
+    setError(null);
+    if (triggerReason.trim().length < 5) {
+      setError("Please describe why enhanced due diligence is needed");
+      return;
+    }
+    try {
+      await openCase.mutateAsync({ reviewId, triggerReason });
+      setShowOpen(false);
+      setTriggerReason("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to open EDD case");
+    }
+  };
+
+  const handleToggle = async (field: "sourceOfWealthVerified" | "enhancedMediaSearchDone", value: boolean) => {
+    if (!eddCase) return;
+    setError(null);
+    try {
+      await updateChecklist.mutateAsync({ id: eddCase.id, [field]: value });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to update checklist");
+    }
+  };
+
+  const handleSaveNotes = async () => {
+    if (!eddCase) return;
+    setError(null);
+    try {
+      await updateChecklist.mutateAsync({
+        id: eddCase.id,
+        sourceOfWealthNote: sourceOfWealthNote || undefined,
+        seniorManagementSignoff: seniorManagementSignoff || undefined,
+        monitoringFrequency: monitoringFrequency || undefined,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save");
+    }
+  };
+
+  const handleClose = async () => {
+    if (!eddCase) return;
+    setError(null);
+    try {
+      await closeCase.mutateAsync({ id: eddCase.id, closedBy: user?.name ?? "Verifier" });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to close EDD case");
+    }
+  };
+
+  if (!eddCase) {
+    if (realRole !== "vetify") return null;
+    return (
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-2">
+          <ShieldAlert size={15} className="text-amber-600" />
+          <h2 className="text-sm font-semibold text-gray-700">Enhanced Due Diligence (G14)</h2>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          Open an EDD case when this review surfaces a PEP hit -- gates <code className="font-mono">ApproveCompliance</code> until
+          the checklist is complete.
+        </p>
+        {!showOpen ? (
+          <button onClick={() => setShowOpen(true)} className="btn-secondary text-xs px-3 py-1.5">Open EDD Case</button>
+        ) : (
+          <div className="space-y-2">
+            <textarea rows={2} value={triggerReason} onChange={(e) => setTriggerReason(e.target.value)} className="input resize-none text-xs" placeholder="e.g. PEP hit on director during KYC screening" />
+            <div className="flex gap-2">
+              <button onClick={() => setShowOpen(false)} className="btn-secondary text-xs px-3 py-1.5 flex-1">Cancel</button>
+              <button onClick={handleOpen} disabled={openCase.isPending} className="btn-primary text-xs px-3 py-1.5 flex-1 disabled:opacity-50">
+                {openCase.isPending ? "Opening…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+        {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      </div>
+    );
+  }
+
+  const canEdit = realRole === "verifier" && eddCase.status === "EddOpen";
+  const allComplete =
+    eddCase.source_of_wealth_verified &&
+    eddCase.enhanced_media_search_done &&
+    eddCase.senior_management_signoff != null &&
+    eddCase.monitoring_frequency != null;
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <ShieldAlert size={15} className="text-amber-600" />
+          <h2 className="text-sm font-semibold text-gray-700">Enhanced Due Diligence (G14)</h2>
+        </div>
+        <span className={`text-xs font-medium ${eddCase.status === "EddClosed" ? "text-emerald-600" : "text-amber-600"}`}>
+          {eddCase.status === "EddClosed" ? "Closed" : "Open"}
+        </span>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">{eddCase.trigger_reason}</p>
+
+      <label className="flex items-center justify-between py-2 border-b border-gray-100 cursor-pointer">
+        <span className="text-xs text-gray-700">Source of wealth verified</span>
+        <input
+          type="checkbox"
+          className="w-4 h-4 accent-primary"
+          checked={eddCase.source_of_wealth_verified}
+          disabled={!canEdit}
+          onChange={(e) => handleToggle("sourceOfWealthVerified", e.target.checked)}
+        />
+      </label>
+      <label className="flex items-center justify-between py-2 border-b border-gray-100 cursor-pointer">
+        <span className="text-xs text-gray-700">Enhanced media search done</span>
+        <input
+          type="checkbox"
+          className="w-4 h-4 accent-primary"
+          checked={eddCase.enhanced_media_search_done}
+          disabled={!canEdit}
+          onChange={(e) => handleToggle("enhancedMediaSearchDone", e.target.checked)}
+        />
+      </label>
+
+      {canEdit ? (
+        <div className="space-y-2 mt-3">
+          <input className="input text-xs" placeholder="Source of wealth note" defaultValue={eddCase.source_of_wealth_note ?? ""} onChange={(e) => setSourceOfWealthNote(e.target.value)} />
+          <input className="input text-xs" placeholder="Senior management sign-off (name)" defaultValue={eddCase.senior_management_signoff ?? ""} onChange={(e) => setSeniorManagementSignoff(e.target.value)} />
+          <input className="input text-xs" placeholder="Monitoring frequency (e.g. quarterly)" defaultValue={eddCase.monitoring_frequency ?? ""} onChange={(e) => setMonitoringFrequency(e.target.value)} />
+          <button onClick={handleSaveNotes} disabled={updateChecklist.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50">
+            {updateChecklist.isPending ? "Saving…" : "Save Notes"}
+          </button>
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1 text-xs text-gray-600">
+          {eddCase.senior_management_signoff && <p>Sign-off: {eddCase.senior_management_signoff}</p>}
+          {eddCase.monitoring_frequency && <p>Monitoring: {eddCase.monitoring_frequency}</p>}
+        </div>
+      )}
+
+      {canEdit && (
+        <button onClick={handleClose} disabled={!allComplete || closeCase.isPending} className="btn-primary text-xs px-3 py-1.5 mt-3 w-full disabled:opacity-40">
+          {closeCase.isPending ? "Closing…" : allComplete ? "Close EDD Case" : "Complete all fields to close"}
+        </button>
+      )}
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 export default function ComplianceReviewDetail() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -67,6 +241,7 @@ export default function ComplianceReviewDetail() {
   const { data: queue, isLoading: loadingQueue } = useComplianceQueue();
   const { data: onboardingList } = useOnboardingList();
   const { data: reviewers } = useReviewers();
+  const { data: eddCases } = useEddCases();
   const approveCompliance = useApproveCompliance();
   const rejectCompliance = useRejectCompliance();
   const flagCompliance = useFlagComplianceForManualReview();
@@ -77,6 +252,11 @@ export default function ComplianceReviewDetail() {
 
   const review = queue?.find((r) => r.id === id);
   const onboarding = onboardingList?.find((o) => o.kyc.cacRegNumber === review?.cacNumber);
+  // Always threaded through to ApproveCompliance when a case exists for
+  // this review, regardless of status -- omitting it whenever the case is
+  // still Open would silently bypass the G14 gate instead of triggering
+  // the "must be Closed" error a verifier needs to see.
+  const eddCase = (eddCases ?? []).find((c) => review && String(c.compliance_review_id) === review.id);
 
   const [checks, setChecks] = useState<ComplianceCheck>(DEFAULT_CHECKS);
   const [riskScore, setRiskScore] = useState(review?.agentScore ?? 85);
@@ -105,7 +285,7 @@ export default function ComplianceReviewDetail() {
       return;
     }
     try {
-      await approveCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reviewerAuthId });
+      await approveCompliance.mutateAsync({ id: review.id, completedChecks: checks, riskScore, riskLevel, reviewerAuthId, eddCaseId: eddCase?.id ?? null });
       router.push("/vetify/compliance");
     } catch (e) {
       setActionError(e instanceof Error ? e.message : "Failed to approve");
@@ -267,6 +447,8 @@ export default function ComplianceReviewDetail() {
                 </div>
               </div>
             </div>
+
+            <EddCaseSection reviewId={review.id} realRole={user?.realRole} />
           </div>
 
           <div className="space-y-4">
