@@ -547,3 +547,50 @@ export function serializeHamishJiddiyyah(row: Record<string, unknown>) {
     status: row.status,
   };
 }
+
+// ─── Phase 2, Eleventh Slice: Stage 0 (FinancingProviderOnboarding) ───────
+
+export function serializeProviderOnboarding(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    providerName: row.provider_name,
+    address: row.address,
+    cacRegNumber: row.cac_reg_number,
+    providerType: row.provider_type,
+    regulatoryBody: row.regulatory_body ?? undefined,
+    licenseNumber: row.license_number ?? undefined,
+    governingDocRef: row.governing_doc_ref,
+    declaredInstruments: row.declared_instruments ?? [],
+    status: row.status,
+    submittedAt: row.submitted_at ?? undefined,
+    amendmentCount: row.amendment_count,
+    agentScore: row.agent_score ?? undefined,
+    agentRisk: row.agent_risk ?? undefined,
+    agentNote: row.agent_note ?? undefined,
+    agentVersion: row.agent_version ?? undefined,
+  };
+}
+
+export function serializeApprovedProvider(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingProviderOnboardingId: String(row.financing_provider_onboarding_id),
+    providerName: row.provider_name,
+    providerType: row.provider_type,
+    regulatoryBody: row.regulatory_body ?? undefined,
+    licenseNumber: row.license_number ?? undefined,
+    approvedInstruments: row.approved_instruments ?? [],
+    approvedAt: row.approved_at,
+    regulator: row.regulator ?? undefined,
+  };
+}
+
+export function serializeProviderVerificationPolicy(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    policyVersion: row.policy_version,
+    autoRejectMax: row.auto_reject_max,
+    effectiveFrom: row.effective_from,
+    scoringWeights: row.scoring_weights,
+  };
+}

@@ -1021,3 +1021,135 @@ test("hamish_jiddiyyah: vetify/financialInstitution and the owning business can 
     await client.query("ROLLBACK");
   }
 });
+// ─── Phase 2, Eleventh Slice: Stage 0 (FinancingProviderOnboarding) ───────
+
+test("financing_provider_onboarding: only a financialInstitution session can INSERT", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO financing_provider_onboarding
+           (provider_name, address, cac_reg_number, provider_type, governing_doc_ref, declared_instruments)
+         VALUES ('Test Provider', 'Lagos', 'RLSTEST-PROV-A', 'CooperativeSociety', '{}', '["Murabahah"]')`,
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("financing_provider_onboarding: vetify and financialInstitution can read; a business cannot", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("financialInstitution");
+    const insert = await client.query(
+      `INSERT INTO financing_provider_onboarding
+         (provider_name, address, cac_reg_number, provider_type, governing_doc_ref, declared_instruments)
+       VALUES ('Test Provider', 'Lagos', 'RLSTEST-PROV-B', 'CooperativeSociety', '{}', '["Murabahah"]')
+       RETURNING id`,
+    );
+    const providerId = insert.rows[0].id;
+
+    await setSession("vetify");
+    const asVetify = await client.query("SELECT id FROM financing_provider_onboarding WHERE id = $1", [providerId]);
+    assert.equal(asVetify.rows.length, 1);
+
+    await setSession("business", "RLSTEST-A");
+    const asBusiness = await client.query("SELECT id FROM financing_provider_onboarding WHERE id = $1", [providerId]);
+    assert.equal(asBusiness.rows.length, 0);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("approved_provider: only a vetify session can INSERT", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("financialInstitution");
+    const onboarding = await client.query(
+      `INSERT INTO financing_provider_onboarding
+         (provider_name, address, cac_reg_number, provider_type, governing_doc_ref, declared_instruments)
+       VALUES ('Test Provider', 'Lagos', 'RLSTEST-PROV-C', 'CooperativeSociety', '{}', '["Murabahah"]')
+       RETURNING id`,
+    );
+    const providerId = onboarding.rows[0].id;
+
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO approved_provider
+           (financing_provider_onboarding_id, provider_name, provider_type, approved_instruments)
+         VALUES ($1, 'Test Provider', 'CooperativeSociety', '["Murabahah"]')`,
+        [providerId],
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("approved_provider: vetify/financialInstitution/regulator can read; a business cannot", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("financialInstitution");
+    const onboarding = await client.query(
+      `INSERT INTO financing_provider_onboarding
+         (provider_name, address, cac_reg_number, provider_type, governing_doc_ref, declared_instruments)
+       VALUES ('Test Provider', 'Lagos', 'RLSTEST-PROV-D', 'CooperativeSociety', '{}', '["Murabahah"]')
+       RETURNING id`,
+    );
+    const providerId = onboarding.rows[0].id;
+
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO approved_provider
+         (financing_provider_onboarding_id, provider_name, provider_type, approved_instruments)
+       VALUES ($1, 'Test Provider', 'CooperativeSociety', '["Murabahah"]')
+       RETURNING id`,
+      [providerId],
+    );
+    const approvedId = insert.rows[0].id;
+
+    const asVetify = await client.query("SELECT id FROM approved_provider WHERE id = $1", [approvedId]);
+    assert.equal(asVetify.rows.length, 1);
+
+    await setSession("financialInstitution");
+    const asFi = await client.query("SELECT id FROM approved_provider WHERE id = $1", [approvedId]);
+    assert.equal(asFi.rows.length, 1);
+
+    await setSession("regulator");
+    const asRegulator = await client.query("SELECT id FROM approved_provider WHERE id = $1", [approvedId]);
+    assert.equal(asRegulator.rows.length, 1);
+
+    await setSession("business", "RLSTEST-A");
+    const asBusiness = await client.query("SELECT id FROM approved_provider WHERE id = $1", [approvedId]);
+    assert.equal(asBusiness.rows.length, 0);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("provider_verification_policy: vetify-only visibility -- a financialInstitution session cannot read or insert", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO provider_verification_policy (policy_version, auto_reject_max, effective_from, scoring_weights)
+       VALUES ('v1', 40, now(), '{}') RETURNING id`,
+    );
+    const policyId = insert.rows[0].id;
+
+    await setSession("financialInstitution");
+    const asFi = await client.query("SELECT id FROM provider_verification_policy WHERE id = $1", [policyId]);
+    assert.equal(asFi.rows.length, 0);
+
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO provider_verification_policy (policy_version, auto_reject_max, effective_from, scoring_weights)
+         VALUES ('v2', 40, now(), '{}')`,
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
