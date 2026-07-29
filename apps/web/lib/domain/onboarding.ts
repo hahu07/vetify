@@ -208,6 +208,131 @@ async function flagForManualReviewImpl(
 }
 export const flagForManualReview = withAuthorization(["verifier"], flagForManualReviewImpl);
 
+// ─── Choice: EscalateOverdue (vetify) ──────────────────────────────────────
+// Phase 2, Eighteenth Slice. Reads VerificationPolicy.slaHours when an
+// active policy id is supplied, falling back to a caller-supplied slaHours
+// otherwise -- only wireable once the Fourteenth Slice's VerificationPolicy
+// landed.
+
+async function escalateOverdueImpl(
+  session: SessionContext,
+  onboardingId: number,
+  args: { slaHours: number; policyId?: number | null },
+) {
+  if (args.slaHours <= 0) throw new DomainError("SLA hours must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT status, submitted_at FROM business_onboarding WHERE id = $1 FOR UPDATE",
+      [onboardingId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Onboarding application not found");
+    if (row.status !== "UnderReview") {
+      throw new DomainError("Can only escalate an application under review");
+    }
+    if (!row.submitted_at) throw new DomainError("Application has not been submitted yet");
+
+    let effectiveSlaHours = args.slaHours;
+    if (args.policyId != null) {
+      const { rows: policyRows } = await client.query(
+        "SELECT sla_hours FROM verification_policy WHERE id = $1",
+        [args.policyId],
+      );
+      const policy = policyRows[0];
+      if (!policy) throw new DomainError("Verification policy not found");
+      effectiveSlaHours = policy.sla_hours;
+    }
+
+    const { rows: deadlineCheck } = await client.query(
+      "SELECT (submitted_at + ($2 || ' hours')::interval) < now() AS expired FROM business_onboarding WHERE id = $1",
+      [onboardingId, effectiveSlaHours],
+    );
+    if (!deadlineCheck[0].expired) {
+      throw new DomainError("SLA window has not yet expired");
+    }
+
+    const { rows: updated } = await client.query(
+      `UPDATE business_onboarding SET status = 'ManualReview', updated_at = now() WHERE id = $1 RETURNING id, status`,
+      [onboardingId],
+    );
+    return updated[0];
+  });
+}
+export const escalateOverdue = withAuthorization(["vetify"], escalateOverdueImpl);
+
+// ─── Choice: RequestAmendment (vetify) ─────────────────────────────────────
+
+async function requestAmendmentImpl(session: SessionContext, onboardingId: number, _args: { note: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT status FROM business_onboarding WHERE id = $1 FOR UPDATE",
+      [onboardingId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Onboarding application not found");
+    if (!ACTIVE_REVIEW_STATUSES.includes(row.status)) {
+      throw new DomainError("Can only request amendment from UnderReview or ManualReview");
+    }
+
+    const { rows: updated } = await client.query(
+      `UPDATE business_onboarding SET status = 'PendingAmendment', updated_at = now() WHERE id = $1 RETURNING id, status`,
+      [onboardingId],
+    );
+    return updated[0];
+  });
+}
+export const requestAmendment = withAuthorization(["vetify"], requestAmendmentImpl);
+
+// ─── Choice: Amend (business) ──────────────────────────────────────────────
+// The current documents are appended to document_history before being
+// replaced -- every prior document set survives an amendment cycle, per
+// the Daml original's own "preserve current doc snapshot" comment.
+
+interface AmendArgs {
+  updatedProfile: BusinessProfile;
+  updatedKyc: BusinessKyc;
+  updatedDocuments: DocumentRef[];
+  policyMaxAmendments?: number | null;
+}
+
+async function amendImpl(session: SessionContext, onboardingId: number, args: AmendArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM business_onboarding WHERE id = $1 FOR UPDATE",
+      [onboardingId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Onboarding application not found");
+    if (row.status !== "PendingAmendment") {
+      throw new DomainError("Can only amend a PendingAmendment application");
+    }
+    if (args.updatedKyc.cacRegNumber !== row.kyc.cacRegNumber) {
+      throw new DomainError("CAC registration number cannot change during amendment");
+    }
+    const maxAmend = args.policyMaxAmendments ?? 5;
+    if (row.amendment_count >= maxAmend) {
+      throw new DomainError(`Amendment limit reached; maximum ${maxAmend} amendments permitted`);
+    }
+    validateBusinessOnboarding(args.updatedProfile, args.updatedKyc, args.updatedDocuments);
+
+    const documentHistory: unknown[] = row.document_history ?? [];
+    const { rows: updated } = await client.query(
+      `UPDATE business_onboarding
+         SET profile = $2, kyc = $3, documents = $4, document_history = $5,
+             status = 'Draft', agent_score = NULL, agent_risk = NULL, agent_note = NULL, agent_version = NULL,
+             amendment_count = amendment_count + 1, updated_at = now()
+         WHERE id = $1
+         RETURNING id, status, amendment_count`,
+      [
+        onboardingId, JSON.stringify(args.updatedProfile), JSON.stringify(args.updatedKyc),
+        JSON.stringify(args.updatedDocuments), JSON.stringify([...documentHistory, row.documents]),
+      ],
+    );
+    return updated[0];
+  });
+}
+export const amend = withAuthorization(["business"], amendImpl);
+
 // ─── Choice: Approve (verifier, vetify dual-controller) ───────────────────
 // Creates VerificationResult and archives the BusinessOnboarding it came
 // from -- a genuinely new successor template, not a same-template
