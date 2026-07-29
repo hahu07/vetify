@@ -17,7 +17,15 @@ import { ROLE_DASHBOARD, type RealRole, type UserRole } from "@/lib/auth/AuthCon
 // exporting/sharing it -- that version lives inline in a query callback, not
 // as a standalone function.
 function toUserRole(partyRole: RealRole): UserRole {
-  return partyRole === "business" ? "business" : partyRole === "financialInstitution" ? "financialInstitution" : partyRole === "regulator" ? "regulator" : "vetify";
+  return partyRole === "business"
+    ? "business"
+    : partyRole === "financialInstitution"
+      ? "financialInstitution"
+      : partyRole === "regulator"
+        ? "regulator"
+        : partyRole === "riskCommittee"
+          ? "riskCommittee"
+          : "vetify";
 }
 
 export default function LoginPage() {

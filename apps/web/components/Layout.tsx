@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   FileText, Shield, Menu, X, ChevronRight, LogOut, Users, TrendingUp, ClipboardCheck, Landmark,
-  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel, Building2,
+  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel, Building2, ScrollText,
 } from "lucide-react";
 import { useAuth, ROLE_DASHBOARD, type UserRole } from "@/lib/auth/AuthContext";
 
@@ -39,6 +39,7 @@ const roleNav: Record<UserRole, NavItem[]> = {
     { label: "Dispute Resolution", path: "/vetify/disputes", icon: <Gavel size={16} /> },
     { label: "Registries", path: "/vetify/registries", icon: <KeyRound size={16} /> },
     { label: "Provider Registrations", path: "/vetify/providers", icon: <Building2 size={16} /> },
+    { label: "Policy Governance", path: "/vetify/policies", icon: <ScrollText size={16} /> },
     { label: "Portfolio Reports", path: "/vetify/reports", icon: <FileBarChart size={16} /> },
   ],
   financialInstitution: [
@@ -50,6 +51,7 @@ const roleNav: Record<UserRole, NavItem[]> = {
     { label: "Portfolio Reports", path: "/fi/reports", icon: <FileBarChart size={16} /> },
   ],
   regulator: [{ label: "Portfolio Reports", path: "/regulator/reports", icon: <FileBarChart size={16} /> }],
+  riskCommittee: [{ label: "Policy Endorsement Queue", path: "/riskcommittee/policies", icon: <ScrollText size={16} /> }],
 };
 
 const ROLE_BADGE: Record<UserRole, { label: string; bg: string; text: string }> = {
@@ -57,6 +59,7 @@ const ROLE_BADGE: Record<UserRole, { label: string; bg: string; text: string }> 
   vetify: { label: "Vetify Staff", bg: "rgba(201,168,76,0.20)", text: "#e8c97a" },
   financialInstitution: { label: "Financial Institution", bg: "rgba(59,130,246,0.20)", text: "#93c5fd" },
   regulator: { label: "Regulator", bg: "rgba(139,92,246,0.20)", text: "#c4b5fd" },
+  riskCommittee: { label: "Risk Committee", bg: "rgba(220,38,38,0.18)", text: "#fca5a5" },
 };
 
 interface Props {
