@@ -282,15 +282,17 @@ export function useApproveCompliance() {
       riskScore,
       riskLevel,
       reviewerAuthId,
+      eddCaseId,
     }: {
       id: string;
       completedChecks: ComplianceCheck;
       riskScore: number;
       riskLevel: RiskLevel;
       reviewerAuthId: number;
+      eddCaseId?: number | null;
     }) =>
       apiClient
-        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false, reviewerAuthId })
+        .post(`/compliance/${id}/approve`, { completedChecks, riskScore, riskLevel, autoDecided: false, reviewerAuthId, eddCaseId: eddCaseId ?? null })
         .then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
@@ -324,6 +326,64 @@ export function useRejectCompliance() {
       qc.invalidateQueries({ queryKey: ["compliance-queue"] });
       qc.invalidateQueries({ queryKey: ["compliance-results"] });
     },
+  });
+}
+
+// ─── Phase 2, Twentieth Slice: EDDCase (G14) checklist UI ──────────────────
+// Raw row shape matches lib/domain/compliance.ts's SELECT * -- snake_case,
+// same pre-existing convention every other registry/case row already has.
+
+export interface EddCaseEntry {
+  id: number;
+  compliance_review_id: number;
+  business_name: string;
+  cac_reg_number: string;
+  trigger_reason: string;
+  source_of_wealth_verified: boolean;
+  source_of_wealth_note: string | null;
+  enhanced_media_search_done: boolean;
+  senior_management_signoff: string | null;
+  monitoring_frequency: string | null;
+  status: "EddOpen" | "EddClosed";
+  opened_at: string;
+  closed_at: string | null;
+  closed_by: string | null;
+}
+
+export function useEddCases() {
+  return useQuery({ queryKey: ["edd-cases"], queryFn: async () => (await apiClient.get<EddCaseEntry[]>("/edd-cases")).data });
+}
+export function useOpenEddCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ reviewId, triggerReason }: { reviewId: string; triggerReason: string }) =>
+      apiClient.post(`/compliance/${reviewId}/open-edd-case`, { triggerReason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
+  });
+}
+export function useUpdateEddChecklist() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      ...fields
+    }: {
+      id: number;
+      sourceOfWealthVerified?: boolean | null;
+      sourceOfWealthNote?: string | null;
+      enhancedMediaSearchDone?: boolean | null;
+      seniorManagementSignoff?: string | null;
+      monitoringFrequency?: string | null;
+    }) => apiClient.post(`/edd-cases/${id}/update-checklist`, fields).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
+  });
+}
+export function useCloseEddCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, closedBy }: { id: number; closedBy: string }) =>
+      apiClient.post(`/edd-cases/${id}/close`, { closedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["edd-cases"] }),
   });
 }
 
