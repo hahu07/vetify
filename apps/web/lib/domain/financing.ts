@@ -235,14 +235,33 @@ async function rejectUnderwritingImpl(session: SessionContext, financingRequestI
 }
 export const rejectUnderwriting = withAuthorization(["assessor", "vetify"], rejectUnderwritingImpl);
 
-// ─── Choice: ApproveFunding (financialInstitution) -- simplified ─────────
-// Daml's original also checks ApprovedProvider/AuthorizedOfficer -- out of
-// scope here (see migrations/005's header; the Governance registries are a
-// separate pass). It does still create the MurabahahWad (Stage 8's entry
-// point), now that migrations/006 brings that table into scope.
+// ─── Choice: ApproveFunding (financialInstitution) ─────────────────────────
+// Stage 0/Governance gates wired in (previously deferred -- see
+// migrations/016's header and the design doc's Eleventh Slice entry): the
+// real Daml choice fetches `approvedProviderCid` and asserts Murabahah is
+// in its approvedInstruments, then calls `requireActiveOfficer` for a
+// registered, active CreditOfficer and checks that officer's approvalLimit.
+// Both checks are done inline against the *same* `client`/transaction this
+// function already holds -- not via governance.ts's `requireActiveOfficerWithRole`,
+// which opens its own withTransaction -- per the atomicity lesson recorded
+// in the design doc's Ninth Slice entry (a helper meant to compose inside
+// an existing transaction must take a client, not open its own).
+//
+// Still deferred, named explicitly rather than silently skipped: the
+// maker-checker "approver != assessor" check (Daml's `assessorName` arg) --
+// financing_request has no column recording who ran BeginUnderwriting by
+// name, so there is nothing to compare `approvedByName` against yet; this
+// system's single-FI-tenant simplification also means `ap.financialInstitution
+// == financialInstitution` has no column to check against (approved_provider
+// carries no per-row tenant party here, same simplification every other
+// FI-facing table in this migration already makes); `offerExpiresAt`,
+// `approvalSignature`, `decisionDocuments` (evidence/signature fields, no
+// UI or storage layer for them yet).
 
 interface ApproveFundingArgs {
   assetDetails: AssetDetails;
+  approvedProviderId: number;
+  approvingOfficerId: string;
   approvedByName?: string | null;
   reasonCode?: string | null;
   decisionFactors?: string[];
@@ -264,6 +283,40 @@ async function approveFundingImpl(session: SessionContext, financingRequestId: n
     }
     if (args.assetDetails.estimatedCost <= 0) {
       throw new DomainError("assetDetails.estimatedCost must be positive");
+    }
+
+    // Stage 0 gate: the FI must be onboarded and approved for Murabahah financing.
+    const { rows: providerRows } = await client.query(
+      "SELECT approved_instruments FROM approved_provider WHERE id = $1",
+      [args.approvedProviderId],
+    );
+    const provider = providerRows[0];
+    if (!provider) throw new DomainError("ApprovedProvider not found");
+    const approvedInstruments: string[] = provider.approved_instruments ?? [];
+    if (!approvedInstruments.includes("Murabahah")) {
+      throw new DomainError("Financial institution is not approved to offer Murabahah financing");
+    }
+
+    // The approving officer must be a registered, active CreditOfficer.
+    const { rows: officerRows } = await client.query(
+      "SELECT officer_name, roles, active, approval_limit FROM authorized_officer WHERE officer_id = $1",
+      [args.approvingOfficerId],
+    );
+    const officer = officerRows[0];
+    if (!officer) throw new DomainError(`Officer ${args.approvingOfficerId} not found`);
+    if (!officer.active) throw new DomainError(`Officer ${args.approvingOfficerId} is not active`);
+    const officerRoles: string[] = officer.roles ?? [];
+    if (!officerRoles.includes("CreditOfficer")) {
+      throw new DomainError(`Officer ${args.approvingOfficerId} does not hold the required role`);
+    }
+    if (args.approvedByName != null && args.approvedByName !== officer.officer_name) {
+      throw new DomainError("approvedByName does not match the registered officer");
+    }
+    // NUMERIC columns arrive as strings from node-postgres (addendum A) --
+    // both sides must be coerced before comparing, same numifyWeights-class
+    // gotcha this migration has hit and re-documented several times before.
+    if (officer.approval_limit != null && Number(row.terms_amount) > Number(officer.approval_limit)) {
+      throw new DomainError("Financing amount exceeds officer's approval limit");
     }
 
     await client.query(

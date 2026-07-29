@@ -6,7 +6,10 @@ import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
 import { formatNaira } from "@/lib/formatters";
-import { useFinancingList, useFinancingDecisions, useApproveFunding, useRejectFunding, type FinancingRequest } from "@/lib/apiClient";
+import {
+  useFinancingList, useFinancingDecisions, useApproveFunding, useRejectFunding, type FinancingRequest,
+  useApprovedProviders, useOfficers,
+} from "@/lib/apiClient";
 
 // New page (no direct 1:1 legacy equivalent -- the real frontend's Stage 7
 // decision lives inside src/pages/fi/UnderwritingQueue.tsx bundled with
@@ -25,12 +28,22 @@ function DecisionModal({ modal, onClose }: { modal: ModalState; onClose: () => v
   const [supplier, setSupplier] = useState("");
   const [supplierRef, setSupplierRef] = useState("");
   const [estimatedCost, setEstimatedCost] = useState(row.terms.amount);
+  const [approvedProviderId, setApprovedProviderId] = useState("");
+  const [approvingOfficerId, setApprovingOfficerId] = useState("");
   const [reason, setReason] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const { data: approvedProviders } = useApprovedProviders();
+  const { data: officers } = useOfficers();
   const approve = useApproveFunding();
   const reject = useRejectFunding();
   const isPending = approve.isPending || reject.isPending;
+
+  // Stage 0 gate: only providers approved for Murabahah, and only active
+  // CreditOfficer-role officers, are selectable here -- mirrors the checks
+  // lib/domain/financing.ts's approveFundingImpl enforces server-side.
+  const murabahahProviders = (approvedProviders ?? []).filter((p) => p.approvedInstruments.includes("Murabahah"));
+  const creditOfficers = (officers ?? []).filter((o) => o.active && o.roles.includes("CreditOfficer"));
 
   const handleConfirm = async () => {
     setError(null);
@@ -44,7 +57,18 @@ function DecisionModal({ modal, onClose }: { modal: ModalState; onClose: () => v
           setError("Estimated cost must be positive");
           return;
         }
-        await approve.mutateAsync({ id: row.id, assetDetails: { description, supplier, supplierRef, estimatedCost } });
+        if (!approvedProviderId || !approvingOfficerId) {
+          setError("Please select an approved provider and an approving credit officer");
+          return;
+        }
+        const officer = creditOfficers.find((o) => o.officer_id === approvingOfficerId);
+        await approve.mutateAsync({
+          id: row.id,
+          assetDetails: { description, supplier, supplierRef, estimatedCost },
+          approvedProviderId,
+          approvingOfficerId,
+          approvedByName: officer?.officer_name ?? approvingOfficerId,
+        });
       } else {
         if (reason.trim().length < 5) {
           setError("Please provide a more detailed rejection reason");
@@ -101,6 +125,34 @@ function DecisionModal({ modal, onClose }: { modal: ModalState; onClose: () => v
             <div className="mb-3">
               <label className="block text-xs font-medium text-gray-700 mb-1">Estimated Cost (NGN)</label>
               <input type="number" className="input font-mono" value={estimatedCost} onChange={(e) => setEstimatedCost(Number(e.target.value))} />
+            </div>
+            <div className="grid grid-cols-2 gap-3 mb-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Approved Provider <span className="text-red-500">*</span>
+                </label>
+                <select className="input text-sm" value={approvedProviderId} onChange={(e) => setApprovedProviderId(e.target.value)}>
+                  <option value="">Select…</option>
+                  {murabahahProviders.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.providerName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  Approving Credit Officer <span className="text-red-500">*</span>
+                </label>
+                <select className="input text-sm" value={approvingOfficerId} onChange={(e) => setApprovingOfficerId(e.target.value)}>
+                  <option value="">Select…</option>
+                  {creditOfficers.map((o) => (
+                    <option key={o.officer_id} value={o.officer_id}>
+                      {o.officer_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </>
         ) : (

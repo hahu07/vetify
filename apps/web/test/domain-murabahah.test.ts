@@ -20,6 +20,7 @@ import {
 } from "@/lib/domain/murabahah";
 import type { RiskAssessment } from "@/lib/types-financing";
 import type { MurabahahTerms, PaymentScheduleEntry } from "@/lib/types-murabahah";
+import { ensureStage0ApprovalFixtures } from "./stage0-fixtures";
 
 function businessSession(cacRegNumber: string): SessionContext {
   return { userId: 1, username: "test-business", displayName: "Test Business", partyRole: "business", cacRegNumber };
@@ -42,8 +43,11 @@ const fixtureClient = new Client({
   database: process.env.WEB_POSTGRES_DATABASE ?? "vetify_web",
 });
 
+let stage0: { approvedProviderId: number; approvingOfficerId: string };
+
 before(async () => {
   await fixtureClient.connect();
+  stage0 = await ensureStage0ApprovalFixtures(fixtureClient);
 });
 after(async () => {
   await fixtureClient.end();
@@ -109,6 +113,8 @@ async function buildProposalFixture(cac: string, facilityRef: string) {
   await beginUnderwriting(assessorSession(), Number(request.id), { assessment: validAssessment, autoDecided: false });
   const approval = await approveFunding(fiSession(), Number(request.id), {
     assetDetails: { description: "50 tonnes of flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+    approvedProviderId: stage0.approvedProviderId,
+    approvingOfficerId: stage0.approvingOfficerId,
   });
   const purchase = await proceedDirectly(fiSession(), Number(approval.murabahahWadId), {
     actualCost: 500_000,
@@ -145,6 +151,8 @@ test("proceedDirectly: actual purchase cost must be positive", async () => {
     await beginUnderwriting(assessorSession(), Number(request.id), { assessment: validAssessment, autoDecided: false });
     const approval = await approveFunding(fiSession(), Number(request.id), {
       assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+      approvedProviderId: stage0.approvedProviderId,
+      approvingOfficerId: stage0.approvingOfficerId,
     });
     await assert.rejects(
       () =>
@@ -180,6 +188,8 @@ test("acknowledgeDelivery: cannot acknowledge twice", async () => {
     await beginUnderwriting(assessorSession(), Number(request.id), { assessment: validAssessment, autoDecided: false });
     const approval = await approveFunding(fiSession(), Number(request.id), {
       assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+      approvedProviderId: stage0.approvedProviderId,
+      approvingOfficerId: stage0.approvingOfficerId,
     });
     const purchase = await proceedDirectly(fiSession(), Number(approval.murabahahWadId), {
       actualCost: 500_000,
@@ -216,6 +226,8 @@ test("offerMurabahah: gated by Qabdh (delivery must be acknowledged first)", asy
     await beginUnderwriting(assessorSession(), Number(request.id), { assessment: validAssessment, autoDecided: false });
     const approval = await approveFunding(fiSession(), Number(request.id), {
       assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+      approvedProviderId: stage0.approvedProviderId,
+      approvingOfficerId: stage0.approvingOfficerId,
     });
     const purchase = await proceedDirectly(fiSession(), Number(approval.murabahahWadId), {
       actualCost: 500_000,
@@ -258,6 +270,8 @@ test("offerMurabahah: disclosed profit invariant (salePrice = assetCost + profit
       await beginUnderwriting(assessorSession(), Number(request.id), { assessment: validAssessment, autoDecided: false });
       const approval = await approveFunding(fiSession(), Number(request.id), {
         assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+        approvedProviderId: stage0.approvedProviderId,
+        approvingOfficerId: stage0.approvingOfficerId,
       });
       const purchase = await proceedDirectly(fiSession(), Number(approval.murabahahWadId), {
         actualCost: 500_000,

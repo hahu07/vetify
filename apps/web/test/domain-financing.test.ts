@@ -18,6 +18,7 @@ import {
   rejectFunding,
 } from "@/lib/domain/financing";
 import type { RiskAssessment } from "@/lib/types-financing";
+import { ensureStage0ApprovalFixtures } from "./stage0-fixtures";
 
 function businessSession(cacRegNumber: string): SessionContext {
   return { userId: 1, username: "test-business", displayName: "Test Business", partyRole: "business", cacRegNumber };
@@ -40,8 +41,11 @@ const fixtureClient = new Client({
   database: process.env.WEB_POSTGRES_DATABASE ?? "vetify_web",
 });
 
+let stage0: { approvedProviderId: number; approvingOfficerId: string };
+
 before(async () => {
   await fixtureClient.connect();
+  stage0 = await ensureStage0ApprovalFixtures(fixtureClient);
 });
 after(async () => {
   await fixtureClient.end();
@@ -58,9 +62,10 @@ async function makeApprovedBusiness(cac: string) {
   );
 }
 
-// Fixtures for the Stage 0/Governance gates approveFunding now checks (see
-// migrations/016 + financing.ts's own header) -- mirrors
-// domain-murabahah-ibra-charity-default.test.ts's registerOfficer() helper.
+// Stage 0/Governance gates approveFunding now checks (see migrations/016 +
+// financing.ts's own header) are satisfied via the shared
+// ensureStage0ApprovalFixtures() helper (test/stage0-fixtures.ts), same as
+// every Murabahah test file.
 async function cleanup(cac: string) {
   await fixtureClient.query(`DELETE FROM murabahah_wad WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM financing_decision WHERE cac_reg_number = $1`, [cac]);
@@ -272,10 +277,111 @@ test("approveFunding: can only approve from Underwriting", async () => {
       financingRef: "FIN-TEST-10",
       businessSector: "Retail Trade",
     });
-    // Still Submitted -- beginUnderwriting was never called.
+    // Still Submitted -- beginUnderwriting was never called. The status
+    // guard fires before assetDetails/Stage 0 args are ever examined, so
+    // these values are never used -- but the interface still requires them.
     await assert.rejects(
-      () => approveFunding(fiSession(), Number(created.id), {}),
+      () =>
+        approveFunding(fiSession(), Number(created.id), {
+          assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+          approvedProviderId: 0,
+          approvingOfficerId: "unused",
+        }),
       (err: unknown) => err instanceof DomainError && err.message === "Can only approve from Underwriting",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("approveFunding: rejects a provider not approved for Murabahah", async () => {
+  const cac = "RC4000013";
+  try {
+    await makeApprovedBusiness(cac);
+    const created = await requestFinancing(businessSession(cac), {
+      terms: { amount: 500_000, purpose: "Inventory", tenureMonths: 13 },
+      financingRef: "FIN-TEST-13",
+      businessSector: "Retail Trade",
+    });
+    await beginUnderwriting(assessorSession(), Number(created.id), { assessment: validAssessment, autoDecided: false });
+
+    const onboarding = await fixtureClient.query(
+      `INSERT INTO financing_provider_onboarding
+         (provider_name, address, cac_reg_number, provider_type, governing_doc_ref, declared_instruments, archived_at)
+       VALUES ('Ijarah-Only Provider', 'Lagos', 'RC4000013-PROVIDER', 'CooperativeSociety', '{}', '["Ijarah"]', now())
+       RETURNING id`,
+    );
+    const ijarahOnlyProvider = await fixtureClient.query(
+      `INSERT INTO approved_provider (financing_provider_onboarding_id, provider_name, provider_type, approved_instruments)
+       VALUES ($1, 'Ijarah-Only Provider', 'CooperativeSociety', '["Ijarah"]')
+       RETURNING id`,
+      [onboarding.rows[0].id],
+    );
+
+    await assert.rejects(
+      () =>
+        approveFunding(fiSession(), Number(created.id), {
+          assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+          approvedProviderId: ijarahOnlyProvider.rows[0].id,
+          approvingOfficerId: stage0.approvingOfficerId,
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Financial institution is not approved to offer Murabahah financing",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("approveFunding: rejects an unregistered/inactive officer", async () => {
+  const cac = "RC4000014";
+  try {
+    await makeApprovedBusiness(cac);
+    const created = await requestFinancing(businessSession(cac), {
+      terms: { amount: 500_000, purpose: "Inventory", tenureMonths: 14 },
+      financingRef: "FIN-TEST-14",
+      businessSector: "Retail Trade",
+    });
+    await beginUnderwriting(assessorSession(), Number(created.id), { assessment: validAssessment, autoDecided: false });
+
+    await assert.rejects(
+      () =>
+        approveFunding(fiSession(), Number(created.id), {
+          assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+          approvedProviderId: stage0.approvedProviderId,
+          approvingOfficerId: "NO-SUCH-OFFICER",
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Officer NO-SUCH-OFFICER not found",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("approveFunding: rejects an amount over the officer's approval limit", async () => {
+  const cac = "RC4000015";
+  try {
+    await makeApprovedBusiness(cac);
+    const created = await requestFinancing(businessSession(cac), {
+      terms: { amount: 500_000, purpose: "Inventory", tenureMonths: 15 },
+      financingRef: "FIN-TEST-15",
+      businessSector: "Retail Trade",
+    });
+    await beginUnderwriting(assessorSession(), Number(created.id), { assessment: validAssessment, autoDecided: false });
+
+    await fixtureClient.query(
+      `INSERT INTO authorized_officer (officer_id, officer_name, roles, authorized_by, authorized_at, active, approval_limit)
+       SELECT 'LOW-LIMIT-OFFICER', 'Low Limit Officer', '["CreditOfficer"]', 'Test Setup', now(), true, 1000
+       WHERE NOT EXISTS (SELECT 1 FROM authorized_officer WHERE officer_id = 'LOW-LIMIT-OFFICER')`,
+    );
+
+    await assert.rejects(
+      () =>
+        approveFunding(fiSession(), Number(created.id), {
+          assetDetails: { description: "Flour", supplier: "Golden Mills", supplierRef: "PO-1", estimatedCost: 500_000 },
+          approvedProviderId: stage0.approvedProviderId,
+          approvingOfficerId: "LOW-LIMIT-OFFICER",
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Financing amount exceeds officer's approval limit",
     );
   } finally {
     await cleanup(cac);
@@ -294,7 +400,8 @@ test("approveFunding: full happy path creates a FinancingDecision", async () => 
     await beginUnderwriting(assessorSession(), Number(created.id), { assessment: validAssessment, autoDecided: false });
     const decision = await approveFunding(fiSession(), Number(created.id), {
       assetDetails: { description: "50 metric tonnes of white flour", supplier: "Golden Mills Ltd", supplierRef: "PO-2026-1", estimatedCost: 500_000 },
-      approvedByName: "Test Officer",
+      approvedProviderId: stage0.approvedProviderId,
+      approvingOfficerId: stage0.approvingOfficerId,
     });
     assert.ok(decision.financingDecisionId);
     assert.ok(decision.murabahahWadId);

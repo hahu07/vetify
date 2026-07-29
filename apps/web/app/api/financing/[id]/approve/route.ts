@@ -9,6 +9,8 @@ export const POST = withRoute(async (session, req) => {
   const body = await req.json();
   return approveFunding(session, idFromUrl(req.url), {
     assetDetails: body.assetDetails,
+    approvedProviderId: body.approvedProviderId,
+    approvingOfficerId: body.approvingOfficerId,
     approvedByName: body.approvedByName ?? session.displayName,
     reasonCode: body.reasonCode,
     decisionFactors: body.decisionFactors ?? [],

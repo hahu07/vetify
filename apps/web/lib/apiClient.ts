@@ -455,8 +455,10 @@ export function useFlagUnderwritingForManualReview() {
 export function useApproveFunding() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, assetDetails }: { id: string; assetDetails: AssetDetails }) =>
-      apiClient.post(`/financing/${id}/approve`, { assetDetails }).then((r) => r.data),
+    mutationFn: ({
+      id, assetDetails, approvedProviderId, approvingOfficerId, approvedByName,
+    }: { id: string; assetDetails: AssetDetails; approvedProviderId: string; approvingOfficerId: string; approvedByName: string }) =>
+      apiClient.post(`/financing/${id}/approve`, { assetDetails, approvedProviderId: Number(approvedProviderId), approvingOfficerId, approvedByName }).then((r) => r.data),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["financing-list"] });
       qc.invalidateQueries({ queryKey: ["financing-decisions"] });
