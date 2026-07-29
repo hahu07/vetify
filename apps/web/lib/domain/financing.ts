@@ -235,6 +235,70 @@ async function rejectUnderwritingImpl(session: SessionContext, financingRequestI
 }
 export const rejectUnderwriting = withAuthorization(["assessor", "vetify"], rejectUnderwritingImpl);
 
+// ─── Choice: IssueCorrection on UnderwritingResult (vetify) ────────────────
+// Phase 2, Twenty-First Slice. Nonconsuming in the real Daml ("the original
+// result is preserved for audit") -- mirrors ComplianceResult.Supersede's
+// shape, not VerificationResult.Supersede's (no archival here). No
+// maker-checker check in the real Daml body (unlike ComplianceResult's),
+// confirmed by reading the source directly rather than assumed symmetric
+// with the other two.
+
+interface IssueUnderwritingCorrectionArgs {
+  correctedAssessment: RiskAssessment;
+  correctionRef: string;
+  correctedOutcome: string;
+  reason: string;
+  correctedBy: string;
+}
+
+async function issueUnderwritingCorrectionImpl(
+  session: SessionContext,
+  underwritingResultId: number,
+  args: IssueUnderwritingCorrectionArgs,
+) {
+  if (!args.correctionRef) throw new DomainError("Correction reference must not be empty");
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  if (!args.correctedBy) throw new DomainError("correctedBy must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM underwriting_result WHERE id = $1 FOR UPDATE",
+      [underwritingResultId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Underwriting result not found");
+
+    const originalAssessment: RiskAssessment = {
+      score: row.assessment_score,
+      riskCategory: row.assessment_risk_category,
+      recommendedLimit: Number(row.assessment_recommended_limit),
+      recommendation: row.assessment_recommendation,
+      probabilityOfDefault: row.assessment_probability_of_default != null ? Number(row.assessment_probability_of_default) : null,
+      lossGivenDefault: row.assessment_loss_given_default != null ? Number(row.assessment_loss_given_default) : null,
+      exposureAtDefault: row.assessment_exposure_at_default != null ? Number(row.assessment_exposure_at_default) : null,
+      behaviouralScore: row.assessment_behavioural_score,
+      cashflowRiskScore: row.assessment_cashflow_risk_score,
+      creditworthinessScore: row.assessment_creditworthiness_score,
+      fraudScore: row.assessment_fraud_score,
+    };
+
+    const { rows: created } = await client.query(
+      `INSERT INTO underwriting_correction
+         (underwriting_result_id, business_name, cac_reg_number, financing_ref, original_assessment,
+          corrected_assessment, correction_ref, corrected_outcome, reason, corrected_by, previous_auto_decided)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        underwritingResultId, row.business_name, row.cac_reg_number, row.financing_ref,
+        JSON.stringify(originalAssessment), JSON.stringify(args.correctedAssessment),
+        args.correctionRef, args.correctedOutcome, args.reason, args.correctedBy, row.auto_decided,
+      ],
+    );
+
+    return { underwritingCorrectionId: created[0].id };
+  });
+}
+export const issueUnderwritingCorrection = withAuthorization(["vetify"], issueUnderwritingCorrectionImpl);
+
 // ─── Choice: ApproveFunding (financialInstitution) ─────────────────────────
 // Stage 0/Governance gates wired in (previously deferred -- see
 // migrations/016's header and the design doc's Eleventh Slice entry): the

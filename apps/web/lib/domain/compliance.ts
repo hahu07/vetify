@@ -455,8 +455,8 @@ async function approveComplianceImpl(
     const { rows: cr } = await client.query(
       `INSERT INTO compliance_result
          (compliance_review_id, cac_reg_number, business_name, verification_ref,
-          compliance_ref, outcome, checks, risk_score, risk_level, auto_decided, decided_at)
-       VALUES ($1, $2, $3, $4, $5, 'Approved', $6, $7, $8, $9, now())
+          compliance_ref, outcome, checks, risk_score, risk_level, auto_decided, reviewed_by, decided_at)
+       VALUES ($1, $2, $3, $4, $5, 'Approved', $6, $7, $8, $9, $10, now())
        RETURNING id`,
       [
         reviewId,
@@ -468,6 +468,7 @@ async function approveComplianceImpl(
         args.riskScore,
         args.riskLevel,
         args.autoDecided,
+        args.reviewedBy ?? null,
       ],
     );
 
@@ -533,8 +534,8 @@ async function rejectComplianceImpl(
     const { rows: cr } = await client.query(
       `INSERT INTO compliance_result
          (compliance_review_id, cac_reg_number, business_name, verification_ref,
-          compliance_ref, outcome, checks, risk_score, risk_level, auto_decided, reason, decided_at)
-       VALUES ($1, $2, $3, $4, $5, 'Rejected', $6, $7, $8, $9, $10, now())
+          compliance_ref, outcome, checks, risk_score, risk_level, auto_decided, reason, reviewed_by, decided_at)
+       VALUES ($1, $2, $3, $4, $5, 'Rejected', $6, $7, $8, $9, $10, $11, now())
        RETURNING id`,
       [
         reviewId,
@@ -547,6 +548,7 @@ async function rejectComplianceImpl(
         args.riskLevel,
         args.autoDecided,
         args.reason,
+        args.reviewedBy ?? null,
       ],
     );
 
@@ -563,6 +565,57 @@ async function rejectComplianceImpl(
   });
 }
 export const rejectCompliance = withAuthorization(["verifier"], rejectComplianceImpl);
+
+// ─── Choice: Supersede on ComplianceResult (vetify) ────────────────────────
+// Phase 2, Twenty-First Slice. Nonconsuming in the real Daml ("both the
+// original and the correction coexist for a full audit trail") -- unlike
+// VerificationResult's own Supersede (consuming), so this one never
+// archives compliance_result, only inserts the correction row. Real
+// maker-checker: "the corrector cannot be the same as the original human
+// reviewer" -- now enforceable now that reviewed_by is actually persisted
+// (see this slice's migration header for why it wasn't before).
+
+interface SupersedeComplianceResultArgs {
+  correctionRef: string;
+  correctedOutcome: "Approved" | "Rejected";
+  reason: string;
+  correctedBy: string;
+}
+
+async function supersedeComplianceResultImpl(
+  session: SessionContext,
+  complianceResultId: number,
+  args: SupersedeComplianceResultArgs,
+) {
+  if (!args.correctionRef) throw new DomainError("correctionRef must not be empty");
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM compliance_result WHERE id = $1 FOR UPDATE",
+      [complianceResultId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Compliance result not found");
+    if (row.reviewed_by != null && args.correctedBy === row.reviewed_by) {
+      throw new DomainError("Corrector cannot be the same as the original human reviewer");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO compliance_correction
+         (compliance_result_id, business_name, cac_reg_number, verification_ref, original_compliance_ref,
+          original_outcome, correction_ref, corrected_outcome, reason, corrected_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        complianceResultId, row.business_name, row.cac_reg_number, row.verification_ref, row.compliance_ref,
+        row.outcome, args.correctionRef, args.correctedOutcome, args.reason, args.correctedBy,
+      ],
+    );
+
+    return { complianceCorrectionId: created[0].id };
+  });
+}
+export const supersedeComplianceResult = withAuthorization(["vetify"], supersedeComplianceResultImpl);
 
 // ─── Reads ──────────────────────────────────────────────────────────────
 

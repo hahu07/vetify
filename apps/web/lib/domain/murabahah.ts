@@ -1495,6 +1495,69 @@ export async function listRecoveryPaymentRecords(session: SessionContext) {
   });
 }
 
+// ─── Choice: WriteOffContract (MurabahahContract, financialInstitution) ───
+// Phase 2, Twenty-Second Slice. Closes out the Default -> RecordRecoveryPayment
+// -> WriteOffContract lifecycle -- the missing terminal step. Four-eyes via
+// the shared checkFourEyes() helper (RecoveryOfficer proposes, RiskOfficer
+// confirms), plus one more check the helper alone doesn't cover: the
+// confirming officer's own registered name must match writeOffApprovedBy,
+// same pattern as ApproveFunding's approvedByName check (Thirteenth Slice).
+
+interface WriteOffContractArgs {
+  writeOffDate: string;
+  writeOffRef: string;
+  totalRecovered: number;
+  writeOffApprovedBy: string;
+  proposedByOfficerId: string;
+  confirmedByOfficerId: string;
+}
+
+async function writeOffContractImpl(session: SessionContext, contractId: number, args: WriteOffContractArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1 FOR UPDATE", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+    if (contract.status !== "Defaulted") throw new DomainError("Can only write off a Defaulted contract");
+    if (!args.writeOffRef) throw new DomainError("Write-off reference must not be empty");
+    if (!args.writeOffApprovedBy) throw new DomainError("Write-off approver must be named");
+    if (!(args.totalRecovered >= 0)) throw new DomainError("Total recovered must be non-negative");
+
+    await checkFourEyes(client, args.proposedByOfficerId, "RecoveryOfficer", args.confirmedByOfficerId, "RiskOfficer");
+    const { rows: confirmer } = await client.query("SELECT officer_name FROM authorized_officer WHERE officer_id = $1", [args.confirmedByOfficerId]);
+    if (args.writeOffApprovedBy !== confirmer[0].officer_name) {
+      throw new DomainError("writeOffApprovedBy must match the confirming officer's registered name");
+    }
+
+    const amountWrittenOff = Number(contract.outstanding_balance);
+    await client.query(
+      `UPDATE murabahah_contract SET status = 'Completed', outstanding_balance = 0, updated_at = now() WHERE id = $1`,
+      [contractId],
+    );
+
+    const { rows: record } = await client.query(
+      `INSERT INTO write_off_record
+         (murabahah_contract_id, facility_ref, cac_reg_number, business_name, total_financed, total_recovered,
+          amount_written_off, write_off_date, write_off_ref, write_off_approved_by, proposed_by_officer_id, confirmed_by_officer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING id`,
+      [
+        contractId, contract.facility_ref, contract.cac_reg_number, contract.business_name, contract.sale_price,
+        args.totalRecovered, amountWrittenOff, args.writeOffDate, args.writeOffRef, args.writeOffApprovedBy,
+        args.proposedByOfficerId, args.confirmedByOfficerId,
+      ],
+    );
+    return { murabahahContractId: contractId, writeOffRecordId: record[0].id };
+  });
+}
+export const writeOffContract = withAuthorization(["financialInstitution"], writeOffContractImpl);
+
+export async function listWriteOffRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM write_off_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── GSMInvocation: create + RecordGSMSweep/CancelGSM ─────────────────────
 
 interface CreateGsmInvocationArgs {

@@ -502,6 +502,24 @@ export function serializeRecoveryPaymentRecord(row: Record<string, unknown>) {
   };
 }
 
+export function serializeWriteOffRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    totalFinanced: num(row.total_financed),
+    totalRecovered: num(row.total_recovered),
+    amountWrittenOff: num(row.amount_written_off),
+    writeOffDate: row.write_off_date,
+    writeOffRef: row.write_off_ref,
+    writeOffApprovedBy: row.write_off_approved_by,
+    proposedByOfficerId: row.proposed_by_officer_id,
+    confirmedByOfficerId: row.confirmed_by_officer_id,
+  };
+}
+
 export function serializeGsmInvocation(row: Record<string, unknown>) {
   return {
     id: String(row.id),
