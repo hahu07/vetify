@@ -645,6 +645,31 @@ Closes the last Compliance-module item on Phase 1's original deferred list. Port
 **Net**: every item named as deferred in Phase 1's own original migration header (`migrations/001`) is now closed — `EDDCase`/`RecordShariahPreCheck`/`SupersedeShariahVerdict` (Fifteenth/Seventeenth), `VerificationPolicy`/`CompliancePolicy` maker-checker (Fourteenth), `AuthorizedReviewer` (Sixteenth), and now `EscalateOverdue`/`RequestAmendment`/`Amend`. What began as a single vertical slice's own list of explicitly-named gaps has taken five slices across this session to fully close. Remaining open items, none from that original list: frontend passes for `riskCommittee`'s endorsement queue and the EDD checklist UI, and the much larger remaining body of ~52 unported templates elsewhere in the schema (Murabahah's narrower audit/correction/exception records, `FinancingProviderOnboarding`'s own deferred choices, etc.).
 
 
+## Readiness Assessment Update — After the Eighteenth Slice and Git Reconstruction
+
+The assessment below ("Phase 1 + Four Phase 2 Slices") is a point-in-time snapshot from after the First through Fourth Slices and their four matching frontend passes — kept as-written rather than edited in place, since its own numbers and "what's not yet true" list were true when it was written. Fourteen more slices (Fifth through Eighteenth) have landed since, and the single largest risk that assessment flagged — zero git commits — is now resolved. This update only restates what's actually changed; the "What held" / "New risks" / "Go/no-go" reasoning below is unchanged and still holds.
+
+### The numbers, current
+
+| Metric | Then (after Slice 4) | Now (after Slice 18) | Note |
+|---|---|---|---|
+| Daml templates ported | 25 of 97 | 45 of 97 | Every item named as deferred in Phase 1's original migration header (`migrations/001`) is now closed — see the Eighteenth Slice's own "Net" note |
+| Frontend pages | 22 | 26 | vs. 27 in the real `frontend/`; still not 1:1 (see the original table below for what doesn't correspond either way) |
+| Hand-written domain logic | 2,110 lines / 6 files | 4,523 lines / 8 files (`+policy.ts`, `+providers.ts`) | |
+| Automated tests | 101 / 9 files | 253 / 17 files, 100% passing | |
+| RLS-covered tables | not tracked at this checkpoint | 51 | `check:rls` clean |
+| Routable domain exports | not tracked at this checkpoint | 143 | `check:routes` clean |
+| Git commits | **0** | **9** (1 baseline + 8 slices, one per slice) | branch `web2-migration`, [PR #1](https://github.com/hahu07/vetify/pull/1) open against `main`; `main` itself untouched |
+
+**How the 9 commits came to exist, since none of the 18 slices were committed incrementally as they happened**: the work was reconstructed after the fact by reverting the working tree to a pre-session baseline (one commit), then replaying each of the eight most recent slices (Eleventh–Eighteenth) forward as its own commit using exact knowledge of what each slice touched. Slices First through Tenth have no recoverable incremental history and are folded into the baseline commit. This is disclosed here because it's a genuine limitation of the resulting history — `git blame`/`git log` on any file touched before the Eleventh Slice will not show which of Slices 1–10 introduced a given line, only that it predates the git-reconstruction pass.
+
+### What's changed since "What's not yet true, said plainly" was written
+
+- **"Nothing has been committed to git" — resolved.** See above.
+- **Two structural checks the original assessment called for now exist and are wired into `npm run check`** (`check:rls`, `check:routes` — see the "Update" paragraph already in the original assessment below); both stayed clean across all fourteen subsequent slices, including three that introduced genuinely new party-role interactions (`riskCommittee`, plus `AuthorizedReviewer`'s reviewer role gate).
+- **Still true, unchanged**: no historical velocity data exists to convert slice count into a calendar estimate; Phase 3/4/5 remain untouched.
+- **New, not anticipated by the original assessment**: two backend-only slices (Fourteenth's `riskCommittee` endorsement flow, Seventeenth's EDD checklist) still have no frontend — driven via direct API calls only, same as this migration's earliest slices before their own UI passes existed. Both are named as the natural next step in their own slice's "Net" note.
+
 ## Overall Readiness Assessment — Phase 1 + Four Phase 2 Slices
 
 Requested as a step back after five backend slices and five matching frontend passes. Numbers first, then the honest read against addendum C's original gate criteria.
