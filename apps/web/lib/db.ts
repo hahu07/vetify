@@ -46,7 +46,7 @@ function ensureNonSuperuser(): Promise<void> {
   return invariantChecked;
 }
 
-export type PartyRole = "business" | "vetify" | "verifier" | "assessor" | "financialInstitution" | "advisor" | "sentinel" | "regulator";
+export type PartyRole = "business" | "vetify" | "verifier" | "assessor" | "financialInstitution" | "advisor" | "sentinel" | "regulator" | "riskCommittee";
 
 export interface SessionContext {
   userId: number;

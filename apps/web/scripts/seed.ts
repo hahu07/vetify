@@ -21,6 +21,7 @@ async function main() {
     { username: "advisor1", password: "password123", displayName: "Sheikh Ibrahim Yusuf (SSB)", partyRole: "advisor", cacRegNumber: null },
     { username: "sentinel1", password: "password123", displayName: "Amara Nwosu (Sentinel)", partyRole: "sentinel", cacRegNumber: null },
     { username: "regulator1", password: "password123", displayName: "CBN NIFI Supervision Desk", partyRole: "regulator", cacRegNumber: null },
+    { username: "riskcommittee1", password: "password123", displayName: "Ngozi Risk Head (Risk Committee)", partyRole: "riskCommittee", cacRegNumber: null },
   ];
 
   for (const u of demoUsers) {

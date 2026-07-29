@@ -1153,3 +1153,123 @@ test("provider_verification_policy: vetify-only visibility -- a financialInstitu
     await client.query("ROLLBACK");
   }
 });
+// ─── Phase 2, Fourteenth Slice: VerificationPolicy/CompliancePolicy maker-checker ──
+
+test("verification_policy: vetify-only visibility -- a riskCommittee session cannot read or insert", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO verification_policy (max_amendments, sla_hours, auto_approve_min, auto_reject_max, policy_version, scoring_weights)
+       VALUES (5, 48, 80, 50, 'RLSTEST-VP-1', '{}') RETURNING id`,
+    );
+    const policyId = insert.rows[0].id;
+
+    await setSession("riskCommittee");
+    const asRiskCommittee = await client.query("SELECT id FROM verification_policy WHERE id = $1", [policyId]);
+    assert.equal(asRiskCommittee.rows.length, 0);
+
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO verification_policy (max_amendments, sla_hours, auto_approve_min, auto_reject_max, policy_version, scoring_weights)
+         VALUES (5, 48, 80, 50, 'RLSTEST-VP-2', '{}')`,
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("pending_verification_policy: riskCommittee cannot INSERT", async () => {
+  // A failed statement poisons the rest of a Postgres transaction (all
+  // subsequent commands are refused until ROLLBACK) -- kept as its own
+  // isolated BEGIN/ROLLBACK rather than combined with the positive-path
+  // test below, which needs to keep issuing queries afterward.
+  await client.query("BEGIN");
+  try {
+    await setSession("riskCommittee");
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO pending_verification_policy
+           (max_amendments, sla_hours, auto_approve_min, auto_reject_max, policy_version, scoring_weights, proposed_by, reason)
+         VALUES (5, 48, 80, 50, 'RLSTEST-PVP-1', '{}', 'Alice', 'test')`,
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("pending_verification_policy: vetify can INSERT; both vetify and riskCommittee can read and UPDATE", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO pending_verification_policy
+         (max_amendments, sla_hours, auto_approve_min, auto_reject_max, policy_version, scoring_weights, proposed_by, reason)
+       VALUES (5, 48, 80, 50, 'RLSTEST-PVP-2', '{}', 'Alice', 'test')
+       RETURNING id`,
+    );
+    const pendingId = insert.rows[0].id;
+
+    await setSession("riskCommittee");
+    const asRiskCommittee = await client.query("SELECT id FROM pending_verification_policy WHERE id = $1", [pendingId]);
+    assert.equal(asRiskCommittee.rows.length, 1);
+    const updated = await client.query(
+      "UPDATE pending_verification_policy SET risk_committee_endorsed_by = 'Bob' WHERE id = $1 RETURNING id",
+      [pendingId],
+    );
+    assert.equal(updated.rows.length, 1);
+
+    await setSession("vetify");
+    const asVetify = await client.query("SELECT id FROM pending_verification_policy WHERE id = $1", [pendingId]);
+    assert.equal(asVetify.rows.length, 1);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("compliance_policy: vetify-only visibility -- a riskCommittee session cannot read or insert", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO compliance_policy
+         (auto_approve_min, auto_reject_max, escalation_sla_hours, shariah_policy_version, policy_version, effective_from, scoring_weights)
+       VALUES (80, 50, 24, 'AAOIFI-2023-Std8', 'RLSTEST-CP-1', now(), '{}') RETURNING id`,
+    );
+    const policyId = insert.rows[0].id;
+
+    await setSession("riskCommittee");
+    const asRiskCommittee = await client.query("SELECT id FROM compliance_policy WHERE id = $1", [policyId]);
+    assert.equal(asRiskCommittee.rows.length, 0);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("pending_compliance_policy: vetify can INSERT; both vetify and riskCommittee can read and UPDATE", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO pending_compliance_policy
+         (auto_approve_min, auto_reject_max, escalation_sla_hours, shariah_policy_version, policy_version,
+          effective_from, scoring_weights, proposed_by, reason)
+       VALUES (80, 50, 24, 'AAOIFI-2023-Std8', 'RLSTEST-PCP-1', now(), '{}', 'Alice', 'test')
+       RETURNING id`,
+    );
+    const pendingId = insert.rows[0].id;
+
+    await setSession("riskCommittee");
+    const asRiskCommittee = await client.query("SELECT id FROM pending_compliance_policy WHERE id = $1", [pendingId]);
+    assert.equal(asRiskCommittee.rows.length, 1);
+    const updated = await client.query(
+      "UPDATE pending_compliance_policy SET risk_committee_endorsed_by = 'Bob' WHERE id = $1 RETURNING id",
+      [pendingId],
+    );
+    assert.equal(updated.rows.length, 1);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
