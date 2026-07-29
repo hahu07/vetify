@@ -15,5 +15,6 @@ export const POST = withRoute(async (session, req) => {
     reviewerParty: body.reviewerParty ?? session.partyRole,
     reviewedBy: body.reviewedBy ?? session.displayName,
     reviewerAuthId: body.reviewerAuthId,
+    eddCaseId: body.eddCaseId ?? null,
   });
 });

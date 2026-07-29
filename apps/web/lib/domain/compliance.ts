@@ -209,6 +209,99 @@ async function supersedeShariahVerdictImpl(
 }
 export const supersedeShariahVerdict = withAuthorization(["vetify"], supersedeShariahVerdictImpl);
 
+// ─── EDDCase (G14): OpenEddCase / UpdateEddChecklist / CloseEddCase ───────
+// Phase 2, Seventeenth Slice. OpenEddCase is nonconsuming on ComplianceReview
+// (does not itself change status -- the agent's FlagComplianceForManualReview
+// call alongside it does that, same as the real Daml original). No requireActive*
+// registry gate here -- OpenEddCase's real controller is vetify alone.
+
+async function openEddCaseImpl(session: SessionContext, reviewId: number, args: { triggerReason: string }) {
+  if (!args.triggerReason) throw new DomainError("Trigger reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT business_name, cac_reg_number FROM compliance_review WHERE id = $1",
+      [reviewId],
+    );
+    const row = rows[0];
+    if (!row) throw new DomainError("Compliance review not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO edd_case (compliance_review_id, business_name, cac_reg_number, trigger_reason)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, status, opened_at`,
+      [reviewId, row.business_name, row.cac_reg_number, args.triggerReason],
+    );
+    return created[0];
+  });
+}
+export const openEddCase = withAuthorization(["vetify"], openEddCaseImpl);
+
+interface UpdateEddChecklistArgs {
+  sourceOfWealthVerified?: boolean | null;
+  sourceOfWealthNote?: string | null;
+  enhancedMediaSearchDone?: boolean | null;
+  seniorManagementSignoff?: string | null;
+  monitoringFrequency?: string | null;
+}
+
+async function updateEddChecklistImpl(session: SessionContext, eddCaseId: number, args: UpdateEddChecklistArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM edd_case WHERE id = $1 FOR UPDATE", [eddCaseId]);
+    const row = rows[0];
+    if (!row) throw new DomainError("EDD case not found");
+    if (row.status !== "EddOpen") throw new DomainError("Can only update an Open EDD case");
+
+    // Each arg is a partial update -- null/undefined keeps the existing
+    // value, mirroring the Daml original's `case x of Some v -> v; None ->
+    // checklist.x` per-field merge exactly.
+    const { rows: updated } = await client.query(
+      `UPDATE edd_case
+         SET source_of_wealth_verified  = COALESCE($2, source_of_wealth_verified),
+             source_of_wealth_note      = COALESCE($3, source_of_wealth_note),
+             enhanced_media_search_done = COALESCE($4, enhanced_media_search_done),
+             senior_management_signoff  = COALESCE($5, senior_management_signoff),
+             monitoring_frequency       = COALESCE($6, monitoring_frequency)
+         WHERE id = $1
+         RETURNING id, source_of_wealth_verified, enhanced_media_search_done,
+                   senior_management_signoff, monitoring_frequency`,
+      [
+        eddCaseId, args.sourceOfWealthVerified ?? null, args.sourceOfWealthNote ?? null,
+        args.enhancedMediaSearchDone ?? null, args.seniorManagementSignoff ?? null, args.monitoringFrequency ?? null,
+      ],
+    );
+    return updated[0];
+  });
+}
+export const updateEddChecklist = withAuthorization(["verifier"], updateEddChecklistImpl);
+
+async function closeEddCaseImpl(session: SessionContext, eddCaseId: number, args: { closedBy: string }) {
+  if (!args.closedBy) throw new DomainError("closedBy must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM edd_case WHERE id = $1 FOR UPDATE", [eddCaseId]);
+    const row = rows[0];
+    if (!row) throw new DomainError("EDD case not found");
+    if (row.status !== "EddOpen") throw new DomainError("Can only close an Open EDD case");
+    if (!row.source_of_wealth_verified) throw new DomainError("Source of wealth must be verified before closing");
+    if (!row.enhanced_media_search_done) throw new DomainError("Enhanced media search must be done before closing");
+    if (row.senior_management_signoff == null) throw new DomainError("Senior management sign-off is required before closing");
+    if (row.monitoring_frequency == null) throw new DomainError("Ongoing monitoring frequency must be set before closing");
+
+    const { rows: updated } = await client.query(
+      `UPDATE edd_case SET status = 'EddClosed', closed_at = now(), closed_by = $2 WHERE id = $1 RETURNING id, status, closed_at`,
+      [eddCaseId, args.closedBy],
+    );
+    return updated[0];
+  });
+}
+export const closeEddCase = withAuthorization(["verifier"], closeEddCaseImpl);
+
+export async function listEddCases(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM edd_case ORDER BY opened_at DESC");
+    return rows;
+  });
+}
+
 // ─── Choice: FlagComplianceForManualReview (vetify) ────────────────────────
 
 async function flagComplianceForManualReviewImpl(
@@ -258,6 +351,9 @@ interface ApproveComplianceArgs {
   // Sixteenth Slice: mandatory in the real Daml choice signature (not
   // Optional) -- see migrations/019's header.
   reviewerAuthId: number;
+  // Seventeenth Slice (G14): Optional in the real Daml choice -- None for
+  // the vast majority of reviews where OpenEddCase was never exercised.
+  eddCaseId?: number | null;
 }
 
 async function approveComplianceImpl(
@@ -312,6 +408,32 @@ async function approveComplianceImpl(
     const reviewer = reviewerRows[0];
     if (!reviewer) throw new DomainError("AuthorizedReviewer not found");
     if (reviewer.archived_at) throw new DomainError("Reviewer is not active");
+
+    // G14 hard gate (Seventeenth Slice): a PEP hit's EDD case must be
+    // Closed (every checklist item complete) before approval -- None is
+    // fine for the vast majority of reviews where OpenEddCase was never
+    // exercised at all.
+    if (args.eddCaseId != null) {
+      const { rows: eddRows } = await client.query(
+        "SELECT compliance_review_id, status FROM edd_case WHERE id = $1",
+        [args.eddCaseId],
+      );
+      const eddCase = eddRows[0];
+      if (!eddCase) throw new DomainError("EDD case not found");
+      // compliance_review_id is a BIGINT column -- node-postgres returns it
+      // as a string. reviewId itself also arrives as a string at runtime
+      // here despite its `number` type annotation (every caller passes an
+      // id straight from a prior RETURNING id, same as everywhere else in
+      // this codebase) -- so both sides must be coerced with Number(...)
+      // before comparing, not just one (the same class of gotcha this
+      // migration has hit and re-documented several times already).
+      if (Number(eddCase.compliance_review_id) !== Number(reviewId)) {
+        throw new DomainError("EDD case is for a different compliance review");
+      }
+      if (eddCase.status !== "EddClosed") {
+        throw new DomainError("EDD case must be Closed before approval");
+      }
+    }
 
     const { rows: ab } = await client.query(
       `INSERT INTO approved_business

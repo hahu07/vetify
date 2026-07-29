@@ -1407,3 +1407,77 @@ test("authorized_reviewer: vetify can INSERT and UPDATE; verifier can read but n
     await client.query("ROLLBACK");
   }
 });
+// ─── Phase 2, Seventeenth Slice: EDDCase (G14) ─────────────────────────────
+
+test("edd_case: only a vetify session can INSERT", async () => {
+  await client.query("BEGIN");
+  try {
+    const reviewId = await buildComplianceReviewFixture("RLSTEST-A", "COM-RLS-EDD-1");
+    await setSession("verifier");
+    await assert.rejects(() =>
+      client.query(
+        `INSERT INTO edd_case (compliance_review_id, business_name, cac_reg_number, trigger_reason)
+         VALUES ($1, 'Test Co', 'RLSTEST-A', 'PEP hit')`,
+        [reviewId],
+      ),
+    );
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("edd_case: vetify can INSERT; verifier and the owning business can read; verifier can UPDATE", async () => {
+  await client.query("BEGIN");
+  try {
+    const reviewId = await buildComplianceReviewFixture("RLSTEST-A", "COM-RLS-EDD-2");
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO edd_case (compliance_review_id, business_name, cac_reg_number, trigger_reason)
+       VALUES ($1, 'Test Co', 'RLSTEST-A', 'PEP hit') RETURNING id`,
+      [reviewId],
+    );
+    const eddCaseId = insert.rows[0].id;
+
+    await setSession("verifier");
+    const asVerifier = await client.query("SELECT id FROM edd_case WHERE id = $1", [eddCaseId]);
+    assert.equal(asVerifier.rows.length, 1);
+    const updated = await client.query(
+      "UPDATE edd_case SET source_of_wealth_verified = true WHERE id = $1 RETURNING id",
+      [eddCaseId],
+    );
+    assert.equal(updated.rows.length, 1);
+
+    await setSession("business", "RLSTEST-A");
+    const asOwner = await client.query("SELECT id FROM edd_case WHERE id = $1", [eddCaseId]);
+    assert.equal(asOwner.rows.length, 1);
+
+    await setSession("business", "RLSTEST-OTHER");
+    const asOther = await client.query("SELECT id FROM edd_case WHERE id = $1", [eddCaseId]);
+    assert.equal(asOther.rows.length, 0);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});
+
+test("authorized_reviewer: a verifier session cannot UPDATE", async () => {
+  await client.query("BEGIN");
+  try {
+    await setSession("vetify");
+    const insert = await client.query(
+      `INSERT INTO authorized_reviewer (role, authorized_by) VALUES ('Compliance Officer', 'RLS Test 2') RETURNING id`,
+    );
+    const reviewerId = insert.rows[0].id;
+
+    // An UPDATE whose target row is excluded by the policy's USING clause
+    // isn't a thrown RLS error the way a failed INSERT's WITH CHECK is --
+    // it silently matches and updates zero rows instead. Assert on
+    // rowCount, not a rejection (the wrong assertion here failed with
+    // "Missing expected rejection", not a false negative on the policy
+    // itself -- caught by running the suite, not assumed to be correct).
+    await setSession("verifier");
+    const result = await client.query("UPDATE authorized_reviewer SET archived_at = now() WHERE id = $1", [reviewerId]);
+    assert.equal(result.rowCount, 0);
+  } finally {
+    await client.query("ROLLBACK");
+  }
+});

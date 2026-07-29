@@ -18,6 +18,9 @@ import {
   flagComplianceForManualReview,
   recordShariahPreCheck,
   supersedeShariahVerdict,
+  openEddCase,
+  updateEddChecklist,
+  closeEddCase,
 } from "@/lib/domain/compliance";
 import { registerAdvisor, registerReviewer, deauthorizeReviewer } from "@/lib/domain/governance";
 
@@ -505,3 +508,161 @@ test("full lifecycle: recordShariahPreCheck -> supersedeShariahVerdict creates a
   }
 });
 
+// ─── EDDCase / G14 hard gate (Phase 2, Seventeenth Slice) ──────────────────
+
+async function cleanupEddCase(cac: string) {
+  await fixtureClient.query(
+    `DELETE FROM edd_case WHERE compliance_review_id IN
+       (SELECT id FROM compliance_review WHERE cac_reg_number = $1)`,
+    [cac],
+  );
+}
+
+test("openEddCase: only a vetify session may call", async () => {
+  await assert.rejects(
+    () => openEddCase(verifierSession(), 1, { triggerReason: "PEP hit" }),
+    AuthorizationError,
+  );
+});
+
+test("openEddCase: trigger reason must not be empty", async () => {
+  await assert.rejects(
+    () => openEddCase(vetifySession(), 1, { triggerReason: "" }),
+    (err: unknown) => err instanceof DomainError && err.message === "Trigger reason must not be empty",
+  );
+});
+
+test("updateEddChecklist / closeEddCase: cannot close until every checklist item is complete", async () => {
+  const cac = "RC7000001";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    const eddCase = await openEddCase(vetifySession(), opened.id, { triggerReason: "PEP hit on director" });
+    assert.equal(eddCase.status, "EddOpen");
+
+    await assert.rejects(
+      () => closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Source of wealth must be verified before closing",
+    );
+
+    await updateEddChecklist(verifierSession(), eddCase.id, { sourceOfWealthVerified: true });
+    await assert.rejects(
+      () => closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Enhanced media search must be done before closing",
+    );
+
+    await updateEddChecklist(verifierSession(), eddCase.id, { enhancedMediaSearchDone: true });
+    await assert.rejects(
+      () => closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Senior management sign-off is required before closing",
+    );
+
+    await updateEddChecklist(verifierSession(), eddCase.id, { seniorManagementSignoff: "Tunde Bakare, Head of Compliance" });
+    await assert.rejects(
+      () => closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Ongoing monitoring frequency must be set before closing",
+    );
+
+    await updateEddChecklist(verifierSession(), eddCase.id, { monitoringFrequency: "quarterly" });
+    const closed = await closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" });
+    assert.equal(closed.status, "EddClosed");
+
+    await assert.rejects(
+      () => closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only close an Open EDD case",
+    );
+  } finally {
+    await cleanupEddCase(cac);
+    await cleanup(cac);
+  }
+});
+
+test("updateEddChecklist: partial updates preserve previously-set fields (None keeps existing value)", async () => {
+  const cac = "RC7000002";
+  try {
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    const eddCase = await openEddCase(vetifySession(), opened.id, { triggerReason: "PEP hit" });
+
+    await updateEddChecklist(verifierSession(), eddCase.id, { sourceOfWealthVerified: true, sourceOfWealthNote: "Confirmed via bank statements" });
+    const afterFirst = await updateEddChecklist(verifierSession(), eddCase.id, { enhancedMediaSearchDone: true });
+    // The first update's sourceOfWealthVerified must survive an update that
+    // doesn't mention it at all.
+    assert.equal(afterFirst.source_of_wealth_verified, true);
+    assert.equal(afterFirst.enhanced_media_search_done, true);
+  } finally {
+    await cleanupEddCase(cac);
+    await cleanup(cac);
+  }
+});
+
+test("approveCompliance: G14 hard gate blocks approval when eddCaseId is Open, allows it when Closed", async () => {
+  const cac = "RC7000003";
+  const tag = "TEST-REVIEWER-7000003";
+  try {
+    const reviewer = await registerReviewer(vetifySession(), { role: "Senior Compliance Officer", authorizedBy: tag });
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await startReview(vetifySession(), opened.id);
+    const eddCase = await openEddCase(vetifySession(), opened.id, { triggerReason: "PEP hit on director" });
+
+    await assert.rejects(
+      () => approveCompliance(verifierSession(), opened.id, {
+        completedChecks: validChecks, riskScore: 90, riskLevel: "Low", autoDecided: false,
+        reviewerParty: "verifier", reviewerAuthId: reviewer.id, eddCaseId: eddCase.id,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "EDD case must be Closed before approval",
+    );
+
+    await updateEddChecklist(verifierSession(), eddCase.id, {
+      sourceOfWealthVerified: true, enhancedMediaSearchDone: true,
+      seniorManagementSignoff: "Tunde Bakare", monitoringFrequency: "quarterly",
+    });
+    await closeEddCase(verifierSession(), eddCase.id, { closedBy: "Chidinma Okeke" });
+
+    const result = await approveCompliance(verifierSession(), opened.id, {
+      completedChecks: validChecks, riskScore: 90, riskLevel: "Low", autoDecided: false,
+      reviewerParty: "verifier", reviewerAuthId: reviewer.id, eddCaseId: eddCase.id,
+    });
+    assert.ok(result.approvedBusinessId);
+  } finally {
+    await cleanupEddCase(cac);
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_reviewer WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+test("approveCompliance: G14 gate rejects an EDD case belonging to a different compliance review", async () => {
+  const cac = "RC7000004";
+  const cacOther = "RC7000004B";
+  const tag = "TEST-REVIEWER-7000004";
+  try {
+    const reviewer = await registerReviewer(vetifySession(), { role: "Senior Compliance Officer", authorizedBy: tag });
+    const verificationId = await makeApprovedVerification(cac);
+    const opened = await openComplianceReview(vetifySession(), verificationId);
+    await startReview(vetifySession(), opened.id);
+
+    const otherVerificationId = await makeApprovedVerification(cacOther);
+    const otherOpened = await openComplianceReview(vetifySession(), otherVerificationId);
+    const otherEddCase = await openEddCase(vetifySession(), otherOpened.id, { triggerReason: "PEP hit" });
+    await updateEddChecklist(verifierSession(), otherEddCase.id, {
+      sourceOfWealthVerified: true, enhancedMediaSearchDone: true,
+      seniorManagementSignoff: "Tunde Bakare", monitoringFrequency: "quarterly",
+    });
+    await closeEddCase(verifierSession(), otherEddCase.id, { closedBy: "Chidinma Okeke" });
+
+    await assert.rejects(
+      () => approveCompliance(verifierSession(), opened.id, {
+        completedChecks: validChecks, riskScore: 90, riskLevel: "Low", autoDecided: false,
+        reviewerParty: "verifier", reviewerAuthId: reviewer.id, eddCaseId: otherEddCase.id,
+      }),
+      (err: unknown) => err instanceof DomainError && err.message === "EDD case is for a different compliance review",
+    );
+  } finally {
+    await cleanupEddCase(cac);
+    await cleanupEddCase(cacOther);
+    await cleanup(cac);
+    await cleanup(cacOther);
+    await fixtureClient.query(`DELETE FROM authorized_reviewer WHERE authorized_by = $1`, [tag]);
+  }
+});
