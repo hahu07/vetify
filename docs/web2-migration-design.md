@@ -726,6 +726,18 @@ Closes out a lifecycle two earlier slices left one step short: `default_record` 
 
 **Net**: the second dent in the ~52-template remainder — one more narrower record closed.
 
+## Phase 2, Twenty-Third Slice — Demand Notice & Legal Escalation
+
+Ports the late-stage recovery escalation path sitting between `RecordRecoveryPayment` and `WriteOffContract` in the real Daml source: `IssueDemandNotice` (`MurabahahContract`), `EscalateToLegal`/`WithdrawDemand` (`DemandNotice`), and `RecordCourtOrder`/`ResolveLegal` (`LegalEscalation`). Two templates ported (`DemandNotice`, `LegalEscalation`), 51 templates now ported total.
+
+**Three different lifecycle shapes in five choices, each read from the Daml source rather than assumed uniform.** `IssueDemandNotice` is `nonconsuming` on `MurabahahContract` (the Defaulted contract stays alive for recovery tracking — same shape `RecordRecoveryPayment`/`WriteOffContract` already have). `EscalateToLegal` and `WithdrawDemand` are both consuming on `DemandNotice` itself — a demand notice is either escalated (terminal, replaced by a `LegalEscalation`) or withdrawn (terminal, no successor) — so `demand_notice` carries the same `archived_at`/`superseded_by_kind`/`superseded_by_id` shape `business_onboarding` and this slice's own `verification_result` already established, with `superseded_by_kind` staying `NULL` on the withdrawal path since there's genuinely no successor there. `RecordCourtOrder`/`ResolveLegal` are both `create this with` field-replacements on `LegalEscalation` (no contract key on SDK 3.4.11/LF 2.2) — collapsed to plain UPDATEs, the same rule as every other keyless field-replace choice already in this migration.
+
+**A recurring bug class, caught by the test itself before it ever reached a live run.** `assert.equal(Number(noticeRows[0].superseded_by_id), escalation.legalEscalationId)` failed with `1 !== '1'` — the now-familiar BIGINT-as-string gotcha, except this time on the *right*-hand side: `escalation.legalEscalationId` is itself an uncoerced string straight from a `RETURNING id`, same as every other id this codebase hands back from a mutation. Fixed by wrapping both sides in `Number(...)`, not just the column read — the exact class of fix the Seventeenth Slice's EDD gate and the Eighth Slice both already documented once each, now a third time.
+
+**Verified**: `npx tsc --noEmit` clean. `npm run check` — 271/271 tests passing (6 new in `test/domain-murabahah-collections.test.ts`, alongside the existing Defaulted-contract lifecycle tests: status/validation guards for `IssueDemandNotice`, the no-successor-on-withdrawal path, the successor-linkage happy path for `EscalateToLegal` plus a rejected re-escalation of an already-archived notice, and `RecordCourtOrder`/`ResolveLegal`'s happy path plus a rejected double-resolve), RLS symmetry clean (57 tables), route coverage clean (155 exports). **Not live-verified via API this pass**, same reasoning as the Twenty-Second Slice: no `Defaulted` `MurabahahContract` existed in the local Postgres, and the full acquisition-through-default fixture chain was disproportionate for a backend-only pass already covered by live-DB tests exercising every one of the five new choices, not mocks.
+
+**Net**: the third dent in the ~52-template remainder — two more narrower records closed, five more choices ported.
+
 ## Overall Readiness Assessment — Phase 1 + Four Phase 2 Slices
 
 Requested as a step back after five backend slices and five matching frontend passes. Numbers first, then the honest read against addendum C's original gate criteria.

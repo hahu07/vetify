@@ -1558,6 +1558,147 @@ export async function listWriteOffRecords(session: SessionContext) {
   });
 }
 
+// ─── DemandNotice: IssueDemandNotice + EscalateToLegal/WithdrawDemand ─────
+// Phase 2, Twenty-Third Slice. IssueDemandNotice is nonconsuming on
+// MurabahahContract ("the Defaulted contract stays alive for recovery
+// tracking"); EscalateToLegal/WithdrawDemand are both consuming on
+// DemandNotice itself -- a demand notice is either escalated (terminal,
+// replaced by a LegalEscalation) or withdrawn (terminal, no successor).
+
+interface IssueDemandNoticeArgs {
+  demandDate: string;
+  demandRef: string;
+  responseDeadline: string;
+  gsmEligible: boolean;
+}
+
+async function issueDemandNoticeImpl(session: SessionContext, contractId: number, args: IssueDemandNoticeArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+    if (contract.status !== "Defaulted") throw new DomainError("Can only issue demand notice on a Defaulted contract");
+    if (!args.demandRef) throw new DomainError("Demand reference must not be empty");
+    if (new Date(args.responseDeadline).getTime() <= new Date(args.demandDate).getTime()) {
+      throw new DomainError("Response deadline must be after demand date");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO demand_notice
+         (murabahah_contract_id, facility_ref, cac_reg_number, business_name, demand_date,
+          outstanding_amount, demand_ref, response_deadline, gsm_eligible)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        contractId, contract.facility_ref, contract.cac_reg_number, contract.business_name,
+        args.demandDate, contract.outstanding_balance, args.demandRef, args.responseDeadline, args.gsmEligible,
+      ],
+    );
+    return { demandNoticeId: created[0].id };
+  });
+}
+export const issueDemandNotice = withAuthorization(["financialInstitution"], issueDemandNoticeImpl);
+
+interface EscalateToLegalArgs {
+  escalationDate: string;
+  solicitorRef: string;
+  legalAction: string;
+}
+
+async function escalateToLegalImpl(session: SessionContext, demandNoticeId: number, args: EscalateToLegalArgs) {
+  if (!args.solicitorRef) throw new DomainError("Solicitor reference must not be empty");
+  if (!args.legalAction) throw new DomainError("Legal action description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM demand_notice WHERE id = $1 FOR UPDATE", [demandNoticeId]);
+    const notice = rows[0];
+    if (!notice) throw new DomainError("DemandNotice not found");
+    if (notice.archived_at) throw new DomainError("DemandNotice is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO legal_escalation
+         (demand_notice_id, business_name, cac_reg_number, escalation_date, solicitor_ref, legal_action, outstanding_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [demandNoticeId, notice.business_name, notice.cac_reg_number, args.escalationDate, args.solicitorRef, args.legalAction, notice.outstanding_amount],
+    );
+    const legalEscalationId = created[0].id;
+
+    await client.query(
+      `UPDATE demand_notice SET archived_at = now(), superseded_by_kind = 'legal_escalation', superseded_by_id = $2 WHERE id = $1`,
+      [demandNoticeId, legalEscalationId],
+    );
+
+    return { legalEscalationId };
+  });
+}
+export const escalateToLegal = withAuthorization(["financialInstitution"], escalateToLegalImpl);
+
+async function withdrawDemandImpl(session: SessionContext, demandNoticeId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT archived_at FROM demand_notice WHERE id = $1 FOR UPDATE", [demandNoticeId]);
+    const notice = rows[0];
+    if (!notice) throw new DomainError("DemandNotice not found");
+    if (notice.archived_at) throw new DomainError("DemandNotice is no longer active");
+
+    await client.query(
+      `UPDATE demand_notice SET archived_at = now(), withdrawal_note = $2 WHERE id = $1`,
+      [demandNoticeId, args.note],
+    );
+    return { demandNoticeId };
+  });
+}
+export const withdrawDemand = withAuthorization(["financialInstitution"], withdrawDemandImpl);
+
+export async function listDemandNotices(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM demand_notice ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── LegalEscalation: RecordCourtOrder + ResolveLegal ─────────────────────
+// Both `create this with` field-replacements on the real Daml template (no
+// contract key on SDK 3.4.11/LF 2.2) -- collapsed to plain UPDATEs, same
+// rule as every other keyless field-replace choice in this migration.
+
+async function recordCourtOrderImpl(session: SessionContext, legalEscalationId: number, args: { courtOrderRef: string }) {
+  if (!args.courtOrderRef) throw new DomainError("Court order reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM legal_escalation WHERE id = $1 FOR UPDATE", [legalEscalationId]);
+    if (!rows[0]) throw new DomainError("LegalEscalation not found");
+    await client.query(
+      `UPDATE legal_escalation SET court_ref = $2, updated_at = now() WHERE id = $1`,
+      [legalEscalationId, args.courtOrderRef],
+    );
+    return { legalEscalationId };
+  });
+}
+export const recordCourtOrder = withAuthorization(["financialInstitution"], recordCourtOrderImpl);
+
+async function resolveLegalImpl(session: SessionContext, legalEscalationId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Resolution note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT resolved_at FROM legal_escalation WHERE id = $1 FOR UPDATE", [legalEscalationId]);
+    const escalation = rows[0];
+    if (!escalation) throw new DomainError("LegalEscalation not found");
+    if (escalation.resolved_at) throw new DomainError("Already resolved");
+    await client.query(
+      `UPDATE legal_escalation SET resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [legalEscalationId],
+    );
+    return { legalEscalationId };
+  });
+}
+export const resolveLegal = withAuthorization(["financialInstitution"], resolveLegalImpl);
+
+export async function listLegalEscalations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM legal_escalation ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── GSMInvocation: create + RecordGSMSweep/CancelGSM ─────────────────────
 
 interface CreateGsmInvocationArgs {

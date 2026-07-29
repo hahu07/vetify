@@ -520,6 +520,40 @@ export function serializeWriteOffRecord(row: Record<string, unknown>) {
   };
 }
 
+export function serializeDemandNotice(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    demandDate: row.demand_date,
+    outstandingAmount: num(row.outstanding_amount),
+    demandRef: row.demand_ref,
+    responseDeadline: row.response_deadline,
+    gsmEligible: row.gsm_eligible,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+    supersededById: row.superseded_by_id != null ? String(row.superseded_by_id) : null,
+    withdrawalNote: row.withdrawal_note ?? null,
+  };
+}
+
+export function serializeLegalEscalation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    demandNoticeId: String(row.demand_notice_id),
+    businessName: row.business_name,
+    cacRegNumber: row.cac_reg_number,
+    escalationDate: row.escalation_date,
+    solicitorRef: row.solicitor_ref,
+    legalAction: row.legal_action,
+    outstandingAmount: num(row.outstanding_amount),
+    courtRef: row.court_ref ?? null,
+    resolvedAt: row.resolved_at ?? null,
+  };
+}
+
 export function serializeGsmInvocation(row: Record<string, unknown>) {
   return {
     id: String(row.id),
