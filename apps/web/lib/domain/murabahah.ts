@@ -2578,3 +2578,161 @@ export async function listHamishJiddiyyah(session: SessionContext) {
     return rows;
   });
 }
+
+// ─── Phase 2, Twenty-Ninth Slice: regulatory inspection workflow ──────────
+// RegulatoryInspectionRequest is created directly by vetify -- no exercised
+// choice creates it in the real Daml (confirmed against MurabahahTests.daml's
+// M-RI test, a bare `createCmd` as vetify). No `business` visibility on any
+// of the three templates -- this is CBN oversight of the FI, not something
+// the underlying business sees.
+
+interface CreateRegulatoryInspectionRequestArgs {
+  cacRegNumber: string;
+  businessName: string;
+  inspectionRef: string;
+  inspectionScope: string;
+  responseDeadline: string;
+}
+
+async function createRegulatoryInspectionRequestImpl(session: SessionContext, args: CreateRegulatoryInspectionRequestArgs) {
+  if (!args.inspectionRef) throw new DomainError("Inspection reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO regulatory_inspection_request
+         (cac_reg_number, business_name, inspection_ref, inspection_scope, response_deadline)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.inspectionRef, args.inspectionScope, args.responseDeadline],
+    );
+    return { regulatoryInspectionRequestId: rows[0].id };
+  });
+}
+export const createRegulatoryInspectionRequest = withAuthorization(["vetify"], createRegulatoryInspectionRequestImpl);
+
+// ─── Choice: ExtendDeadline (RegulatoryInspectionRequest, vetify) ─────────
+// Keyless field-replace (`create this with responseDeadline = newDeadline`)
+// -- collapses to a plain UPDATE, same convention as Revalue/ProceedWithReplacement.
+
+async function extendDeadlineImpl(session: SessionContext, requestId: number, args: { newDeadline: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM regulatory_inspection_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("RegulatoryInspectionRequest not found");
+    if (request.archived_at) throw new DomainError("RegulatoryInspectionRequest is no longer active");
+    if (!(new Date(args.newDeadline).getTime() > new Date(dateOnlyString(request.response_deadline)!).getTime())) {
+      throw new DomainError("New deadline must be later than current");
+    }
+
+    await client.query(
+      `UPDATE regulatory_inspection_request SET response_deadline = $2, updated_at = now() WHERE id = $1`,
+      [requestId, args.newDeadline],
+    );
+    return { regulatoryInspectionRequestId: requestId };
+  });
+}
+export const extendDeadline = withAuthorization(["vetify"], extendDeadlineImpl);
+
+// ─── Choice: RespondToInspection (RegulatoryInspectionRequest, financialInstitution) ──
+// Consuming -- archives the request, creates InspectionResponse.
+
+interface RespondToInspectionArgs {
+  responseRef: string;
+  documents: string[];
+  respondedByName: string;
+  responseDate: string;
+}
+
+async function respondToInspectionImpl(session: SessionContext, requestId: number, args: RespondToInspectionArgs) {
+  if (!args.responseRef) throw new DomainError("Response reference must not be empty");
+  if (!args.respondedByName) throw new DomainError("Responded-by name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM regulatory_inspection_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("RegulatoryInspectionRequest not found");
+    if (request.archived_at) throw new DomainError("RegulatoryInspectionRequest is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO inspection_response
+         (regulatory_inspection_request_id, cac_reg_number, business_name, inspection_ref,
+          response_ref, documents, responded_by_name, response_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        requestId, request.cac_reg_number, request.business_name, request.inspection_ref,
+        args.responseRef, JSON.stringify(args.documents ?? []), args.respondedByName, args.responseDate,
+      ],
+    );
+    const inspectionResponseId = created[0].id;
+
+    await client.query(
+      `UPDATE regulatory_inspection_request
+         SET archived_at = now(), superseded_by_kind = 'inspection_response', superseded_by_id = $2
+         WHERE id = $1`,
+      [requestId, inspectionResponseId],
+    );
+    return { inspectionResponseId };
+  });
+}
+export const respondToInspection = withAuthorization(["financialInstitution"], respondToInspectionImpl);
+
+// ─── Choice: CloseInspection (InspectionResponse, vetify) ─────────────────
+// Consuming -- archives the response, creates the immutable InspectionRecord.
+
+interface CloseInspectionArgs {
+  findings: string[];
+  passed: boolean;
+  followUpNeeded: boolean;
+  closingNote: string;
+}
+
+async function closeInspectionImpl(session: SessionContext, responseId: number, args: CloseInspectionArgs) {
+  if (!args.closingNote) throw new DomainError("Closing note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM inspection_response WHERE id = $1 FOR UPDATE", [responseId]);
+    const response = rows[0];
+    if (!response) throw new DomainError("InspectionResponse not found");
+    if (response.archived_at) throw new DomainError("InspectionResponse is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO inspection_record
+         (inspection_response_id, cac_reg_number, business_name, inspection_ref, findings, passed, follow_up_needed, closing_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        responseId, response.cac_reg_number, response.business_name, response.inspection_ref,
+        JSON.stringify(args.findings ?? []), args.passed, args.followUpNeeded, args.closingNote,
+      ],
+    );
+    const inspectionRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE inspection_response
+         SET archived_at = now(), superseded_by_kind = 'inspection_record', superseded_by_id = $2
+         WHERE id = $1`,
+      [responseId, inspectionRecordId],
+    );
+    return { inspectionRecordId };
+  });
+}
+export const closeInspection = withAuthorization(["vetify"], closeInspectionImpl);
+
+export async function listRegulatoryInspectionRequests(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM regulatory_inspection_request ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listInspectionResponses(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM inspection_response ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listInspectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM inspection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}

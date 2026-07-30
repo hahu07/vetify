@@ -736,6 +736,50 @@ export function serializeHamishJiddiyyah(row: Record<string, unknown>) {
   };
 }
 
+export function serializeRegulatoryInspectionRequest(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    inspectionScope: row.inspection_scope,
+    responseDeadline: row.response_deadline,
+    requestedAt: row.requested_at,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+  };
+}
+
+export function serializeInspectionResponse(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    regulatoryInspectionRequestId: String(row.regulatory_inspection_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    responseRef: row.response_ref,
+    documents: row.documents ?? [],
+    respondedByName: row.responded_by_name,
+    responseDate: row.response_date,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+  };
+}
+
+export function serializeInspectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    inspectionResponseId: String(row.inspection_response_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    findings: row.findings ?? [],
+    passed: row.passed,
+    followUpNeeded: row.follow_up_needed,
+    closingNote: row.closing_note,
+  };
+}
+
 // ─── Phase 2, Eleventh Slice: Stage 0 (FinancingProviderOnboarding) ───────
 
 export function serializeProviderOnboarding(row: Record<string, unknown>) {
