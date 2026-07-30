@@ -1064,6 +1064,74 @@ export function useRejectCompliancePolicyChange() {
   });
 }
 
+// ─── Phase 2, Thirty-Fifth Slice: UnderwritingPolicy (no maker-checker) ────
+// Unlike VerificationPolicy/CompliancePolicy above, the real Daml has no
+// PendingUnderwritingPolicy/riskCommittee endorsement layer at all -- a
+// single vetify-controlled create + UpdatePolicy. Mirrors
+// serializeUnderwritingPolicy's camelCase shape exactly.
+
+export interface UnderwritingPolicyEntry {
+  id: number;
+  policyVersion: string;
+  autoApproveMin: number;
+  autoRejectMax: number;
+  minDscrRatio: number | null;
+  minLoanAmount: number | null;
+  maxLoanAmount: number | null;
+  indicativeProfitMarginPct: number | null;
+  requestSlaHours: number;
+  offerValidityDays: number;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  writeOffThresholdAmount: number | null;
+  maxRestructuringsPerFacility: number | null;
+  permittedSectors: string[] | null;
+  requiredCollateralTypes: string[];
+  maxSectorConcentrationPct: number | null;
+  scoringWeights: Record<string, number>;
+}
+
+export interface UnderwritingPolicyPayload {
+  policyVersion: string;
+  autoApproveMin: number;
+  autoRejectMax: number;
+  minDscrRatio?: number | null;
+  minLoanAmount?: number | null;
+  maxLoanAmount?: number | null;
+  indicativeProfitMarginPct?: number | null;
+  requestSlaHours: number;
+  offerValidityDays: number;
+  effectiveFrom: string;
+  writeOffThresholdAmount?: number | null;
+  maxRestructuringsPerFacility?: number | null;
+  permittedSectors?: string[] | null;
+  requiredCollateralTypes?: string[];
+  maxSectorConcentrationPct?: number | null;
+  scoringWeights: Record<string, number>;
+}
+
+export function useUnderwritingPolicies() {
+  return useQuery({
+    queryKey: ["underwriting-policies"],
+    queryFn: async () => (await apiClient.get<UnderwritingPolicyEntry[]>("/underwriting-policies")).data,
+  });
+}
+export function useCreateUnderwritingPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: UnderwritingPolicyPayload) => apiClient.post("/underwriting-policies", payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["underwriting-policies"] }),
+  });
+}
+export function useUpdateUnderwritingPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, ...payload }: UnderwritingPolicyPayload & { id: number }) =>
+      apiClient.post(`/underwriting-policies/${id}/update`, payload).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["underwriting-policies"] }),
+  });
+}
+
 export function useAssessors() {
   return useQuery({ queryKey: ["assessors"], queryFn: async () => (await apiClient.get<AssessorEntry[]>("/governance/assessors")).data });
 }

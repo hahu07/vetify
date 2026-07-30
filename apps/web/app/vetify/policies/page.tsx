@@ -16,10 +16,15 @@ import {
   useApproveCompliancePolicyChange,
   useRejectCompliancePolicyChange,
   usePolicyApprovers,
+  useUnderwritingPolicies,
+  useCreateUnderwritingPolicy,
+  useUpdateUnderwritingPolicy,
   type VerificationPolicyEntry,
   type PendingVerificationPolicyEntry,
   type CompliancePolicyEntry,
   type PendingCompliancePolicyEntry,
+  type UnderwritingPolicyEntry,
+  type UnderwritingPolicyPayload,
 } from "@/lib/apiClient";
 
 // New page (no legacy-frontend equivalent). vetify's side of the
@@ -442,6 +447,164 @@ function CompliancePolicySection({ proposedBy, approverNames }: { proposedBy: st
   );
 }
 
+// ─── Phase 2, Thirty-Fifth Slice: UnderwritingPolicy (no maker-checker) ────
+// No PendingUnderwritingPolicy/riskCommittee layer in the real Daml -- a
+// single vetify-controlled create + UpdatePolicy. One form, pre-filled from
+// the active policy when one exists (submitting then calls update instead
+// of create), rather than the two-step propose/approve flow above.
+
+function UnderwritingPolicyForm({ active, onSubmit, pending }: {
+  active: UnderwritingPolicyEntry | undefined;
+  onSubmit: (fields: UnderwritingPolicyPayload) => Promise<void>;
+  pending: boolean;
+}) {
+  const [policyVersion, setPolicyVersion] = useState(active?.policyVersion ?? "");
+  const [autoApproveMin, setAutoApproveMin] = useState(active?.autoApproveMin ?? 80);
+  const [autoRejectMax, setAutoRejectMax] = useState(active?.autoRejectMax ?? 30);
+  const [minLoanAmount, setMinLoanAmount] = useState(active?.minLoanAmount != null ? String(active.minLoanAmount) : "");
+  const [maxLoanAmount, setMaxLoanAmount] = useState(active?.maxLoanAmount != null ? String(active.maxLoanAmount) : "");
+  const [requestSlaHours, setRequestSlaHours] = useState(active?.requestSlaHours ?? 48);
+  const [offerValidityDays, setOfferValidityDays] = useState(active?.offerValidityDays ?? 14);
+  const [effectiveFrom, setEffectiveFrom] = useState(active?.effectiveFrom ? active.effectiveFrom.slice(0, 16) : "");
+  const [permittedSectors, setPermittedSectors] = useState((active?.permittedSectors ?? []).join(", "));
+  const [scoringWeightsJson, setScoringWeightsJson] = useState(
+    active ? JSON.stringify(active.scoringWeights, null, 2) : "{}",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!policyVersion.trim() || !effectiveFrom) {
+      setError("Policy version and effective-from are both required");
+      return;
+    }
+    let scoringWeights: Record<string, number>;
+    try {
+      scoringWeights = JSON.parse(scoringWeightsJson || "{}");
+    } catch {
+      setError("Scoring weights must be valid JSON");
+      return;
+    }
+    try {
+      await onSubmit({
+        policyVersion, autoApproveMin, autoRejectMax,
+        minLoanAmount: minLoanAmount ? Number(minLoanAmount) : null,
+        maxLoanAmount: maxLoanAmount ? Number(maxLoanAmount) : null,
+        requestSlaHours, offerValidityDays,
+        effectiveFrom: new Date(effectiveFrom).toISOString(),
+        permittedSectors: permittedSectors.trim() ? permittedSectors.split(",").map((s) => s.trim()).filter(Boolean) : null,
+        scoringWeights,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save policy");
+    }
+  };
+
+  return (
+    <div className="space-y-3 pt-3 border-t border-gray-100">
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Policy Version</label>
+          <input className="input text-sm" placeholder="e.g. UWP-2026-01" value={policyVersion} onChange={(e) => setPolicyVersion(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Effective From</label>
+          <input type="datetime-local" className="input text-sm" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Auto-Approve Min</label>
+          <input type="number" className="input text-sm font-mono" value={autoApproveMin} onChange={(e) => setAutoApproveMin(Number(e.target.value))} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Auto-Reject Max</label>
+          <input type="number" className="input text-sm font-mono" value={autoRejectMax} onChange={(e) => setAutoRejectMax(Number(e.target.value))} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Min Loan Amount (optional)</label>
+          <input type="number" className="input text-sm font-mono" placeholder="No minimum" value={minLoanAmount} onChange={(e) => setMinLoanAmount(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Max Loan Amount (optional)</label>
+          <input type="number" className="input text-sm font-mono" placeholder="No maximum" value={maxLoanAmount} onChange={(e) => setMaxLoanAmount(e.target.value)} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Request SLA Hours</label>
+          <input type="number" className="input text-sm font-mono" value={requestSlaHours} onChange={(e) => setRequestSlaHours(Number(e.target.value))} />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Offer Validity Days</label>
+          <input type="number" className="input text-sm font-mono" value={offerValidityDays} onChange={(e) => setOfferValidityDays(Number(e.target.value))} />
+        </div>
+        <div className="col-span-2">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Permitted Sectors (optional, comma-separated)</label>
+          <input className="input text-sm" placeholder="Any sector permitted" value={permittedSectors} onChange={(e) => setPermittedSectors(e.target.value)} />
+        </div>
+      </div>
+      <div>
+        <label className="block text-xs font-medium text-gray-700 mb-1">Scoring Weights (JSON)</label>
+        <textarea rows={3} className="input text-xs font-mono resize-none" value={scoringWeightsJson} onChange={(e) => setScoringWeightsJson(e.target.value)} />
+      </div>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      <button onClick={handleSubmit} disabled={pending} className="btn-primary text-sm flex items-center justify-center gap-2 disabled:opacity-50">
+        <PlusCircle size={14} />
+        {pending ? "Saving…" : active ? "Update Policy" : "Create Policy"}
+      </button>
+    </div>
+  );
+}
+
+function UnderwritingPolicySection() {
+  const { data, isLoading } = useUnderwritingPolicies();
+  const create = useCreateUnderwritingPolicy();
+  const update = useUpdateUnderwritingPolicy();
+
+  const active = (data ?? [])[0];
+
+  return (
+    <CollapsibleSection
+      icon={<ScrollText size={15} className="text-primary" />}
+      title="UnderwritingPolicy (Stage 6)"
+      description="Auto-approve floor, loan-amount bounds, permitted sectors, SLA hours, and scoring weights gating BeginUnderwriting. No maker-checker for this one -- a single policy, updated in place."
+    >
+      <div>
+        <h3 className="text-xs font-semibold text-gray-600 mb-2">Active Policy</h3>
+        {isLoading ? (
+          <p className="text-xs text-gray-400">Loading…</p>
+        ) : active ? (
+          <div className="rounded-xl border border-gray-100 bg-surface p-4">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-sm font-semibold text-gray-900">{active.policyVersion}</span>
+              <span className="text-xs text-gray-400 font-mono">#{active.id}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs mt-2">
+              <div className="flex justify-between"><span className="text-gray-500">Auto-approve min</span><span className="font-mono text-gray-700">{active.autoApproveMin}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Auto-reject max</span><span className="font-mono text-gray-700">{active.autoRejectMax}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Min loan amount</span><span className="font-mono text-gray-700">{active.minLoanAmount ?? "—"}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Max loan amount</span><span className="font-mono text-gray-700">{active.maxLoanAmount ?? "—"}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Request SLA hours</span><span className="font-mono text-gray-700">{active.requestSlaHours}</span></div>
+              <div className="flex justify-between"><span className="text-gray-500">Offer validity days</span><span className="font-mono text-gray-700">{active.offerValidityDays}</span></div>
+            </div>
+            {active.permittedSectors && (
+              <p className="text-xs text-gray-500 mt-2">Permitted sectors: {active.permittedSectors.join(", ")}</p>
+            )}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400">No active UnderwritingPolicy — BeginUnderwriting proceeds unconditionally (no SLA/loan-amount/sector gate).</p>
+        )}
+      </div>
+
+      <div>
+        <h3 className="text-xs font-semibold text-gray-600 mb-2">{active ? "Update Policy" : "Create Policy"}</h3>
+        <UnderwritingPolicyForm
+          active={active}
+          pending={create.isPending || update.isPending}
+          onSubmit={(fields) => (active ? update.mutateAsync({ id: active.id, ...fields }) : create.mutateAsync(fields))}
+        />
+      </div>
+    </CollapsibleSection>
+  );
+}
+
 export default function VetifyPoliciesPage() {
   const { user } = useAuth();
   const { data: approvers } = usePolicyApprovers();
@@ -458,6 +621,7 @@ export default function VetifyPoliciesPage() {
         </p>
         <VerificationPolicySection proposedBy={user?.name ?? "Vetify Ops"} approverNames={approverNames} />
         <CompliancePolicySection proposedBy={user?.name ?? "Vetify Ops"} approverNames={approverNames} />
+        <UnderwritingPolicySection />
       </div>
     </Layout>
   );
