@@ -820,6 +820,20 @@ A previously entirely-unnamed gap, found by surveying every Daml template agains
 
 **Net**: the ninth dent in the ~52-template remainder, and the first slice to close a gap that had no prior "deferred" marker anywhere in the codebase — found purely by diffing the full Daml template list against ported Postgres tables.
 
+## Phase 2, Thirtieth Slice — Seven Standalone Audit/Governance Records (Batch)
+
+**Process change, agreed with the user after the Twenty-Ninth Slice**: the remaining ~29 templates were surveyed and grouped into five coherent batches by dependency (full detail in the survey that produced this list — three are fully self-contained, two touch existing choice bodies on `AssetPurchaseRecord`/`FinancingRequest`, one is a larger `UnderwritingPolicy` maker-checker chain deserving its own slice). Going forward, slices land in these bigger batches rather than one tiny 1-3-template cluster per turn — same full rigor (migration → RLS → routes → `tsc` → tests → live-verify → design doc → one commit) per batch, just fewer round trips. This slice is the first batch: seven templates, all directly vetify- or FI-created with **no dependency on any existing choice body** — the safest possible batch to start with, since nothing already tested could regress. Seven templates ported, 71 templates now ported total.
+
+**Three of the seven are genuinely portfolio-/FI-wide, not per-business** — `PortfolioRiskReport`, `ForceMajeureDeclaration`, and `CharityOrganizationRegistry` carry no `cacRegNumber`/`businessName` at all in the real Daml, unlike every other template ported so far in this migration. Their tables and `SELECT` policies reflect that directly (no per-business columns, `vetify`/`financialInstitution`/`regulator` only). Of the other four, `MurabahahStatement` is the only one with a `business` observer — its `SELECT` policy is the only one of the seven carrying the usual tenant-scoped `OR` clause, confirmed live and by a dedicated RLS test (`listMurabahahStatements` called as the owning business vs. a different business's CAC).
+
+**Every keyless single-choice template** (`ShariahException.ResolveException`, `MonitoringAlert.DismissAlert`, `ForceMajeureDeclaration.LiftDeclaration`, `CharityOrganizationRegistry.UpdateRegistry`) follows the same `create this with <field> = <new value>` → plain `UPDATE` collapse this migration established with `Revalue`/`ProceedWithReplacement`/`ExtendDeadline` — by this slice, thoroughly familiar territory, ported without incident.
+
+**RLS was correct on the first attempt for all seven** — every controller was known from the Daml source before any SQL was written (the batch survey read every template's full body up front), so this is the second slice in a row (after the Twenty-Ninth) with no policy-gap fix needed.
+
+**Verified**: `npx tsc --noEmit` clean on the first pass. `npm run check` — 314/314 tests passing (8 new in `test/domain-murabahah-standalone-audit-governance.test.ts`, one per template plus a dedicated RLS visibility test for `MurabahahStatement`'s business-observer case), RLS symmetry clean (77 tables), route coverage clean (208 exports) — both clean on the first run, no fixes needed mid-batch. **Verified live end-to-end via direct API calls, all seven in a single batched script**: as `vetify1` — `ShariahAuditRecord` created directly; `ShariahException` created then a `422` on an empty resolution note then a real `ResolveException`; `MurabahahStatement` created; `MonitoringAlert` created then dismissed; `PortfolioRiskReport` created. As `fi1` — `CharityOrganizationRegistry` created then updated via `UpdateRegistry`. Zero console errors across the whole batch.
+
+**Net**: the tenth dent in the ~52-template remainder, and the first slice run under the new batching agreement — seven templates landed in one turn instead of what would previously have been two or three separate slices.
+
 ## Overall Readiness Assessment — Phase 1 + Four Phase 2 Slices
 
 Requested as a step back after five backend slices and five matching frontend passes. Numbers first, then the honest read against addendum C's original gate criteria.

@@ -2736,3 +2736,352 @@ export async function listInspectionRecords(session: SessionContext) {
     return rows;
   });
 }
+
+// ─── Phase 2, Thirtieth Slice: standalone audit/governance records ────────
+// Seven templates, none dependent on any existing choice body -- vetify or
+// the FI creates each one directly. Grouped into one batch per the "bigger
+// batches, same rigor" plan.
+
+// ─── ShariahAuditRecord (vetify creates directly; no further choices) ─────
+
+interface CreateShariahAuditRecordArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  auditDate: string;
+  auditPeriod: string;
+  auditorRef: string;
+  findings: string[];
+  overallCompliant: boolean;
+  recommendations: string[];
+  nextAuditDate?: string | null;
+}
+
+async function createShariahAuditRecordImpl(session: SessionContext, args: CreateShariahAuditRecordArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO shariah_audit_record
+         (cac_reg_number, business_name, facility_ref, audit_date, audit_period, auditor_ref,
+          findings, overall_compliant, recommendations, next_audit_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.auditDate, args.auditPeriod, args.auditorRef,
+        JSON.stringify(args.findings ?? []), args.overallCompliant, JSON.stringify(args.recommendations ?? []), args.nextAuditDate ?? null,
+      ],
+    );
+    return { shariahAuditRecordId: rows[0].id };
+  });
+}
+export const createShariahAuditRecord = withAuthorization(["vetify"], createShariahAuditRecordImpl);
+
+export async function listShariahAuditRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_audit_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ShariahException (vetify creates + ResolveException) ─────────────────
+
+interface CreateShariahExceptionArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  exceptionType: string;
+  description: string;
+  severity: "MinorException" | "MajorException" | "CriticalException";
+}
+
+async function createShariahExceptionImpl(session: SessionContext, args: CreateShariahExceptionArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO shariah_exception
+         (cac_reg_number, business_name, facility_ref, exception_type, description, severity, detected_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.exceptionType, args.description, args.severity],
+    );
+    return { shariahExceptionId: rows[0].id };
+  });
+}
+export const createShariahException = withAuthorization(["vetify"], createShariahExceptionImpl);
+
+async function resolveExceptionImpl(session: SessionContext, exceptionId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Resolution note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT resolution_note FROM shariah_exception WHERE id = $1 FOR UPDATE", [exceptionId]);
+    const exception = rows[0];
+    if (!exception) throw new DomainError("ShariahException not found");
+    if (exception.resolution_note !== null) throw new DomainError("Exception is already resolved");
+
+    await client.query(
+      `UPDATE shariah_exception SET resolution_note = $2, resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [exceptionId, args.note],
+    );
+    return { shariahExceptionId: exceptionId };
+  });
+}
+export const resolveException = withAuthorization(["vetify"], resolveExceptionImpl);
+
+export async function listShariahExceptions(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_exception ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── MurabahahStatement (vetify creates directly; no further choices) ─────
+
+interface CreateMurabahahStatementArgs {
+  cacRegNumber: string;
+  businessName: string;
+  statementDate: string;
+  statementPeriod: string;
+  totalFinanced: number;
+  totalRepaid: number;
+  outstandingBalance: number;
+  installmentsPaid: number;
+  totalInstallments: number;
+  contractStatus: string;
+  shariahAuditRef?: string | null;
+}
+
+async function createMurabahahStatementImpl(session: SessionContext, args: CreateMurabahahStatementArgs) {
+  if (!(args.totalFinanced > 0)) throw new DomainError("totalFinanced must be positive");
+  if (!(args.totalRepaid >= 0)) throw new DomainError("totalRepaid must be non-negative");
+  if (!(args.outstandingBalance >= 0)) throw new DomainError("outstandingBalance must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO murabahah_statement
+         (cac_reg_number, business_name, statement_date, statement_period, total_financed, total_repaid,
+          outstanding_balance, installments_paid, total_installments, contract_status, shariah_audit_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.statementDate, args.statementPeriod, args.totalFinanced, args.totalRepaid,
+        args.outstandingBalance, args.installmentsPaid, args.totalInstallments, args.contractStatus, args.shariahAuditRef ?? null,
+      ],
+    );
+    return { murabahahStatementId: rows[0].id };
+  });
+}
+export const createMurabahahStatement = withAuthorization(["vetify"], createMurabahahStatementImpl);
+
+export async function listMurabahahStatements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM murabahah_statement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── MonitoringAlert (vetify creates + DismissAlert) ───────────────────────
+
+interface CreateMonitoringAlertArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  alertType: string;
+  alertSeverity: string;
+  alertDescription: string;
+}
+
+async function createMonitoringAlertImpl(session: SessionContext, args: CreateMonitoringAlertArgs) {
+  if (!args.alertDescription) throw new DomainError("Alert description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO monitoring_alert
+         (cac_reg_number, business_name, facility_ref, alert_type, alert_severity, alert_description, detected_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.alertType, args.alertSeverity, args.alertDescription],
+    );
+    return { monitoringAlertId: rows[0].id };
+  });
+}
+export const createMonitoringAlert = withAuthorization(["vetify"], createMonitoringAlertImpl);
+
+async function dismissAlertImpl(session: SessionContext, alertId: number, args: { dismissNote: string }) {
+  if (!args.dismissNote) throw new DomainError("Dismissal note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT dismissed FROM monitoring_alert WHERE id = $1 FOR UPDATE", [alertId]);
+    const alert = rows[0];
+    if (!alert) throw new DomainError("MonitoringAlert not found");
+    if (alert.dismissed) throw new DomainError("Alert is already dismissed");
+
+    await client.query(
+      `UPDATE monitoring_alert SET dismissed = true, dismissal_note = $2, updated_at = now() WHERE id = $1`,
+      [alertId, args.dismissNote],
+    );
+    return { monitoringAlertId: alertId };
+  });
+}
+export const dismissAlert = withAuthorization(["vetify"], dismissAlertImpl);
+
+export async function listMonitoringAlerts(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM monitoring_alert ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── PortfolioRiskReport (vetify creates directly; portfolio-wide, no cacRegNumber) ──
+
+interface PortfolioRiskMetricsArgs {
+  probabilityOfDefault: number;
+  lossGivenDefault: number;
+  expectedLoss: number;
+  exposureAtDefault: number;
+  concentrationRisk: number;
+  sectorConcentration: string;
+  delinquencyRate: number;
+  activeContractCount: number;
+}
+
+interface CreatePortfolioRiskReportArgs {
+  reportDate: string;
+  reportPeriod: string;
+  metrics: PortfolioRiskMetricsArgs;
+  generatedByAgent: string;
+  modelVersion: string;
+}
+
+async function createPortfolioRiskReportImpl(session: SessionContext, args: CreatePortfolioRiskReportArgs) {
+  if (!(args.metrics.activeContractCount >= 0)) throw new DomainError("activeContractCount must be non-negative");
+  if (!(args.metrics.exposureAtDefault >= 0)) throw new DomainError("exposureAtDefault must be non-negative");
+  if (!(args.metrics.expectedLoss >= 0)) throw new DomainError("expectedLoss must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO portfolio_risk_report
+         (report_date, report_period, probability_of_default, loss_given_default, expected_loss,
+          exposure_at_default, concentration_risk, sector_concentration, delinquency_rate,
+          active_contract_count, generated_by_agent, model_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING id`,
+      [
+        args.reportDate, args.reportPeriod, args.metrics.probabilityOfDefault, args.metrics.lossGivenDefault, args.metrics.expectedLoss,
+        args.metrics.exposureAtDefault, args.metrics.concentrationRisk, args.metrics.sectorConcentration, args.metrics.delinquencyRate,
+        args.metrics.activeContractCount, args.generatedByAgent, args.modelVersion,
+      ],
+    );
+    return { portfolioRiskReportId: rows[0].id };
+  });
+}
+export const createPortfolioRiskReport = withAuthorization(["vetify"], createPortfolioRiskReportImpl);
+
+export async function listPortfolioRiskReports(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM portfolio_risk_report ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ForceMajeureDeclaration (vetify creates + LiftDeclaration; portfolio-wide) ──
+
+interface CreateForceMajeureDeclarationArgs {
+  declarationRef: string;
+  eventDescription: string;
+  affectedRegion: string;
+  suspensionStart: string;
+  suspensionEnd: string;
+  regulatoryBasis: string;
+}
+
+async function createForceMajeureDeclarationImpl(session: SessionContext, args: CreateForceMajeureDeclarationArgs) {
+  if (!args.declarationRef) throw new DomainError("declarationRef must not be empty");
+  if (!args.eventDescription) throw new DomainError("eventDescription must not be empty");
+  if (!(new Date(args.suspensionEnd).getTime() > new Date(args.suspensionStart).getTime())) {
+    throw new DomainError("suspensionEnd must be later than suspensionStart");
+  }
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO force_majeure_declaration
+         (declaration_ref, event_description, affected_region, suspension_start, suspension_end, regulatory_basis)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [args.declarationRef, args.eventDescription, args.affectedRegion, args.suspensionStart, args.suspensionEnd, args.regulatoryBasis],
+    );
+    return { forceMajeureDeclarationId: rows[0].id };
+  });
+}
+export const createForceMajeureDeclaration = withAuthorization(["vetify"], createForceMajeureDeclarationImpl);
+
+async function liftDeclarationImpl(session: SessionContext, declarationId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Lifting note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT is_active FROM force_majeure_declaration WHERE id = $1 FOR UPDATE", [declarationId]);
+    const declaration = rows[0];
+    if (!declaration) throw new DomainError("ForceMajeureDeclaration not found");
+    if (!declaration.is_active) throw new DomainError("Declaration has already been lifted");
+
+    await client.query(`UPDATE force_majeure_declaration SET is_active = false, updated_at = now() WHERE id = $1`, [declarationId]);
+    return { forceMajeureDeclarationId: declarationId };
+  });
+}
+export const liftDeclaration = withAuthorization(["vetify"], liftDeclarationImpl);
+
+export async function listForceMajeureDeclarations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM force_majeure_declaration ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── CharityOrganizationRegistry (financialInstitution creates + UpdateRegistry; FI-wide) ──
+
+interface CharityOrgArgs {
+  approvedOrganizations: [string, string][];
+  shariahBoardRef: string;
+  effectiveDate: string;
+  version: string;
+}
+
+async function createCharityOrganizationRegistryImpl(session: SessionContext, args: CharityOrgArgs) {
+  if (!args.approvedOrganizations || args.approvedOrganizations.length === 0) {
+    throw new DomainError("Updated list must not be empty");
+  }
+  if (!args.shariahBoardRef) throw new DomainError("shariahBoardRef must not be empty");
+  if (!args.version) throw new DomainError("version must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO charity_organization_registry (approved_organizations, shariah_board_ref, effective_date, version)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [JSON.stringify(args.approvedOrganizations), args.shariahBoardRef, args.effectiveDate, args.version],
+    );
+    return { charityOrganizationRegistryId: rows[0].id };
+  });
+}
+export const createCharityOrganizationRegistry = withAuthorization(["financialInstitution"], createCharityOrganizationRegistryImpl);
+
+interface UpdateRegistryArgs {
+  newOrganizations: [string, string][];
+  newVersion: string;
+  updatedBoardRef: string;
+}
+
+async function updateRegistryImpl(session: SessionContext, registryId: number, args: UpdateRegistryArgs) {
+  if (!args.newOrganizations || args.newOrganizations.length === 0) throw new DomainError("Updated list must not be empty");
+  if (!args.newVersion) throw new DomainError("New version must not be empty");
+  if (!args.updatedBoardRef) throw new DomainError("Updated board reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM charity_organization_registry WHERE id = $1 FOR UPDATE", [registryId]);
+    if (!rows[0]) throw new DomainError("CharityOrganizationRegistry not found");
+
+    await client.query(
+      `UPDATE charity_organization_registry
+         SET approved_organizations = $2, version = $3, shariah_board_ref = $4, updated_at = now()
+         WHERE id = $1`,
+      [registryId, JSON.stringify(args.newOrganizations), args.newVersion, args.updatedBoardRef],
+    );
+    return { charityOrganizationRegistryId: registryId };
+  });
+}
+export const updateRegistry = withAuthorization(["financialInstitution"], updateRegistryImpl);
+
+export async function listCharityOrganizationRegistries(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM charity_organization_registry ORDER BY created_at DESC`);
+    return rows;
+  });
+}

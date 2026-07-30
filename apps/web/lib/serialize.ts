@@ -826,3 +826,111 @@ export function serializeProviderVerificationPolicy(row: Record<string, unknown>
     scoringWeights: row.scoring_weights,
   };
 }
+
+// ─── Phase 2, Thirtieth Slice: standalone audit/governance records ────────
+
+export function serializeShariahAuditRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    auditDate: row.audit_date,
+    auditPeriod: row.audit_period,
+    auditorRef: row.auditor_ref,
+    findings: row.findings ?? [],
+    overallCompliant: row.overall_compliant,
+    recommendations: row.recommendations ?? [],
+    nextAuditDate: row.next_audit_date ?? null,
+  };
+}
+
+export function serializeShariahException(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    exceptionType: row.exception_type,
+    description: row.description,
+    severity: row.severity,
+    detectedAt: row.detected_at,
+    resolutionNote: row.resolution_note ?? null,
+    resolvedAt: row.resolved_at ?? null,
+  };
+}
+
+export function serializeMurabahahStatement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    statementDate: row.statement_date,
+    statementPeriod: row.statement_period,
+    totalFinanced: num(row.total_financed),
+    totalRepaid: num(row.total_repaid),
+    outstandingBalance: num(row.outstanding_balance),
+    installmentsPaid: row.installments_paid,
+    totalInstallments: row.total_installments,
+    contractStatus: row.contract_status,
+    shariahAuditRef: row.shariah_audit_ref ?? null,
+  };
+}
+
+export function serializeMonitoringAlert(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    alertType: row.alert_type,
+    alertSeverity: row.alert_severity,
+    alertDescription: row.alert_description,
+    detectedAt: row.detected_at,
+    dismissed: row.dismissed,
+    dismissalNote: row.dismissal_note ?? null,
+  };
+}
+
+export function serializePortfolioRiskReport(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    reportDate: row.report_date,
+    reportPeriod: row.report_period,
+    metrics: {
+      probabilityOfDefault: num(row.probability_of_default),
+      lossGivenDefault: num(row.loss_given_default),
+      expectedLoss: num(row.expected_loss),
+      exposureAtDefault: num(row.exposure_at_default),
+      concentrationRisk: num(row.concentration_risk),
+      sectorConcentration: row.sector_concentration,
+      delinquencyRate: num(row.delinquency_rate),
+      activeContractCount: row.active_contract_count,
+    },
+    generatedByAgent: row.generated_by_agent,
+    modelVersion: row.model_version,
+  };
+}
+
+export function serializeForceMajeureDeclaration(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    declarationRef: row.declaration_ref,
+    eventDescription: row.event_description,
+    affectedRegion: row.affected_region,
+    suspensionStart: row.suspension_start,
+    suspensionEnd: row.suspension_end,
+    regulatoryBasis: row.regulatory_basis,
+    isActive: row.is_active,
+  };
+}
+
+export function serializeCharityOrganizationRegistry(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    approvedOrganizations: row.approved_organizations ?? [],
+    shariahBoardRef: row.shariah_board_ref,
+    effectiveDate: row.effective_date,
+    version: row.version,
+  };
+}
