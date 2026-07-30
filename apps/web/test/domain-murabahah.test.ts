@@ -15,6 +15,7 @@ import {
   proceedDirectly,
   proceedWithWakala,
   withdrawWad,
+  attachQuotation,
   recordAssetPurchase,
   declineAgency,
   acknowledgeDelivery,
@@ -22,6 +23,8 @@ import {
   certifyShariahTerms,
   acceptProposal,
   declineProposal,
+  expireProposal,
+  withdrawProposal,
 } from "@/lib/domain/murabahah";
 import type { RiskAssessment } from "@/lib/types-financing";
 import type { MurabahahTerms, PaymentScheduleEntry } from "@/lib/types-murabahah";
@@ -29,6 +32,9 @@ import { ensureStage0ApprovalFixtures } from "./stage0-fixtures";
 
 function businessSession(cacRegNumber: string): SessionContext {
   return { userId: 1, username: "test-business", displayName: "Test Business", partyRole: "business", cacRegNumber };
+}
+function vetifySession(): SessionContext {
+  return { userId: 3, username: "test-vetify", displayName: "Test Vetify", partyRole: "vetify", cacRegNumber: null };
 }
 function assessorSession(): SessionContext {
   return { userId: 4, username: "test-assessor", displayName: "Test Assessor", partyRole: "assessor", cacRegNumber: null };
@@ -91,6 +97,7 @@ async function cleanup(cac: string) {
   await fixtureClient.query(`DELETE FROM agency_withdrawal_record WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM murabahah_wakala WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM wad_withdrawal_record WHERE cac_reg_number = $1`, [cac]);
+  await fixtureClient.query(`DELETE FROM supplier_quotation WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM murabahah_wad WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM financing_decision WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM underwriting_result WHERE cac_reg_number = $1`, [cac]);
@@ -288,6 +295,30 @@ test("withdrawWad: rejects an empty reason, archives the Wad with a WadWithdrawa
       () => withdrawWad(businessSession(cac), wadId, { reason: "test" }),
       (err: unknown) => err instanceof DomainError && err.message === "MurabahahWad is no longer active",
     );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+// ─── attachQuotation ────────────────────────────────────────────────────────
+
+test("attachQuotation: rejects a non-positive quoted amount, nonconsuming (the Wad stays active)", async () => {
+  const cac = "RC5100006";
+  try {
+    const wadId = await buildWadFixture(cac);
+    await assert.rejects(
+      () => attachQuotation(fiSession(), wadId, { supplierName: "Golden Mills", quotationRef: "QUOT-1", quotedAmount: 0 }),
+      (err: unknown) => err instanceof DomainError && err.message === "Quoted amount must be positive",
+    );
+    const result = await attachQuotation(fiSession(), wadId, { supplierName: "Golden Mills", quotationRef: "QUOT-2026-001", quotedAmount: 495_000 });
+    assert.ok(result.supplierQuotationId);
+
+    const { rows: wad } = await fixtureClient.query("SELECT archived_at FROM murabahah_wad WHERE id = $1", [wadId]);
+    assert.equal(wad[0].archived_at, null);
+
+    const { rows: quotation } = await fixtureClient.query("SELECT quotation_ref, quoted_amount FROM supplier_quotation WHERE id = $1", [result.supplierQuotationId]);
+    assert.equal(quotation[0].quotation_ref, "QUOT-2026-001");
+    assert.equal(Number(quotation[0].quoted_amount), 495_000);
   } finally {
     await cleanup(cac);
   }
@@ -595,6 +626,79 @@ test("declineProposal: rejects an empty reason, archives the proposal with a Pro
 
     await assert.rejects(
       () => declineProposal(businessSession(cac), Number(proposalId), { reason: "test" }),
+      (err: unknown) => err instanceof DomainError && err.message === "MurabahahProposal is no longer active",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+// ─── expireProposal / withdrawProposal -- both `()` in the real Daml, no successor ──
+
+test("expireProposal: rejects when no expiry is configured, and when the window has not yet elapsed", async () => {
+  const cac = "RC5100007";
+  try {
+    const proposalId = await buildProposalFixture(cac, `FAC-${cac}`);
+    await assert.rejects(
+      () => expireProposal(vetifySession(), Number(proposalId)),
+      (err: unknown) => err instanceof DomainError && err.message === "No acceptance expiry configured on this proposal",
+    );
+
+    await fixtureClient.query(
+      "UPDATE murabahah_proposal SET acceptance_expires_at = now() + interval '1 day' WHERE id = $1",
+      [proposalId],
+    );
+    await assert.rejects(
+      () => expireProposal(vetifySession(), Number(proposalId)),
+      (err: unknown) => err instanceof DomainError && err.message === "Proposal acceptance window has not yet elapsed",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("expireProposal: happy path archives with no successor (superseded_by_kind stays NULL)", async () => {
+  const cac = "RC5100008";
+  try {
+    const proposalId = await buildProposalFixture(cac, `FAC-${cac}`);
+    // Backdate into the past -- offerMurabahah itself validates acceptanceExpiresAt
+    // must be in the future at creation time, so a genuinely-expired fixture
+    // can only be built by mutating the row directly after the fact.
+    await fixtureClient.query(
+      "UPDATE murabahah_proposal SET acceptance_expires_at = now() - interval '1 day' WHERE id = $1",
+      [proposalId],
+    );
+    await expireProposal(vetifySession(), Number(proposalId));
+
+    const { rows } = await fixtureClient.query("SELECT archived_at, superseded_by_kind FROM murabahah_proposal WHERE id = $1", [proposalId]);
+    assert.ok(rows[0].archived_at);
+    assert.equal(rows[0].superseded_by_kind, null);
+
+    await assert.rejects(
+      () => expireProposal(vetifySession(), Number(proposalId)),
+      (err: unknown) => err instanceof DomainError && err.message === "MurabahahProposal is no longer active",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("withdrawProposal: rejects an empty reason, archives with no successor on success", async () => {
+  const cac = "RC5100009";
+  try {
+    const proposalId = await buildProposalFixture(cac, `FAC-${cac}`);
+    await assert.rejects(
+      () => withdrawProposal(fiSession(), Number(proposalId), { reason: "" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Withdrawal reason must not be empty",
+    );
+    await withdrawProposal(fiSession(), Number(proposalId), { reason: "Better terms found elsewhere" });
+
+    const { rows } = await fixtureClient.query("SELECT archived_at, superseded_by_kind FROM murabahah_proposal WHERE id = $1", [proposalId]);
+    assert.ok(rows[0].archived_at);
+    assert.equal(rows[0].superseded_by_kind, null);
+
+    await assert.rejects(
+      () => withdrawProposal(fiSession(), Number(proposalId), { reason: "test" }),
       (err: unknown) => err instanceof DomainError && err.message === "MurabahahProposal is no longer active",
     );
   } finally {

@@ -235,6 +235,20 @@ export function serializeProposalDeclineRecord(row: Record<string, unknown>) {
   };
 }
 
+export function serializeSupplierQuotation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahWadId: String(row.murabahah_wad_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    supplierName: row.supplier_name,
+    quotationRef: row.quotation_ref,
+    quotedAmount: num(row.quoted_amount),
+    assetDescription: row.asset_description,
+    validUntil: row.valid_until ?? null,
+  };
+}
+
 export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
   return {
     id: String(row.id),

@@ -159,6 +159,45 @@ async function withdrawWadImpl(session: SessionContext, wadId: number, args: { r
 }
 export const withdrawWad = withAuthorization(["business"], withdrawWadImpl);
 
+// ─── Choice: AttachQuotation (MurabahahWad, financialInstitution) ─────────
+// Phase 2, Twenty-Fifth Slice. Nonconsuming in the real Daml -- "the Wa'd
+// stays active; the quotation is a side record."
+
+interface AttachQuotationArgs {
+  supplierName: string;
+  quotationRef: string;
+  quotedAmount: number;
+  validUntil?: string | null;
+}
+
+async function attachQuotationImpl(session: SessionContext, wadId: number, args: AttachQuotationArgs) {
+  if (!(args.quotedAmount > 0)) throw new DomainError("Quoted amount must be positive");
+  if (!args.quotationRef) throw new DomainError("Quotation reference must not be empty");
+  if (!args.supplierName) throw new DomainError("Supplier name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wad WHERE id = $1", [wadId]);
+    const wad = rows[0];
+    if (!wad) throw new DomainError("MurabahahWad not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_quotation
+         (murabahah_wad_id, cac_reg_number, business_name, supplier_name, quotation_ref, quoted_amount, asset_description, valid_until)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [wadId, wad.cac_reg_number, wad.business_name, args.supplierName, args.quotationRef, args.quotedAmount, wad.asset_description, args.validUntil ?? null],
+    );
+    return { supplierQuotationId: created[0].id };
+  });
+}
+export const attachQuotation = withAuthorization(["financialInstitution"], attachQuotationImpl);
+
+export async function listSupplierQuotations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_quotation ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── MurabahahWakala: RecordAssetPurchase + DeclineAgency ─────────────────
 // Both consuming on the real Daml MurabahahWakala template, business-
 // controlled. asset_purchase_record.murabahah_wad_id is set to the
@@ -562,6 +601,46 @@ export async function listProposalDeclineRecords(session: SessionContext) {
     return rows;
   });
 }
+
+// ─── Choice: ExpireProposal (MurabahahProposal, vetify) ────────────────────
+// Phase 2, Twenty-Fifth Slice. Returns `()` in the real Daml -- no
+// successor record, unlike AcceptProposal/DeclineProposal. Archives with
+// superseded_by_kind left NULL, same "no successor" shape WithdrawDemand
+// (Twenty-Third Slice) already established.
+
+async function expireProposalImpl(session: SessionContext, proposalId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_proposal WHERE id = $1 FOR UPDATE", [proposalId]);
+    const proposal = rows[0];
+    if (!proposal) throw new DomainError("MurabahahProposal not found");
+    if (proposal.archived_at) throw new DomainError("MurabahahProposal is no longer active");
+    if (!proposal.acceptance_expires_at) throw new DomainError("No acceptance expiry configured on this proposal");
+    if (new Date(proposal.acceptance_expires_at).getTime() >= Date.now()) {
+      throw new DomainError("Proposal acceptance window has not yet elapsed");
+    }
+
+    await client.query(`UPDATE murabahah_proposal SET archived_at = now() WHERE id = $1`, [proposalId]);
+    return { proposalId };
+  });
+}
+export const expireProposal = withAuthorization(["vetify"], expireProposalImpl);
+
+// ─── Choice: WithdrawProposal (MurabahahProposal, financialInstitution) ───
+// Also returns `()` in the real Daml -- no successor record.
+
+async function withdrawProposalImpl(session: SessionContext, proposalId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Withdrawal reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT archived_at FROM murabahah_proposal WHERE id = $1 FOR UPDATE", [proposalId]);
+    const proposal = rows[0];
+    if (!proposal) throw new DomainError("MurabahahProposal not found");
+    if (proposal.archived_at) throw new DomainError("MurabahahProposal is no longer active");
+
+    await client.query(`UPDATE murabahah_proposal SET archived_at = now() WHERE id = $1`, [proposalId]);
+    return { proposalId };
+  });
+}
+export const withdrawProposal = withAuthorization(["financialInstitution"], withdrawProposalImpl);
 
 // ─── Reads ──────────────────────────────────────────────────────────────
 
