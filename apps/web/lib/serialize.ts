@@ -249,6 +249,36 @@ export function serializeSupplierQuotation(row: Record<string, unknown>) {
   };
 }
 
+export function serializeCollateralValuationRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    previousValue: num(row.previous_value),
+    valuationAmount: num(row.valuation_amount),
+    valuationDate: row.valuation_date,
+    valuatorRef: row.valuator_ref,
+    notes: row.notes ?? null,
+  };
+}
+
+export function serializeCollateralInspectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionDate: row.inspection_date,
+    inspectedBy: row.inspected_by,
+    condition: row.condition,
+    inspectionNotes: row.inspection_notes ?? null,
+    nextInspectionDate: row.next_inspection_date ?? null,
+    mandateStatus: row.mandate_status ?? null,
+    estimatedGsmRecoverable: num(row.estimated_gsm_recoverable) ?? null,
+  };
+}
+
 export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
   return {
     id: String(row.id),

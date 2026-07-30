@@ -1293,6 +1293,98 @@ async function enforceCollateralImpl(session: SessionContext, rahnAgreementId: n
 }
 export const enforceCollateral = withAuthorization(["financialInstitution"], enforceCollateralImpl);
 
+// ─── Choice: Revalue (RahnAgreement, financialInstitution) ────────────────
+// Phase 2, Twenty-Sixth Slice. Named as deferred directly in migrations/012's
+// own header when that slice built the business-driven valuation *document
+// upload* instead -- a deliberately separate, lower-stakes feature. This is
+// the real FI-controlled revaluation decision `create this with
+// collateralValue = newValue` collapses to a plain UPDATE (no contract key
+// on SDK 3.4.11/LF 2.2), same rule as every other keyless field-replace
+// choice already ported.
+
+interface RevalueArgs {
+  newValue: number;
+  valuationDate: string;
+  valuatorRef: string;
+  notes?: string | null;
+}
+
+async function revalueImpl(session: SessionContext, rahnAgreementId: number, args: RevalueArgs) {
+  if (!(args.newValue > 0)) throw new DomainError("New collateral value must be positive");
+  if (!args.valuatorRef) throw new DomainError("Valuator reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1 FOR UPDATE", [rahnAgreementId]);
+    const rahn = rows[0];
+    if (!rahn) throw new DomainError("RahnAgreement not found");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Collateral must be Active to revalue");
+
+    const previousValue = rahn.collateral_value;
+    await client.query(`UPDATE rahn_agreement SET collateral_value = $2, updated_at = now() WHERE id = $1`, [rahnAgreementId, args.newValue]);
+
+    const { rows: record } = await client.query(
+      `INSERT INTO collateral_valuation_record
+         (rahn_agreement_id, cac_reg_number, business_name, previous_value, valuation_amount, valuation_date, valuator_ref, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [rahnAgreementId, rahn.cac_reg_number, rahn.business_name, previousValue, args.newValue, args.valuationDate, args.valuatorRef, args.notes ?? null],
+    );
+    return { rahnAgreementId, collateralValuationRecordId: record[0].id };
+  });
+}
+export const revalue = withAuthorization(["financialInstitution"], revalueImpl);
+
+// ─── Choice: RecordInspection (RahnAgreement, financialInstitution) ───────
+// Nonconsuming in the real Daml -- a periodic physical inspection doesn't
+// change collateral status.
+
+interface RecordInspectionArgs {
+  inspectionDate: string;
+  inspectedBy: string;
+  condition: "Satisfactory" | "RequiresAttention" | "Impaired";
+  inspectionNotes?: string | null;
+  nextInspectionDate?: string | null;
+  mandateStatus?: string | null;
+  estimatedGsmRecoverable?: number | null;
+}
+
+async function recordInspectionImpl(session: SessionContext, rahnAgreementId: number, args: RecordInspectionArgs) {
+  if (!args.inspectedBy) throw new DomainError("Inspected-by must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1", [rahnAgreementId]);
+    const rahn = rows[0];
+    if (!rahn) throw new DomainError("RahnAgreement not found");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only inspect Active collateral");
+
+    const { rows: record } = await client.query(
+      `INSERT INTO collateral_inspection_record
+         (rahn_agreement_id, cac_reg_number, business_name, inspection_date, inspected_by, condition,
+          inspection_notes, next_inspection_date, mandate_status, estimated_gsm_recoverable)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        rahnAgreementId, rahn.cac_reg_number, rahn.business_name, args.inspectionDate, args.inspectedBy, args.condition,
+        args.inspectionNotes ?? null, args.nextInspectionDate ?? null, args.mandateStatus ?? null, args.estimatedGsmRecoverable ?? null,
+      ],
+    );
+    return { collateralInspectionRecordId: record[0].id };
+  });
+}
+export const recordInspection = withAuthorization(["financialInstitution"], recordInspectionImpl);
+
+export async function listCollateralValuationRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM collateral_valuation_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listCollateralInspectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM collateral_inspection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 export async function listRahnAgreements(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM rahn_agreement ORDER BY created_at DESC`);

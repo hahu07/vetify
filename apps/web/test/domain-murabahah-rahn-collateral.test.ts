@@ -20,6 +20,8 @@ import {
   pledgeCollateral,
   releaseCollateral,
   enforceCollateral,
+  revalue,
+  recordInspection,
 } from "@/lib/domain/murabahah";
 import type { RiskAssessment } from "@/lib/types-financing";
 import type { MurabahahTerms, PaymentScheduleEntry } from "@/lib/types-murabahah";
@@ -80,6 +82,14 @@ function twoInstallmentSchedule(): PaymentScheduleEntry[] {
 }
 
 async function cleanup(cac: string) {
+  await fixtureClient.query(
+    `DELETE FROM collateral_valuation_record WHERE rahn_agreement_id IN (SELECT id FROM rahn_agreement WHERE cac_reg_number = $1)`,
+    [cac],
+  );
+  await fixtureClient.query(
+    `DELETE FROM collateral_inspection_record WHERE rahn_agreement_id IN (SELECT id FROM rahn_agreement WHERE cac_reg_number = $1)`,
+    [cac],
+  );
   await fixtureClient.query(`DELETE FROM rahn_agreement WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM murabahah_contract WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM shariah_contract_certification WHERE cac_reg_number = $1`, [cac]);
@@ -348,6 +358,120 @@ test("enforceCollateral: an OperationsOfficer cannot substitute for a RecoveryOf
           confirmedByOfficerId: riskOfficerId,
         }),
       (err: unknown) => err instanceof DomainError && err.message === `Officer ${opsOfficerId} does not hold the required role`,
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [opsOfficerId, riskOfficerId]);
+  }
+});
+
+// ─── revalue ────────────────────────────────────────────────────────────────
+
+test("revalue: rejects a non-positive new value, updates collateral_value and creates a CollateralValuationRecord on success", async () => {
+  const cac = "RC8000010";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    await assert.rejects(
+      () => revalue(fiSession(), Number(pledge.rahnAgreementId), { newValue: 0, valuationDate: "2026-06-01", valuatorRef: "APP-1" }),
+      (err: unknown) => err instanceof DomainError && err.message === "New collateral value must be positive",
+    );
+    const result = await revalue(fiSession(), Number(pledge.rahnAgreementId), { newValue: 1_200_000, valuationDate: "2026-06-01", valuatorRef: "APP-2026-001" });
+    assert.ok(result.collateralValuationRecordId);
+
+    const { rows: rahn } = await fixtureClient.query("SELECT collateral_value FROM rahn_agreement WHERE id = $1", [pledge.rahnAgreementId]);
+    assert.equal(Number(rahn[0].collateral_value), 1_200_000);
+
+    const { rows: record } = await fixtureClient.query(
+      "SELECT previous_value, valuation_amount, valuator_ref FROM collateral_valuation_record WHERE id = $1",
+      [result.collateralValuationRecordId],
+    );
+    assert.equal(Number(record[0].previous_value), 1_000_000);
+    assert.equal(Number(record[0].valuation_amount), 1_200_000);
+    assert.equal(record[0].valuator_ref, "APP-2026-001");
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("revalue: can only revalue Active collateral", async () => {
+  const cac = "RC8000011";
+  const opsOfficerId = "OFF-OPS-REV-1";
+  const riskOfficerId = "OFF-RISK-REV-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(opsOfficerId, "OperationsOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    await releaseCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      note: "Facility closed",
+      proposedByOfficerId: opsOfficerId,
+      confirmedByOfficerId: riskOfficerId,
+    });
+    await assert.rejects(
+      () => revalue(fiSession(), Number(pledge.rahnAgreementId), { newValue: 900_000, valuationDate: "2026-06-01", valuatorRef: "APP-1" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Collateral must be Active to revalue",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [opsOfficerId, riskOfficerId]);
+  }
+});
+
+// ─── recordInspection ───────────────────────────────────────────────────────
+
+test("recordInspection: rejects an empty inspected-by, nonconsuming (does not change collateral_status)", async () => {
+  const cac = "RC8000012";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    await assert.rejects(
+      () =>
+        recordInspection(fiSession(), Number(pledge.rahnAgreementId), {
+          inspectionDate: "2026-06-01", inspectedBy: "", condition: "Satisfactory",
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Inspected-by must not be empty",
+    );
+    const result = await recordInspection(fiSession(), Number(pledge.rahnAgreementId), {
+      inspectionDate: "2026-06-01", inspectedBy: "Field Officer Bello", condition: "RequiresAttention",
+      inspectionNotes: "Fence needs repair", nextInspectionDate: "2026-09-01",
+    });
+    assert.ok(result.collateralInspectionRecordId);
+
+    const { rows: rahn } = await fixtureClient.query("SELECT collateral_status FROM rahn_agreement WHERE id = $1", [pledge.rahnAgreementId]);
+    assert.equal(rahn[0].collateral_status, "CollateralActive");
+
+    const { rows: record } = await fixtureClient.query(
+      "SELECT condition, inspected_by, next_inspection_date FROM collateral_inspection_record WHERE id = $1",
+      [result.collateralInspectionRecordId],
+    );
+    assert.equal(record[0].condition, "RequiresAttention");
+    assert.equal(record[0].inspected_by, "Field Officer Bello");
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("recordInspection: can only inspect Active collateral", async () => {
+  const cac = "RC8000013";
+  const opsOfficerId = "OFF-OPS-INSP-1";
+  const riskOfficerId = "OFF-RISK-INSP-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(opsOfficerId, "OperationsOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    await releaseCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      note: "Facility closed",
+      proposedByOfficerId: opsOfficerId,
+      confirmedByOfficerId: riskOfficerId,
+    });
+    await assert.rejects(
+      () =>
+        recordInspection(fiSession(), Number(pledge.rahnAgreementId), {
+          inspectionDate: "2026-06-01", inspectedBy: "Field Officer Bello", condition: "Satisfactory",
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only inspect Active collateral",
     );
   } finally {
     await cleanup(cac);
