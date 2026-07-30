@@ -1242,6 +1242,123 @@ async function declineIbraImpl(session: SessionContext, ibraRequestId: number, a
 }
 export const declineIbra = withAuthorization(["financialInstitution"], declineIbraImpl);
 
+// ─── Choice: GrantPartialIbra (IbraRequest, financialInstitution) ─────────
+// Phase 2, Thirty-Third Slice (Batch D). Same four-eyes CreditOfficer/
+// RiskOfficer shape as the already-ported GrantIbra.
+
+interface GrantPartialIbraArgs {
+  rebateAmount: number;
+  approvedSettlementAmount: number;
+  proposedByOfficerId: string;
+  confirmedByOfficerId: string;
+}
+
+async function grantPartialIbraImpl(session: SessionContext, ibraRequestId: number, args: GrantPartialIbraArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM ibra_request WHERE id = $1 FOR UPDATE", [ibraRequestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("IbraRequest not found");
+    if (request.archived_at) throw new DomainError("IbraRequest is no longer active");
+    if (request.settlement_type !== "PartialIbra") {
+      throw new DomainError("GrantPartialIbra requires PartialIbra settlement type");
+    }
+    const outstandingBalance = Number(request.outstanding_balance);
+    if (!(args.approvedSettlementAmount > 0)) throw new DomainError("Approved settlement amount must be positive");
+    if (!(args.approvedSettlementAmount < outstandingBalance)) {
+      throw new DomainError("Approved settlement must be less than outstanding balance");
+    }
+    if (!(args.rebateAmount >= 0)) throw new DomainError("Rebate must be non-negative");
+    if (args.proposedByOfficerId === args.confirmedByOfficerId) {
+      throw new DomainError("Confirming officer must differ from proposing officer (four-eyes)");
+    }
+
+    const { rows: proposer } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [
+      args.proposedByOfficerId,
+    ]);
+    if (!proposer[0] || !proposer[0].active) throw new DomainError(`Officer ${args.proposedByOfficerId} is not active`);
+    if (!(proposer[0].roles ?? []).includes("CreditOfficer")) {
+      throw new DomainError(`Officer ${args.proposedByOfficerId} does not hold the required role`);
+    }
+    const { rows: confirmer } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [
+      args.confirmedByOfficerId,
+    ]);
+    if (!confirmer[0] || !confirmer[0].active) throw new DomainError(`Officer ${args.confirmedByOfficerId} is not active`);
+    if (!(confirmer[0].roles ?? []).includes("RiskOfficer")) {
+      throw new DomainError(`Officer ${args.confirmedByOfficerId} does not hold the required role`);
+    }
+
+    const { rows: grant } = await client.query(
+      `INSERT INTO partial_ibra_grant
+         (ibra_request_id, facility_ref, cac_reg_number, business_name, outstanding_balance,
+          rebate_amount, approved_settlement_amount, effective_date, proposed_by_officer_id, confirmed_by_officer_id, granted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+       RETURNING id`,
+      [
+        ibraRequestId, request.facility_ref, request.cac_reg_number, request.business_name, request.outstanding_balance,
+        args.rebateAmount, args.approvedSettlementAmount, request.requested_settlement_date, args.proposedByOfficerId, args.confirmedByOfficerId,
+      ],
+    );
+
+    await client.query(
+      `UPDATE ibra_request SET archived_at = now(), superseded_by_kind = 'partial_ibra_grant', superseded_by_id = $2 WHERE id = $1`,
+      [ibraRequestId, grant[0].id],
+    );
+
+    return { partialIbraGrantId: grant[0].id };
+  });
+}
+export const grantPartialIbra = withAuthorization(["financialInstitution"], grantPartialIbraImpl);
+
+export async function listPartialIbraGrants(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM partial_ibra_grant ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProposeRebate (IbraRequest, financialInstitution) ────────────
+// Nonconsuming -- an internal advisory calculation tool for the FI's own
+// financing team, not vetify. The IbraRequest stays live.
+
+interface ProposeRebateArgs {
+  suggestedRebate: number;
+  rationale: string;
+}
+
+async function proposeRebateImpl(session: SessionContext, ibraRequestId: number, args: ProposeRebateArgs) {
+  if (!(args.suggestedRebate >= 0)) throw new DomainError("Suggested rebate must be non-negative");
+  if (!args.rationale) throw new DomainError("Rationale must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM ibra_request WHERE id = $1", [ibraRequestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("IbraRequest not found");
+    if (request.archived_at) throw new DomainError("IbraRequest is no longer active");
+    if (!(args.suggestedRebate <= Number(request.outstanding_balance))) {
+      throw new DomainError("Suggested rebate cannot exceed outstanding balance");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO ibra_rebate_proposal
+         (ibra_request_id, facility_ref, cac_reg_number, business_name, outstanding_balance, suggested_rebate, rationale, settlement_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        ibraRequestId, request.facility_ref, request.cac_reg_number, request.business_name, request.outstanding_balance,
+        args.suggestedRebate, args.rationale, request.settlement_type,
+      ],
+    );
+    return { ibraRebateProposalId: created[0].id };
+  });
+}
+export const proposeRebate = withAuthorization(["financialInstitution"], proposeRebateImpl);
+
+export async function listIbraRebateProposals(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM ibra_rebate_proposal ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── Choice: SetCharityAmount (LatePaymentCharity, financialInstitution) ──
 
 async function setCharityAmountImpl(session: SessionContext, charityId: number, args: { amount: number }) {
@@ -3427,6 +3544,201 @@ export const createCapitalCallRecord = withAuthorization(["financialInstitution"
 export async function listCapitalCallRecords(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM capital_call_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-Third Slice: MurabahahContract instruments (Batch D) ──
+// CreditCovenant, GuaranteeAgreement, TakafulPolicy are all created
+// directly by financialInstitution against a live MurabahahContract -- no
+// exercised choice creates any of them in the real Daml.
+
+// ─── CreditCovenant (financialInstitution creates directly + RecordCovenantMeasurement, vetify) ──
+
+interface CreateCreditCovenantArgs {
+  covenantType: string;
+  threshold: number;
+  measurementFrequency: string;
+}
+
+async function createCreditCovenantImpl(session: SessionContext, contractId: number, args: CreateCreditCovenantArgs) {
+  if (!(args.threshold > 0)) throw new DomainError("threshold must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO credit_covenant (murabahah_contract_id, cac_reg_number, business_name, covenant_type, threshold, measurement_frequency)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [contractId, contract.cac_reg_number, contract.business_name, args.covenantType, args.threshold, args.measurementFrequency],
+    );
+    return { creditCovenantId: created[0].id };
+  });
+}
+export const createCreditCovenant = withAuthorization(["financialInstitution"], createCreditCovenantImpl);
+
+interface RecordCovenantMeasurementArgs {
+  measuredValue: number;
+  measureDate: string;
+  measuredBy: string;
+}
+
+async function recordCovenantMeasurementImpl(session: SessionContext, covenantId: number, args: RecordCovenantMeasurementArgs) {
+  if (!args.measuredBy) throw new DomainError("Measured-by must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM credit_covenant WHERE id = $1", [covenantId]);
+    const covenant = rows[0];
+    if (!covenant) throw new DomainError("CreditCovenant not found");
+
+    const threshold = Number(covenant.threshold);
+    const { rows: created } = await client.query(
+      `INSERT INTO covenant_measurement_record
+         (credit_covenant_id, cac_reg_number, business_name, covenant_type, threshold, measured_value, measure_date, measured_by, breached)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        covenantId, covenant.cac_reg_number, covenant.business_name, covenant.covenant_type, threshold,
+        args.measuredValue, args.measureDate, args.measuredBy, args.measuredValue < threshold,
+      ],
+    );
+    return { covenantMeasurementRecordId: created[0].id };
+  });
+}
+export const recordCovenantMeasurement = withAuthorization(["vetify"], recordCovenantMeasurementImpl);
+
+export async function listCreditCovenants(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM credit_covenant ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listCovenantMeasurementRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM covenant_measurement_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── GuaranteeAgreement (financialInstitution creates directly + EnforceGuarantee/ReleaseGuarantee) ──
+// "guarantor" collapses to the guarantorName/guarantorId text fields --
+// no natural session party role exists for a one-off individual guarantor.
+
+interface CreateGuaranteeAgreementArgs {
+  guaranteeType: string;
+  guaranteedAmount: number;
+  guarantorName: string;
+  guarantorId: string;
+  effectiveDate: string;
+  expiryDate?: string | null;
+}
+
+async function createGuaranteeAgreementImpl(session: SessionContext, contractId: number, args: CreateGuaranteeAgreementArgs) {
+  if (!args.guaranteeType) throw new DomainError("guaranteeType must not be empty");
+  if (!(args.guaranteedAmount > 0)) throw new DomainError("guaranteedAmount must be positive");
+  if (!args.guarantorName) throw new DomainError("guarantorName must not be empty");
+  if (!args.guarantorId) throw new DomainError("guarantorId must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO guarantee_agreement
+         (murabahah_contract_id, cac_reg_number, business_name, facility_ref, guarantee_type, guaranteed_amount,
+          guarantor_name, guarantor_id, effective_date, expiry_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        contractId, contract.cac_reg_number, contract.business_name, contract.facility_ref, args.guaranteeType, args.guaranteedAmount,
+        args.guarantorName, args.guarantorId, args.effectiveDate, args.expiryDate ?? null,
+      ],
+    );
+    return { guaranteeAgreementId: created[0].id };
+  });
+}
+export const createGuaranteeAgreement = withAuthorization(["financialInstitution"], createGuaranteeAgreementImpl);
+
+async function enforceGuaranteeImpl(session: SessionContext, guaranteeId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT guarantee_status FROM guarantee_agreement WHERE id = $1 FOR UPDATE", [guaranteeId]);
+    const guarantee = rows[0];
+    if (!guarantee) throw new DomainError("GuaranteeAgreement not found");
+    if (guarantee.guarantee_status !== "GuaranteeActive") throw new DomainError("Can only enforce an Active guarantee");
+
+    await client.query(`UPDATE guarantee_agreement SET guarantee_status = 'GuaranteeEnforced', updated_at = now() WHERE id = $1`, [guaranteeId]);
+    return { guaranteeAgreementId: guaranteeId };
+  });
+}
+export const enforceGuarantee = withAuthorization(["financialInstitution"], enforceGuaranteeImpl);
+
+async function releaseGuaranteeImpl(session: SessionContext, guaranteeId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Release note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT guarantee_status FROM guarantee_agreement WHERE id = $1 FOR UPDATE", [guaranteeId]);
+    const guarantee = rows[0];
+    if (!guarantee) throw new DomainError("GuaranteeAgreement not found");
+    if (guarantee.guarantee_status !== "GuaranteeActive") throw new DomainError("Can only release an Active guarantee");
+
+    await client.query(`UPDATE guarantee_agreement SET guarantee_status = 'GuaranteeReleased', updated_at = now() WHERE id = $1`, [guaranteeId]);
+    return { guaranteeAgreementId: guaranteeId };
+  });
+}
+export const releaseGuarantee = withAuthorization(["financialInstitution"], releaseGuaranteeImpl);
+
+export async function listGuaranteeAgreements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM guarantee_agreement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── TakafulPolicy (financialInstitution creates directly; immutable) ─────
+
+interface CreateTakafulPolicyArgs {
+  policyNumber: string;
+  takafulOperator: string;
+  coverageType: string;
+  coverageAmount: number;
+  premiumAmount: number;
+  startDate: string;
+  expiryDate: string;
+  assetRef?: string | null;
+}
+
+async function createTakafulPolicyImpl(session: SessionContext, contractId: number, args: CreateTakafulPolicyArgs) {
+  if (!(args.premiumAmount > 0)) throw new DomainError("premiumAmount must be positive");
+  if (!(args.coverageAmount > 0)) throw new DomainError("coverageAmount must be positive");
+  if (!(new Date(args.expiryDate).getTime() > new Date(args.startDate).getTime())) {
+    throw new DomainError("expiryDate must be later than startDate");
+  }
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO takaful_policy
+         (murabahah_contract_id, cac_reg_number, business_name, policy_number, takaful_operator, coverage_type,
+          coverage_amount, premium_amount, start_date, expiry_date, asset_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        contractId, contract.cac_reg_number, contract.business_name, args.policyNumber, args.takafulOperator, args.coverageType,
+        args.coverageAmount, args.premiumAmount, args.startDate, args.expiryDate, args.assetRef ?? null,
+      ],
+    );
+    return { takafulPolicyId: created[0].id };
+  });
+}
+export const createTakafulPolicy = withAuthorization(["financialInstitution"], createTakafulPolicyImpl);
+
+export async function listTakafulPolicies(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM takaful_policy ORDER BY created_at DESC`);
     return rows;
   });
 }

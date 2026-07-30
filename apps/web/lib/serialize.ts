@@ -1080,3 +1080,95 @@ export function serializeCapitalCallRecord(row: Record<string, unknown>) {
     remainingFacility: num(row.remaining_facility),
   };
 }
+
+// ─── Phase 2, Thirty-Third Slice: MurabahahContract instruments (Batch D) ──
+
+export function serializeCreditCovenant(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    covenantType: row.covenant_type,
+    threshold: num(row.threshold),
+    measurementFrequency: row.measurement_frequency,
+  };
+}
+
+export function serializeCovenantMeasurementRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    creditCovenantId: String(row.credit_covenant_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    covenantType: row.covenant_type,
+    threshold: num(row.threshold),
+    measuredValue: num(row.measured_value),
+    measureDate: row.measure_date,
+    measuredBy: row.measured_by,
+    breached: row.breached,
+  };
+}
+
+export function serializeGuaranteeAgreement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    guaranteeType: row.guarantee_type,
+    guaranteedAmount: num(row.guaranteed_amount),
+    guarantorName: row.guarantor_name,
+    guarantorId: row.guarantor_id,
+    effectiveDate: row.effective_date,
+    expiryDate: row.expiry_date ?? null,
+    guaranteeStatus: row.guarantee_status,
+  };
+}
+
+export function serializeTakafulPolicy(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    policyNumber: row.policy_number,
+    takafulOperator: row.takaful_operator,
+    coverageType: row.coverage_type,
+    coverageAmount: num(row.coverage_amount),
+    premiumAmount: num(row.premium_amount),
+    startDate: row.start_date,
+    expiryDate: row.expiry_date,
+    assetRef: row.asset_ref ?? null,
+  };
+}
+
+export function serializeIbraRebateProposal(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    ibraRequestId: String(row.ibra_request_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    outstandingBalance: num(row.outstanding_balance),
+    suggestedRebate: num(row.suggested_rebate),
+    rationale: row.rationale,
+    settlementType: row.settlement_type,
+  };
+}
+
+export function serializePartialIbraGrant(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    ibraRequestId: String(row.ibra_request_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    outstandingBalance: num(row.outstanding_balance),
+    rebateAmount: num(row.rebate_amount),
+    approvedSettlementAmount: num(row.approved_settlement_amount),
+    effectiveDate: row.effective_date,
+    grantedAt: row.granted_at,
+  };
+}
