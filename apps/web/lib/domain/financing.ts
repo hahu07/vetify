@@ -516,3 +516,255 @@ export async function listFinancingDecisions(session: SessionContext) {
     return rows;
   });
 }
+
+// ─── Phase 2, Thirty-Second Slice: Batch C (Withdraw/Expire/Cancel/Amend) ──
+// WithdrawRequest/ExpireRequest/CancelRequest are all consuming -- the same
+// archive-with-successor shape this migration has used since the Second
+// Slice. ProposeAmendment is nonconsuming; AcceptAmendment is the same
+// keyless field-replace shape as ProceedWithReplacement/Revalue.
+
+// ─── Choice: WithdrawRequest (FinancingRequest, business) ──────────────────
+
+async function withdrawRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Withdrawal reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only withdraw a Submitted or Underwriting request");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO withdrawal_record (financing_request_id, cac_reg_number, business_name, financing_ref, reason, withdrawn_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason],
+    );
+    const withdrawalRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'withdrawal_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, withdrawalRecordId],
+    );
+    return { withdrawalRecordId };
+  });
+}
+export const withdrawRequest = withAuthorization(["business"], withdrawRequestImpl);
+
+export async function listWithdrawalRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM withdrawal_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ExpireRequest / CancelRequest (FinancingRequest, vetify) ──────
+
+async function expireRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only expire a Submitted or Underwriting request");
+    }
+    if (!request.expires_at) throw new DomainError("No SLA expiry configured on this request");
+    if (!(new Date(request.expires_at).getTime() < Date.now())) {
+      throw new DomainError("Request SLA has not yet elapsed");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO request_closure_record (financing_request_id, cac_reg_number, business_name, financing_ref, outcome, reason, closed_at)
+       VALUES ($1, $2, $3, $4, 'Expired', $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason ?? null],
+    );
+    const requestClosureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'request_closure_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, requestClosureRecordId],
+    );
+    return { requestClosureRecordId };
+  });
+}
+export const expireRequest = withAuthorization(["vetify"], expireRequestImpl);
+
+async function cancelRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Cancellation reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only cancel a Submitted or Underwriting request");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO request_closure_record (financing_request_id, cac_reg_number, business_name, financing_ref, outcome, reason, closed_at)
+       VALUES ($1, $2, $3, $4, 'Cancelled', $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason],
+    );
+    const requestClosureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'request_closure_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, requestClosureRecordId],
+    );
+    return { requestClosureRecordId };
+  });
+}
+export const cancelRequest = withAuthorization(["vetify"], cancelRequestImpl);
+
+export async function listRequestClosureRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM request_closure_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProposeAmendment (FinancingRequest, financialInstitution) ────
+// Nonconsuming -- the original request stays active.
+
+interface ProposeAmendmentArgs {
+  proposedTerms: FinancingTerms;
+  proposalNote?: string | null;
+}
+
+async function proposeAmendmentImpl(session: SessionContext, requestId: number, args: ProposeAmendmentArgs) {
+  if (!(args.proposedTerms.amount > 0)) throw new DomainError("Proposed amount must be positive");
+  if (!(args.proposedTerms.tenureMonths > 0)) throw new DomainError("Proposed tenure must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only propose amendments to Submitted or Underwriting requests");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO financing_amendment
+         (financing_request_id, cac_reg_number, business_name, financing_ref,
+          original_amount, original_purpose, original_tenure_months,
+          proposed_amount, proposed_purpose, proposed_tenure_months, proposed_at, proposal_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
+       RETURNING id`,
+      [
+        requestId, request.cac_reg_number, request.business_name, request.financing_ref,
+        request.terms_amount, request.terms_purpose, request.terms_tenure_months,
+        args.proposedTerms.amount, args.proposedTerms.purpose, args.proposedTerms.tenureMonths, args.proposalNote ?? null,
+      ],
+    );
+    return { financingAmendmentId: created[0].id };
+  });
+}
+export const proposeAmendment = withAuthorization(["financialInstitution"], proposeAmendmentImpl);
+
+// ─── Choice: AcceptAmendment (FinancingAmendment, business) ───────────────
+// Keyless field-replace on FinancingRequest (archive+recreate with new
+// terms in the real Daml) -- collapses to a plain UPDATE, same convention as
+// ProceedWithReplacement/Revalue. Capped at 10 amendments.
+
+async function acceptAmendmentImpl(session: SessionContext, amendmentId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_amendment WHERE id = $1 FOR UPDATE", [amendmentId]);
+    const amendment = rows[0];
+    if (!amendment) throw new DomainError("FinancingAmendment not found");
+    if (amendment.status !== "Pending") throw new DomainError("FinancingAmendment is not pending");
+
+    const { rows: reqRows } = await client.query(
+      "SELECT * FROM financing_request WHERE id = $1 FOR UPDATE",
+      [amendment.financing_request_id],
+    );
+    const request = reqRows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.financing_ref !== amendment.financing_ref) {
+      throw new DomainError("Amendment must reference the matching request");
+    }
+    if (!(request.amendment_count < 10)) {
+      throw new DomainError("Maximum 10 amendments reached; a new financing request is required");
+    }
+
+    await client.query(
+      `UPDATE financing_request
+         SET terms_amount = $2, terms_purpose = $3, terms_tenure_months = $4,
+             term_history = term_history || $5::jsonb,
+             amendment_count = amendment_count + 1, status = 'Submitted', expires_at = NULL, updated_at = now()
+         WHERE id = $1`,
+      [
+        amendment.financing_request_id, amendment.proposed_amount, amendment.proposed_purpose, amendment.proposed_tenure_months,
+        JSON.stringify([{ amount: Number(request.terms_amount), purpose: request.terms_purpose, tenureMonths: request.terms_tenure_months }]),
+      ],
+    );
+    await client.query(`UPDATE financing_amendment SET status = 'Accepted', updated_at = now() WHERE id = $1`, [amendmentId]);
+
+    return { financingRequestId: amendment.financing_request_id };
+  });
+}
+export const acceptAmendment = withAuthorization(["business"], acceptAmendmentImpl);
+
+async function declineAmendmentImpl(session: SessionContext, amendmentId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM financing_amendment WHERE id = $1 FOR UPDATE", [amendmentId]);
+    const amendment = rows[0];
+    if (!amendment) throw new DomainError("FinancingAmendment not found");
+    if (amendment.status !== "Pending") throw new DomainError("FinancingAmendment is not pending");
+
+    await client.query(
+      `UPDATE financing_amendment SET status = 'Declined', decline_reason = $2, updated_at = now() WHERE id = $1`,
+      [amendmentId, args.reason],
+    );
+    return { financingAmendmentId: amendmentId };
+  });
+}
+export const declineAmendment = withAuthorization(["business"], declineAmendmentImpl);
+
+export async function listFinancingAmendments(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM financing_amendment ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordGovernanceAssessment (FinancingDecision, financialInstitution) ──
+// Nonconsuming -- the decision record is immutable; governance is a
+// separate side-contract.
+
+interface RecordGovernanceAssessmentArgs {
+  aiRecommendationFollowed: boolean;
+  governanceNote?: string | null;
+  assessedBy: string;
+}
+
+async function recordGovernanceAssessmentImpl(session: SessionContext, decisionId: number, args: RecordGovernanceAssessmentArgs) {
+  if (!args.assessedBy) throw new DomainError("Governance assessor name required");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_decision WHERE id = $1", [decisionId]);
+    const decision = rows[0];
+    if (!decision) throw new DomainError("FinancingDecision not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO funding_governance_record
+         (financing_decision_id, cac_reg_number, business_name, financing_ref, decision_outcome,
+          ai_recommendation_followed, governance_note, assessed_by, assessed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       RETURNING id`,
+      [
+        decisionId, decision.cac_reg_number, decision.business_name, decision.financing_ref, decision.outcome,
+        args.aiRecommendationFollowed, args.governanceNote ?? null, args.assessedBy,
+      ],
+    );
+    return { fundingGovernanceRecordId: created[0].id };
+  });
+}
+export const recordGovernanceAssessment = withAuthorization(["financialInstitution"], recordGovernanceAssessmentImpl);
+
+export async function listFundingGovernanceRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM funding_governance_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}

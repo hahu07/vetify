@@ -166,6 +166,62 @@ export function serializeFinancingDecision(row: Record<string, unknown>) {
   };
 }
 
+export function serializeWithdrawalRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    reason: row.reason,
+    withdrawnAt: row.withdrawn_at,
+  };
+}
+
+export function serializeRequestClosureRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    outcome: row.outcome,
+    reason: row.reason ?? undefined,
+    closedAt: row.closed_at,
+  };
+}
+
+export function serializeFinancingAmendment(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    originalTerms: { amount: num(row.original_amount), purpose: row.original_purpose, tenureMonths: row.original_tenure_months },
+    proposedTerms: { amount: num(row.proposed_amount), purpose: row.proposed_purpose, tenureMonths: row.proposed_tenure_months },
+    proposedAt: row.proposed_at,
+    proposalNote: row.proposal_note ?? undefined,
+    status: row.status,
+    declineReason: row.decline_reason ?? undefined,
+  };
+}
+
+export function serializeFundingGovernanceRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingDecisionId: String(row.financing_decision_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    decisionOutcome: row.decision_outcome,
+    aiRecommendationFollowed: row.ai_recommendation_followed,
+    governanceNote: row.governance_note ?? undefined,
+    assessedBy: row.assessed_by,
+    assessedAt: row.assessed_at,
+  };
+}
+
 export function serializeMurabahahWad(row: Record<string, unknown>) {
   return {
     id: String(row.id),
