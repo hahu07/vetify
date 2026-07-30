@@ -3071,3 +3071,118 @@ export function useCreateCapitalCallRecord() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["capital-call-records"] }),
   });
 }
+
+// ─── Phase 2, Forty-First Slice: Financing extras ──────────────────────────
+// WithdrawRequest (business), ExpireRequest/CancelRequest (vetify),
+// ProposeAmendment (financialInstitution) + AcceptAmendment/DeclineAmendment
+// (business), RecordGovernanceAssessment (financialInstitution) --
+// FinancingRequest/FinancingAmendment/FinancingDecision choices ported
+// backend-side with no frontend hook coverage until now.
+
+export interface FinancingAmendment {
+  id: string;
+  financingRequestId: string;
+  cacRegNumber: string;
+  businessName: string;
+  financingRef: string;
+  originalTerms: FinancingTerms;
+  proposedTerms: FinancingTerms;
+  proposedAt: string;
+  proposalNote?: string;
+  status: "Pending" | "Accepted" | "Declined";
+  declineReason?: string;
+}
+
+export interface FundingGovernanceRecord {
+  id: string;
+  financingDecisionId: string;
+  cacRegNumber: string;
+  businessName: string;
+  financingRef: string;
+  decisionOutcome: string;
+  aiRecommendationFollowed: boolean;
+  governanceNote?: string;
+  assessedBy: string;
+  assessedAt: string;
+}
+
+export function useWithdrawRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/financing/${id}/withdraw`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["financing-list"] }),
+  });
+}
+
+export function useExpireRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
+      apiClient.post(`/financing/${id}/expire`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["financing-list"] }),
+  });
+}
+
+export function useCancelRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/financing/${id}/cancel`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["financing-list"] }),
+  });
+}
+
+export function useProposeAmendment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, proposedTerms, proposalNote }: { id: string; proposedTerms: FinancingTerms; proposalNote?: string | null }) =>
+      apiClient.post(`/financing/${id}/propose-amendment`, { proposedTerms, proposalNote }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["financing-amendments"] }),
+  });
+}
+
+export function useFinancingAmendments() {
+  return useQuery({
+    queryKey: ["financing-amendments"],
+    queryFn: async () => (await apiClient.get<FinancingAmendment[]>("/financing-amendments")).data,
+  });
+}
+
+export function useAcceptAmendment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.post(`/financing-amendments/${id}/accept`, {}).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["financing-amendments"] });
+      qc.invalidateQueries({ queryKey: ["financing-list"] });
+    },
+  });
+}
+
+export function useDeclineAmendment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/financing-amendments/${id}/decline`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["financing-amendments"] }),
+  });
+}
+
+export function useFundingGovernanceRecords() {
+  return useQuery({
+    queryKey: ["funding-governance-records"],
+    queryFn: async () => (await apiClient.get<FundingGovernanceRecord[]>("/funding-governance-records")).data,
+  });
+}
+
+export function useRecordGovernanceAssessment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, aiRecommendationFollowed, governanceNote, assessedBy,
+    }: { id: string; aiRecommendationFollowed: boolean; governanceNote?: string | null; assessedBy: string }) =>
+      apiClient.post(`/financing-decisions/${id}/record-governance-assessment`, { aiRecommendationFollowed, governanceNote, assessedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["funding-governance-records"] }),
+  });
+}

@@ -4,12 +4,16 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { TrendingUp, CheckCircle2, Calculator, ShieldCheck, Clock3 } from "lucide-react";
+import { TrendingUp, CheckCircle2, Calculator, ShieldCheck, Clock3, FileEdit, X } from "lucide-react";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
 import { formatNaira, formatDate, calculateInstallment } from "@/lib/formatters";
-import { useApprovedBusinesses, useCreateFinancing, useFinancingList } from "@/lib/apiClient";
+import {
+  useApprovedBusinesses, useCreateFinancing, useFinancingList,
+  useWithdrawRequest, useFinancingAmendments, useAcceptAmendment, useDeclineAmendment,
+  type FinancingAmendment,
+} from "@/lib/apiClient";
 
 // Simplified port of frontend/src/pages/business/FinancingForm.tsx. The real
 // page also picks among multiple ApprovedProvider institutions and enforces
@@ -22,6 +26,9 @@ import { useApprovedBusinesses, useCreateFinancing, useFinancingList } from "@/l
 const DEFAULT_INDICATIVE_PROFIT_MARGIN_PCT = 15;
 const TENURE_OPTIONS = [6, 12, 18, 24];
 const ACTIVE_FINANCING_STATUSES = new Set(["Submitted", "Underwriting", "UnderwritingManualReview"]);
+// Mirrors lib/domain/financing.ts's OPEN_FINANCING_STATUSES -- WithdrawRequest
+// is only valid from Submitted or Underwriting, not UnderwritingManualReview.
+const WITHDRAWABLE_STATUSES = new Set(["Submitted", "Underwriting"]);
 
 const schema = z.object({
   amount: z.number().positive("Please enter a valid amount"),
@@ -30,14 +37,142 @@ const schema = z.object({
 });
 type FormData = z.infer<typeof schema>;
 
+// Phase 2, Forty-First Slice: WithdrawRequest (business, only valid from
+// Submitted or Underwriting -- OPEN_FINANCING_STATUSES) and the business's
+// side of the amendment flow (AcceptAmendment/DeclineAmendment, responding
+// to a financialInstitution-proposed FinancingAmendment).
+
+function WithdrawModal({ requestId, onClose }: { requestId: string; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const withdraw = useWithdrawRequest();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!reason.trim()) {
+      setError("Please provide a reason");
+      return;
+    }
+    try {
+      await withdraw.mutateAsync({ id: requestId, reason });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to withdraw the request");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Withdraw Financing Request</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+          <textarea rows={2} className="input text-sm resize-none" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={withdraw.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {withdraw.isPending ? "Submitting…" : "Withdraw"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeclineAmendmentModal({ amendment, onClose }: { amendment: FinancingAmendment; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const decline = useDeclineAmendment();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!reason.trim()) {
+      setError("Please provide a reason");
+      return;
+    }
+    try {
+      await decline.mutateAsync({ id: amendment.id, reason });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to decline the amendment");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Decline Amendment</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4 font-mono">{amendment.financingRef}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+          <textarea rows={2} className="input text-sm resize-none" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={decline.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {decline.isPending ? "Submitting…" : "Decline"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AmendmentRow({ amendment, onDecline }: { amendment: FinancingAmendment; onDecline: () => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const accept = useAcceptAmendment();
+
+  const handleAccept = async () => {
+    setError(null);
+    try {
+      await accept.mutateAsync(amendment.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to accept the amendment");
+    }
+  };
+
+  return (
+    <div className="card p-4">
+      <p className="text-sm font-semibold text-gray-900 font-mono">{amendment.financingRef}</p>
+      <p className="text-xs text-gray-500 mt-1">
+        {formatNaira(amendment.originalTerms.amount)} → <span className="font-semibold text-gray-800">{formatNaira(amendment.proposedTerms.amount)}</span>
+        {" "}· {amendment.originalTerms.tenureMonths} → {amendment.proposedTerms.tenureMonths} months
+      </p>
+      {amendment.proposalNote && <p className="text-xs text-gray-500 mt-1">{amendment.proposalNote}</p>}
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      <div className="flex gap-2 mt-2">
+        <button onClick={onDecline} className="btn-secondary text-xs px-3 py-1.5">Decline</button>
+        <button onClick={handleAccept} disabled={accept.isPending} className="btn-primary text-xs px-3 py-1.5 disabled:opacity-40">
+          {accept.isPending ? "Accepting…" : "Accept Amendment"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function FinancingFormPage() {
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
   const { data: approvedBusinesses, isLoading, isError } = useApprovedBusinesses();
   const { data: financingRequests } = useFinancingList();
+  const { data: amendments } = useFinancingAmendments();
   const createFinancing = useCreateFinancing();
   const approvedBusiness = approvedBusinesses?.find((b) => b.status === "BusinessActive");
+  const [withdrawModal, setWithdrawModal] = useState<string | null>(null);
+  const [declineAmendmentModal, setDeclineAmendmentModal] = useState<FinancingAmendment | null>(null);
+  const pendingAmendments = (amendments ?? []).filter((a) => a.status === "Pending");
 
   const {
     register,
@@ -122,7 +257,26 @@ export default function FinancingFormPage() {
                       {req.submittedAt && <> · Submitted {formatDate(req.submittedAt)}</>}
                     </p>
                   </div>
+                  {WITHDRAWABLE_STATUSES.has(req.status) && (
+                    <button onClick={() => setWithdrawModal(req.id)} className="btn-secondary text-xs px-3 py-1.5 flex-shrink-0">
+                      Withdraw
+                    </button>
+                  )}
                 </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {pendingAmendments.length > 0 && (
+          <div className="card p-6 mb-7">
+            <div className="flex items-center gap-2 mb-4">
+              <FileEdit size={16} className="text-gray-400" />
+              <h3 className="font-display text-base font-semibold text-gray-800 tracking-tight">Pending Amendments</h3>
+            </div>
+            <div className="space-y-2.5">
+              {pendingAmendments.map((a) => (
+                <AmendmentRow key={a.id} amendment={a} onDecline={() => setDeclineAmendmentModal(a)} />
               ))}
             </div>
           </div>
@@ -276,6 +430,9 @@ export default function FinancingFormPage() {
           </div>
         </div>
       </div>
+
+      {withdrawModal && <WithdrawModal requestId={withdrawModal} onClose={() => setWithdrawModal(null)} />}
+      {declineAmendmentModal && <DeclineAmendmentModal amendment={declineAmendmentModal} onClose={() => setDeclineAmendmentModal(null)} />}
     </Layout>
   );
 }

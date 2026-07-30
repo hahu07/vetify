@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, XCircle, Flag, X } from "lucide-react";
+import { CheckCircle2, XCircle, Flag, X, Ban, Clock } from "lucide-react";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
@@ -11,6 +11,8 @@ import {
   useBeginUnderwriting,
   useRejectUnderwriting,
   useFlagUnderwritingForManualReview,
+  useCancelRequest,
+  useExpireRequest,
   type FinancingRequest,
   type RiskLevel,
 } from "@/lib/apiClient";
@@ -23,7 +25,7 @@ import {
 // only from Submitted (mirrors FlagComplianceForManualReview's precedent).
 const canDecide = (status: string) => status === "Submitted" || status === "UnderwritingManualReview";
 
-type ModalMode = "begin" | "reject" | "flag";
+type ModalMode = "begin" | "reject" | "flag" | "cancel" | "expire";
 interface ModalState {
   mode: ModalMode;
   row: FinancingRequest;
@@ -42,7 +44,9 @@ function AssessorModal({ modal, onClose }: { modal: ModalState; onClose: () => v
   const begin = useBeginUnderwriting();
   const reject = useRejectUnderwriting();
   const flag = useFlagUnderwritingForManualReview();
-  const isPending = begin.isPending || reject.isPending || flag.isPending;
+  const cancel = useCancelRequest();
+  const expire = useExpireRequest();
+  const isPending = begin.isPending || reject.isPending || flag.isPending || cancel.isPending || expire.isPending;
 
   const handleConfirm = async () => {
     setError(null);
@@ -59,12 +63,20 @@ function AssessorModal({ modal, onClose }: { modal: ModalState; onClose: () => v
           return;
         }
         await reject.mutateAsync({ id: row.id, reason });
-      } else {
+      } else if (mode === "flag") {
         if (note.trim().length < 5) {
           setError("Please provide a note explaining the escalation");
           return;
         }
         await flag.mutateAsync({ id: row.id, riskScore: score, riskLevel: riskCategory, note });
+      } else if (mode === "cancel") {
+        if (!reason.trim()) {
+          setError("Please provide a cancellation reason");
+          return;
+        }
+        await cancel.mutateAsync({ id: row.id, reason });
+      } else {
+        await expire.mutateAsync({ id: row.id, reason: reason || undefined });
       }
       onClose();
     } catch (e) {
@@ -72,7 +84,8 @@ function AssessorModal({ modal, onClose }: { modal: ModalState; onClose: () => v
     }
   };
 
-  const title = mode === "begin" ? "Qualify for Underwriting" : mode === "reject" ? "Reject Underwriting" : "Flag for Manual Review";
+  const title = mode === "begin" ? "Qualify for Underwriting" : mode === "reject" ? "Reject Underwriting"
+    : mode === "flag" ? "Flag for Manual Review" : mode === "cancel" ? "Cancel Request" : "Expire Request (SLA elapsed)";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -136,13 +149,32 @@ function AssessorModal({ modal, onClose }: { modal: ModalState; onClose: () => v
           </div>
         )}
 
+        {mode === "cancel" && (
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-700 mb-1">
+              Cancellation Reason <span className="text-red-500">*</span>
+            </label>
+            <textarea rows={3} value={reason} onChange={(e) => setReason(e.target.value)} className="input resize-none" placeholder="Why is this request being cancelled?" />
+          </div>
+        )}
+
+        {mode === "expire" && (
+          <>
+            <p className="text-xs text-amber-600 mb-3">Only valid once this request&apos;s SLA has elapsed -- the server rejects an early expiry.</p>
+            <div className="mb-3">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Reason (optional)</label>
+              <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} className="input resize-none" />
+            </div>
+          </>
+        )}
+
         {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
 
         <div className="flex gap-3">
           <button onClick={onClose} className="btn-secondary flex-1">
             Cancel
           </button>
-          <button onClick={handleConfirm} disabled={isPending} className={`flex-1 disabled:opacity-40 ${mode === "reject" ? "btn-danger" : "btn-primary"}`}>
+          <button onClick={handleConfirm} disabled={isPending} className={`flex-1 disabled:opacity-40 ${mode === "reject" || mode === "cancel" ? "btn-danger" : "btn-primary"}`}>
             {isPending ? "Submitting…" : "Confirm"}
           </button>
         </div>
@@ -158,7 +190,14 @@ export default function UnderwritingQueuePage() {
   if (isLoading) return <Layout title="Underwriting Queue"><FullPageLoader /></Layout>;
   if (isError || !requests) return <Layout title="Underwriting Queue"><ErrorState message="Failed to load underwriting queue" /></Layout>;
 
-  const queue = requests.filter((r) => r.status === "Submitted" || r.status === "UnderwritingManualReview");
+  // Phase 2, Forty-First Slice: widened to include "Underwriting" (already
+  // qualified, awaiting the FI's decision) so Cancel/Expire -- valid across
+  // the full OPEN_FINANCING_STATUSES range, not just the assessor's own
+  // Qualify/Reject/Flag decision window -- have somewhere to reach those
+  // rows too. canDecide/status-specific disabled checks on the other three
+  // actions already correctly grey them out for "Underwriting" rows.
+  const queue = requests.filter((r) => r.status === "Submitted" || r.status === "UnderwritingManualReview" || r.status === "Underwriting");
+  const canCloseOut = (status: string) => status === "Submitted" || status === "Underwriting";
 
   return (
     <Layout title="Underwriting Queue">
@@ -218,6 +257,22 @@ export default function UnderwritingQueuePage() {
                             className="p-1.5 rounded-lg hover:bg-amber-50 transition-colors text-gray-400 hover:text-amber-600 disabled:opacity-30 disabled:cursor-not-allowed"
                           >
                             <Flag size={14} />
+                          </button>
+                          <button
+                            title="Cancel request"
+                            disabled={!canCloseOut(req.status)}
+                            onClick={() => setModal({ mode: "cancel", row: req })}
+                            className="p-1.5 rounded-lg hover:bg-red-50 transition-colors text-gray-400 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <Ban size={14} />
+                          </button>
+                          <button
+                            title="Expire request (SLA elapsed)"
+                            disabled={!canCloseOut(req.status)}
+                            onClick={() => setModal({ mode: "expire", row: req })}
+                            className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors text-gray-400 hover:text-gray-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                          >
+                            <Clock size={14} />
                           </button>
                         </div>
                       </td>

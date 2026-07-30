@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CheckCircle2, XCircle, X } from "lucide-react";
+import { CheckCircle2, XCircle, X, FileEdit } from "lucide-react";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
@@ -9,6 +9,8 @@ import { formatNaira } from "@/lib/formatters";
 import {
   useFinancingList, useFinancingDecisions, useApproveFunding, useRejectFunding, type FinancingRequest,
   useApprovedProviders, useOfficers,
+  useProposeAmendment, useFundingGovernanceRecords, useRecordGovernanceAssessment,
+  type FinancingDecisionItem,
 } from "@/lib/apiClient";
 
 // New page (no direct 1:1 legacy equivalent -- the real frontend's Stage 7
@@ -179,10 +181,135 @@ function DecisionModal({ modal, onClose }: { modal: ModalState; onClose: () => v
   );
 }
 
+// Phase 2, Forty-First Slice: ProposeAmendment (nonconsuming -- the original
+// request stays active while the business decides) and
+// RecordGovernanceAssessment (a side-record on an already-decided
+// FinancingDecision, not a new decision itself).
+
+function ProposeAmendmentModal({ row, onClose }: { row: FinancingRequest; onClose: () => void }) {
+  const [amount, setAmount] = useState(row.terms.amount);
+  const [purpose, setPurpose] = useState(row.terms.purpose);
+  const [tenureMonths, setTenureMonths] = useState(row.terms.tenureMonths);
+  const [proposalNote, setProposalNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const propose = useProposeAmendment();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (amount <= 0 || tenureMonths <= 0) {
+      setError("Amount and tenure must be positive");
+      return;
+    }
+    try {
+      await propose.mutateAsync({ id: row.id, proposedTerms: { amount, purpose, tenureMonths }, proposalNote: proposalNote || null });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to propose the amendment");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Propose Amendment</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          {row.businessName} <span className="font-mono">({row.cacRegNumber})</span> -- current: {formatNaira(row.terms.amount)} / {row.terms.tenureMonths} months
+        </p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Proposed Amount (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={amount} onChange={(e) => setAmount(Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Proposed Purpose</label>
+          <textarea rows={2} className="input text-sm resize-none" value={purpose} onChange={(e) => setPurpose(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Proposed Tenure (months)</label>
+          <input type="number" className="input text-sm font-mono" value={tenureMonths} onChange={(e) => setTenureMonths(Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Note (optional)</label>
+          <textarea rows={2} className="input text-sm resize-none" value={proposalNote} onChange={(e) => setProposalNote(e.target.value)} placeholder="Why is this amendment being proposed?" />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={propose.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {propose.isPending ? "Proposing…" : "Propose Amendment"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GovernanceAssessmentModal({ decision, onClose }: { decision: FinancingDecisionItem; onClose: () => void }) {
+  const [aiRecommendationFollowed, setAiRecommendationFollowed] = useState(true);
+  const [governanceNote, setGovernanceNote] = useState("");
+  const [assessedBy, setAssessedBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const record = useRecordGovernanceAssessment();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!assessedBy.trim()) {
+      setError("Please name the governance assessor");
+      return;
+    }
+    try {
+      await record.mutateAsync({ id: decision.id, aiRecommendationFollowed, governanceNote: governanceNote || null, assessedBy });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record the governance assessment");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Record Governance Assessment</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{decision.businessName} <span className="font-mono">({decision.cacRegNumber})</span></p>
+        <div className="mb-3">
+          <label className="flex items-center gap-2 text-xs font-medium text-gray-700">
+            <input type="checkbox" checked={aiRecommendationFollowed} onChange={(e) => setAiRecommendationFollowed(e.target.checked)} />
+            AI recommendation was followed
+          </label>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Governance Note (optional)</label>
+          <textarea rows={2} className="input text-sm resize-none" value={governanceNote} onChange={(e) => setGovernanceNote(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Assessed By</label>
+          <input className="input text-sm" value={assessedBy} onChange={(e) => setAssessedBy(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={record.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {record.isPending ? "Recording…" : "Record Assessment"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FiFinancingPage() {
   const { data: requests, isLoading, isError } = useFinancingList();
   const { data: decisions } = useFinancingDecisions();
+  const { data: governanceRecords } = useFundingGovernanceRecords();
   const [modal, setModal] = useState<ModalState | null>(null);
+  const [amendmentModal, setAmendmentModal] = useState<FinancingRequest | null>(null);
+  const [governanceModal, setGovernanceModal] = useState<FinancingDecisionItem | null>(null);
 
   if (isLoading) return <Layout title="Financing Decisions"><FullPageLoader /></Layout>;
   if (isError || !requests) return <Layout title="Financing Decisions"><ErrorState message="Failed to load financing requests" /></Layout>;
@@ -238,6 +365,13 @@ export default function FiFinancingPage() {
                           >
                             <XCircle size={14} />
                           </button>
+                          <button
+                            title="Propose amendment"
+                            onClick={() => setAmendmentModal(req)}
+                            className="p-1.5 rounded-lg hover:bg-primary-50 transition-colors text-gray-400 hover:text-primary"
+                          >
+                            <FileEdit size={14} />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -252,24 +386,36 @@ export default function FiFinancingPage() {
           <div>
             <h3 className="text-sm font-semibold text-gray-800 mb-3">Recent Decisions</h3>
             <div className="space-y-2.5">
-              {decisions.map((d) => (
-                <div key={d.id} className="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-surface border border-gray-100">
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-gray-900">{d.businessName}</span>
-                      <StatusBadge status={d.outcome} size="sm" />
+              {decisions.map((d) => {
+                const assessed = governanceRecords?.find((g) => g.financingDecisionId === d.id);
+                return (
+                  <div key={d.id} className="flex items-center justify-between gap-4 p-3.5 rounded-xl bg-surface border border-gray-100">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-gray-900">{d.businessName}</span>
+                        <StatusBadge status={d.outcome} size="sm" />
+                      </div>
+                      <p className="text-xs text-gray-500 mt-0.5 font-mono">{d.cacRegNumber}</p>
+                      {d.reason && <p className="text-xs text-gray-500 mt-0.5">{d.reason}</p>}
                     </div>
-                    <p className="text-xs text-gray-500 mt-0.5 font-mono">{d.cacRegNumber}</p>
-                    {d.reason && <p className="text-xs text-gray-500 mt-0.5">{d.reason}</p>}
+                    {assessed ? (
+                      <span className="text-xs text-gray-400 flex-shrink-0">Assessed by {assessed.assessedBy}</span>
+                    ) : (
+                      <button onClick={() => setGovernanceModal(d)} className="btn-secondary text-xs px-3 py-1.5 flex-shrink-0">
+                        Record Governance Assessment
+                      </button>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
       </div>
 
       {modal && <DecisionModal modal={modal} onClose={() => setModal(null)} />}
+      {amendmentModal && <ProposeAmendmentModal row={amendmentModal} onClose={() => setAmendmentModal(null)} />}
+      {governanceModal && <GovernanceAssessmentModal decision={governanceModal} onClose={() => setGovernanceModal(null)} />}
     </Layout>
   );
 }
