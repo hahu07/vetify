@@ -2726,3 +2726,348 @@ export function useProposalDeclineRecords() {
     queryFn: async () => (await apiClient.get<ProposalDeclineRecordItem[]>("/proposal-decline-records")).data,
   });
 }
+
+// ─── Phase 2, Fortieth Slice: Murabahah acquisition alternates, Pass 2 ─────
+// Wakala path (ProceedWithWakala/AttachQuotation/RecordAssetPurchase/
+// DeclineAgency), delivery milestones, supplier failure/payment records,
+// document entries (register/verify/supersede), and the standalone
+// PurchaseOrder/CapitalCallRecord procurement records -- Batch B (Thirty-
+// First Slice) backend, no frontend hook coverage until now.
+
+export interface SupplierQuotation {
+  id: string;
+  murabahahWadId: string;
+  cacRegNumber: string;
+  businessName: string;
+  supplierName: string;
+  quotationRef: string;
+  quotedAmount: number;
+  assetDescription: string;
+  validUntil?: string | null;
+}
+
+export interface MurabahahWakala {
+  id: string;
+  murabahahWadId: string;
+  cacRegNumber: string;
+  businessName: string;
+  terms: FinancingTerms;
+  assetDetails: { description: string; supplier: string; supplierRef: string; estimatedCost: number };
+}
+
+export interface DeliveryMilestone {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  milestoneDescription: string;
+  quantityDelivered: number;
+  milestoneDate: string;
+  evidenceRef?: string | null;
+}
+
+export interface SupplierFailureRecord {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  failureType: "SupplierCancelled" | "SupplierBankrupt" | "RefundIssued";
+  failureDescription: string;
+  refundAmount?: number | null;
+  failedAt: string;
+}
+
+export interface SupplierPaymentRecord {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  amountPaid: number;
+  paymentDate: string;
+  paymentRef: string;
+  bankConfirmationRef?: string | null;
+  purchasedViaWakala: boolean;
+}
+
+export interface DocumentEntry {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  documentRef: { docType: string; contentHash: string; storageRef: string };
+  registeredBy: string;
+  uploadedAt: string;
+  verifiedAt?: string | null;
+  superseded: boolean;
+}
+
+export interface PurchaseOrder {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  supplierName: string;
+  totalOrderValue: number;
+  deliveryDeadline: string;
+  poRef: string;
+  issuedAt: string;
+  status: "POIssued" | "POConfirmed" | "POPartiallyFulfilled" | "POFulfilled" | "POCancelled";
+}
+
+export interface CapitalCallRecord {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  trancheNumber: number;
+  trancheAmount: number;
+  disbursementDate: string;
+  purposeOfTranche: string;
+  disbursementRef: string;
+  cumulativeDisbursed: number;
+  remainingFacility: number;
+}
+
+// ── Wakala path ──
+
+export function useSupplierQuotations() {
+  return useQuery({
+    queryKey: ["supplier-quotations"],
+    queryFn: async () => (await apiClient.get<SupplierQuotation[]>("/supplier-quotations")).data,
+  });
+}
+
+export function useAttachQuotation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, supplierName, quotationRef, quotedAmount, validUntil,
+    }: { id: string; supplierName: string; quotationRef: string; quotedAmount: number; validUntil?: string | null }) =>
+      apiClient.post(`/murabahah-wads/${id}/attach-quotation`, { supplierName, quotationRef, quotedAmount, validUntil }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["supplier-quotations"] }),
+  });
+}
+
+export function useProceedWithWakala() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.post(`/murabahah-wads/${id}/proceed-with-wakala`, {}).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["murabahah-wads"] });
+      qc.invalidateQueries({ queryKey: ["murabahah-wakalas"] });
+    },
+  });
+}
+
+export function useMurabahahWakalas() {
+  return useQuery({
+    queryKey: ["murabahah-wakalas"],
+    queryFn: async () => (await apiClient.get<MurabahahWakala[]>("/murabahah-wakalas")).data,
+  });
+}
+
+export function useRecordAssetPurchaseViaWakala() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, actualCost, purchaseDate, invoiceRef, freightCost, customsDuty, insurancePremium, otherAcquisitionCosts,
+    }: {
+      id: string; actualCost: number; purchaseDate: string; invoiceRef: string;
+      freightCost?: number; customsDuty?: number; insurancePremium?: number; otherAcquisitionCosts?: number;
+    }) =>
+      apiClient
+        .post(`/murabahah-wakalas/${id}/record-asset-purchase`, { actualCost, purchaseDate, invoiceRef, freightCost, customsDuty, insurancePremium, otherAcquisitionCosts })
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["murabahah-wakalas"] });
+      qc.invalidateQueries({ queryKey: ["asset-purchase-records"] });
+    },
+  });
+}
+
+export function useDeclineAgency() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/murabahah-wakalas/${id}/decline-agency`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["murabahah-wakalas"] }),
+  });
+}
+
+// ── AssetPurchaseRecord supporting records ──
+
+export function useDeliveryMilestones() {
+  return useQuery({
+    queryKey: ["delivery-milestones"],
+    queryFn: async () => (await apiClient.get<DeliveryMilestone[]>("/delivery-milestones")).data,
+  });
+}
+
+export function useRecordDeliveryMilestone() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, milestoneDescription, quantityDelivered, milestoneDate, evidenceRef,
+    }: { id: string; milestoneDescription: string; quantityDelivered: number; milestoneDate: string; evidenceRef?: string | null }) =>
+      apiClient
+        .post(`/asset-purchase-records/${id}/record-delivery-milestone`, { milestoneDescription, quantityDelivered, milestoneDate, evidenceRef })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["delivery-milestones"] }),
+  });
+}
+
+export function useSupplierFailureRecords() {
+  return useQuery({
+    queryKey: ["supplier-failure-records"],
+    queryFn: async () => (await apiClient.get<SupplierFailureRecord[]>("/supplier-failure-records")).data,
+  });
+}
+
+export function useRecordSupplierFailure() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, failureType, failureDescription, refundAmount,
+    }: { id: string; failureType: SupplierFailureRecord["failureType"]; failureDescription: string; refundAmount?: number | null }) =>
+      apiClient.post(`/asset-purchase-records/${id}/record-supplier-failure`, { failureType, failureDescription, refundAmount }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["asset-purchase-records"] });
+      qc.invalidateQueries({ queryKey: ["supplier-failure-records"] });
+    },
+  });
+}
+
+export function useSupplierPaymentRecords() {
+  return useQuery({
+    queryKey: ["supplier-payment-records"],
+    queryFn: async () => (await apiClient.get<SupplierPaymentRecord[]>("/supplier-payment-records")).data,
+  });
+}
+
+export function useRecordSupplierPayment() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, amountPaid, paymentDate, paymentRef, bankConfirmationRef,
+    }: { id: string; amountPaid: number; paymentDate: string; paymentRef: string; bankConfirmationRef?: string | null }) =>
+      apiClient.post(`/asset-purchase-records/${id}/record-supplier-payment`, { amountPaid, paymentDate, paymentRef, bankConfirmationRef }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["supplier-payment-records"] }),
+  });
+}
+
+export function useDocumentEntries() {
+  return useQuery({
+    queryKey: ["document-entries"],
+    queryFn: async () => (await apiClient.get<DocumentEntry[]>("/document-entries")).data,
+  });
+}
+
+export function useRegisterDocument() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, docType, contentHash, storageRef, registeredBy,
+    }: { id: string; docType: string; contentHash: string; storageRef: string; registeredBy: string }) =>
+      apiClient
+        .post(`/asset-purchase-records/${id}/register-document`, { documentRef: { docType, contentHash, storageRef }, registeredBy })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["document-entries"] }),
+  });
+}
+
+export function useVerifyDocument() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, verifyNote }: { id: string; verifyNote?: string | null }) =>
+      apiClient.post(`/document-entries/${id}/verify`, { verifyNote }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["document-entries"] }),
+  });
+}
+
+export function useSupersedeDocument() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, docType, contentHash, storageRef, reason,
+    }: { id: string; docType: string; contentHash: string; storageRef: string; reason: string }) =>
+      apiClient
+        .post(`/document-entries/${id}/supersede`, { newDocumentRef: { docType, contentHash, storageRef }, reason })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["document-entries"] }),
+  });
+}
+
+// ── Standalone procurement records (financialInstitution, no AssetPurchaseRecord dependency) ──
+
+export function usePurchaseOrders() {
+  return useQuery({
+    queryKey: ["purchase-orders"],
+    queryFn: async () => (await apiClient.get<PurchaseOrder[]>("/purchase-orders")).data,
+  });
+}
+
+export function useCreatePurchaseOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; facilityRef: string; supplierName: string;
+      supplierDetails: Record<string, unknown>; orderedItems: Record<string, unknown>[];
+      totalOrderValue: number; deliveryDeadline: string; poRef: string;
+    }) => apiClient.post("/purchase-orders", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useConfirmPO() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, confirmationRef }: { id: string; confirmationRef: string }) =>
+      apiClient.post(`/purchase-orders/${id}/confirm`, { confirmationRef }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useMarkPartiallyFulfilled() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, deliveryRef }: { id: string; deliveryRef: string }) =>
+      apiClient.post(`/purchase-orders/${id}/mark-partially-fulfilled`, { deliveryRef }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useMarkFulfilled() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, deliveryRef }: { id: string; deliveryRef: string }) =>
+      apiClient.post(`/purchase-orders/${id}/mark-fulfilled`, { deliveryRef }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useCancelPO() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/purchase-orders/${id}/cancel`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["purchase-orders"] }),
+  });
+}
+
+export function useCapitalCallRecords() {
+  return useQuery({
+    queryKey: ["capital-call-records"],
+    queryFn: async () => (await apiClient.get<CapitalCallRecord[]>("/capital-call-records")).data,
+  });
+}
+
+export function useCreateCapitalCallRecord() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; facilityRef: string; trancheNumber: number; trancheAmount: number;
+      disbursementDate: string; purposeOfTranche: string; disbursementRef: string; cumulativeDisbursed: number; remainingFacility: number;
+    }) => apiClient.post("/capital-call-records", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["capital-call-records"] }),
+  });
+}

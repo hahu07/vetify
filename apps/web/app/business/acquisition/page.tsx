@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Truck, FileSignature, X, ShieldCheck, Clock3 } from "lucide-react";
+import { Truck, FileSignature, X, ShieldCheck, Clock3, HandCoins } from "lucide-react";
 import Layout from "@/components/Layout";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
 import { formatNaira, formatDate } from "@/lib/formatters";
@@ -16,8 +16,14 @@ import {
   useRequestCancellation,
   useAcquisitionCancellationRequests,
   useDeclineProposal,
+  useMurabahahWakalas,
+  useRecordAssetPurchaseViaWakala,
+  useDeclineAgency,
+  useDeliveryMilestones,
+  useRecordDeliveryMilestone,
   type MurabahahProposal,
   type AssetPurchaseRecord,
+  type MurabahahWakala,
 } from "@/lib/apiClient";
 
 // New page -- Stage 8's two business-side actions (AcknowledgeDelivery/Qabdh
@@ -238,6 +244,174 @@ function DeclineProposalModal({ proposal, onClose }: { proposal: MurabahahPropos
   );
 }
 
+// Phase 2, Fortieth Slice: the business's side of the Wakala agency path
+// (RecordAssetPurchase/DeclineAgency, business-controlled since the business
+// is the FI's appointed agent) and RecordDeliveryMilestone (partial delivery
+// tracking before Qabdh, also business-controlled). AttachQuotation/
+// ProceedWithWakala (financialInstitution-controlled) live on
+// /fi/acquisition instead.
+
+function RecordPurchaseViaWakalaModal({ wakala, onClose }: { wakala: MurabahahWakala; onClose: () => void }) {
+  const [actualCost, setActualCost] = useState(wakala.assetDetails.estimatedCost);
+  const [purchaseDate, setPurchaseDate] = useState(new Date().toISOString().slice(0, 10));
+  const [invoiceRef, setInvoiceRef] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const record = useRecordAssetPurchaseViaWakala();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!invoiceRef.trim()) {
+      setError("Please provide an invoice reference");
+      return;
+    }
+    if (actualCost <= 0) {
+      setError("Actual cost must be positive");
+      return;
+    }
+    try {
+      await record.mutateAsync({ id: wakala.id, actualCost, purchaseDate, invoiceRef });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record the purchase");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Record Asset Purchase (as agent)</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{wakala.assetDetails.description}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Actual Cost (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={actualCost} onChange={(e) => setActualCost(Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Purchase Date</label>
+          <input type="date" className="input text-sm" value={purchaseDate} onChange={(e) => setPurchaseDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Invoice Reference</label>
+          <input className="input text-sm" value={invoiceRef} onChange={(e) => setInvoiceRef(e.target.value)} placeholder="INV-2026-001" />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={record.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {record.isPending ? "Submitting…" : "Confirm Purchase"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeclineAgencyModal({ wakala, onClose }: { wakala: MurabahahWakala; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const decline = useDeclineAgency();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!reason.trim()) {
+      setError("Please provide a reason");
+      return;
+    }
+    try {
+      await decline.mutateAsync({ id: wakala.id, reason });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to decline the agency");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Decline Agency</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{wakala.assetDetails.description} -- the financial institution must purchase the asset directly instead.</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+          <textarea rows={2} className="input text-sm resize-none" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={decline.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {decline.isPending ? "Submitting…" : "Decline Agency"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RecordMilestoneModal({ record, onClose }: { record: AssetPurchaseRecord; onClose: () => void }) {
+  const [milestoneDescription, setMilestoneDescription] = useState("");
+  const [quantityDelivered, setQuantityDelivered] = useState<number | "">("");
+  const [milestoneDate, setMilestoneDate] = useState(new Date().toISOString().slice(0, 10));
+  const [evidenceRef, setEvidenceRef] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const record_ = useRecordDeliveryMilestone();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!milestoneDescription.trim() || !quantityDelivered || Number(quantityDelivered) <= 0) {
+      setError("Description and a positive quantity delivered are required");
+      return;
+    }
+    try {
+      await record_.mutateAsync({ id: record.id, milestoneDescription, quantityDelivered: Number(quantityDelivered), milestoneDate, evidenceRef: evidenceRef || null });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record the milestone");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Record Delivery Milestone</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{record.assetDescription}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Milestone Description</label>
+          <input className="input text-sm" value={milestoneDescription} onChange={(e) => setMilestoneDescription(e.target.value)} placeholder="First truckload delivered" />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Quantity Delivered</label>
+          <input type="number" className="input text-sm font-mono" value={quantityDelivered} onChange={(e) => setQuantityDelivered(e.target.value === "" ? "" : Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Milestone Date</label>
+          <input type="date" className="input text-sm" value={milestoneDate} onChange={(e) => setMilestoneDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Evidence Reference (optional)</label>
+          <input className="input text-sm font-mono" value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={record_.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {record_.isPending ? "Recording…" : "Record Milestone"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function BusinessAcquisitionPage() {
   const { data: records, isLoading: loadingRecords, isError: errorRecords } = useAssetPurchaseRecords();
   const { data: proposals, isLoading: loadingProposals, isError: errorProposals } = useMurabahahProposals();
@@ -247,8 +421,13 @@ export default function BusinessAcquisitionPage() {
   const [rejectModal, setRejectModal] = useState<AssetPurchaseRecord | null>(null);
   const [cancelModal, setCancelModal] = useState<AssetPurchaseRecord | null>(null);
   const [declineModal, setDeclineModal] = useState<MurabahahProposal | null>(null);
+  const [wakalaPurchaseModal, setWakalaPurchaseModal] = useState<MurabahahWakala | null>(null);
+  const [wakalaDeclineModal, setWakalaDeclineModal] = useState<MurabahahWakala | null>(null);
+  const [milestoneModal, setMilestoneModal] = useState<AssetPurchaseRecord | null>(null);
   const { data: rejectionRecords } = useAssetRejectionRecords();
   const { data: cancellationRequests } = useAcquisitionCancellationRequests();
+  const { data: wakalas } = useMurabahahWakalas();
+  const { data: milestones } = useDeliveryMilestones();
 
   if (loadingRecords || loadingProposals) return <Layout title="Asset Acquisition"><FullPageLoader /></Layout>;
   if (errorRecords || errorProposals || !records || !proposals) {
@@ -259,6 +438,8 @@ export default function BusinessAcquisitionPage() {
   const recordById = new Map(records.map((r) => [r.id, r]));
 
   const certByFacility = new Map((certifications ?? []).map((c) => [c.facilityRef, c]));
+  const milestonesByRecord = new Map<string, typeof milestones>();
+  for (const m of milestones ?? []) milestonesByRecord.set(m.assetPurchaseRecordId, [...(milestonesByRecord.get(m.assetPurchaseRecordId) ?? []), m]);
 
   return (
     <Layout title="Asset Acquisition">
@@ -271,21 +452,62 @@ export default function BusinessAcquisitionPage() {
             </div>
             <div className="space-y-3">
               {awaitingAcknowledgement.map((record) => (
-                <div key={record.id} className="card p-4 flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-semibold text-gray-900">{record.assetDescription}</p>
-                    <p className="text-xs text-gray-500 mt-0.5 font-mono">{formatNaira(record.totalAcquisitionCost)} · Purchased {formatDate(record.purchaseDate)}</p>
+                <div key={record.id} className="card p-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-900">{record.assetDescription}</p>
+                      <p className="text-xs text-gray-500 mt-0.5 font-mono">{formatNaira(record.totalAcquisitionCost)} · Purchased {formatDate(record.purchaseDate)}</p>
+                    </div>
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button onClick={() => setMilestoneModal(record)} className="btn-secondary text-xs px-3 py-1.5">
+                        Record Milestone
+                      </button>
+                      <button onClick={() => setRejectModal(record)} className="btn-secondary text-xs px-3 py-1.5">
+                        Reject Delivery
+                      </button>
+                      <button
+                        onClick={() => acknowledge.mutate(record.id)}
+                        disabled={acknowledge.isPending}
+                        className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50"
+                      >
+                        {acknowledge.isPending ? "Confirming…" : "Confirm Delivery Received"}
+                      </button>
+                    </div>
+                  </div>
+                  {(milestonesByRecord.get(record.id) ?? []).length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {(milestonesByRecord.get(record.id) ?? []).map((m) => (
+                        <p key={m.id} className="text-xs text-gray-500">
+                          {m.milestoneDescription} · qty {m.quantityDelivered} · {formatDate(m.milestoneDate)}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(wakalas ?? []).length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <HandCoins size={16} className="text-primary" />
+              <h2 className="text-sm font-semibold text-gray-800">Wakala Agency -- Acting as the FI&apos;s Agent</h2>
+            </div>
+            <div className="card overflow-hidden divide-y divide-gray-100">
+              {(wakalas ?? []).map((wakala) => (
+                <div key={wakala.id} className="flex items-center justify-between gap-4 p-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900">{wakala.assetDetails.description}</p>
+                    <p className="text-xs text-gray-500 mt-0.5 font-mono">{formatNaira(wakala.assetDetails.estimatedCost)} · {wakala.assetDetails.supplier}</p>
                   </div>
                   <div className="flex gap-2 flex-shrink-0">
-                    <button onClick={() => setRejectModal(record)} className="btn-secondary text-xs px-3 py-1.5">
-                      Reject Delivery
+                    <button onClick={() => setWakalaDeclineModal(wakala)} className="btn-secondary text-xs px-3 py-1.5">
+                      Decline Agency
                     </button>
-                    <button
-                      onClick={() => acknowledge.mutate(record.id)}
-                      disabled={acknowledge.isPending}
-                      className="btn-primary text-xs px-3 py-1.5 disabled:opacity-50"
-                    >
-                      {acknowledge.isPending ? "Confirming…" : "Confirm Delivery Received"}
+                    <button onClick={() => setWakalaPurchaseModal(wakala)} className="btn-primary text-xs px-3 py-1.5">
+                      Record Purchase
                     </button>
                   </div>
                 </div>
@@ -375,6 +597,9 @@ export default function BusinessAcquisitionPage() {
       {rejectModal && <RejectDeliveryModal record={rejectModal} onClose={() => setRejectModal(null)} />}
       {cancelModal && <RequestCancellationModal record={cancelModal} onClose={() => setCancelModal(null)} />}
       {declineModal && <DeclineProposalModal proposal={declineModal} onClose={() => setDeclineModal(null)} />}
+      {wakalaPurchaseModal && <RecordPurchaseViaWakalaModal wakala={wakalaPurchaseModal} onClose={() => setWakalaPurchaseModal(null)} />}
+      {wakalaDeclineModal && <DeclineAgencyModal wakala={wakalaDeclineModal} onClose={() => setWakalaDeclineModal(null)} />}
+      {milestoneModal && <RecordMilestoneModal record={milestoneModal} onClose={() => setMilestoneModal(null)} />}
     </Layout>
   );
 }

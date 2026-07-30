@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   FileText, Shield, Menu, X, ChevronRight, LogOut, Users, TrendingUp, ClipboardCheck, Landmark,
-  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel, Building2, ScrollText,
+  Package, ShieldCheck, AlertTriangle, BookOpen, KeyRound, FileBarChart, Lock, Gavel, Building2, ScrollText, FileCheck,
 } from "lucide-react";
 import { useAuth, ROLE_DASHBOARD, type UserRole } from "@/lib/auth/AuthContext";
 
@@ -34,6 +34,7 @@ const roleNav: Record<UserRole, NavItem[]> = {
     { label: "Compliance Reviews", path: "/vetify/compliance", icon: <Shield size={16} /> },
     { label: "Underwriting Queue", path: "/vetify/underwriting", icon: <ClipboardCheck size={16} /> },
     { label: "Shariah Certification", path: "/vetify/shariah-certification", icon: <ShieldCheck size={16} /> },
+    { label: "Document Verification", path: "/vetify/documents", icon: <FileCheck size={16} /> },
     { label: "Delinquency Monitoring", path: "/vetify/delinquency", icon: <AlertTriangle size={16} /> },
     { label: "Collateral Oversight", path: "/vetify/collateral", icon: <Lock size={16} /> },
     { label: "Dispute Resolution", path: "/vetify/disputes", icon: <Gavel size={16} /> },
