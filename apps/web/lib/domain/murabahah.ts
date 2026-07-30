@@ -94,6 +94,229 @@ async function proceedDirectlyImpl(session: SessionContext, wadId: number, args:
 }
 export const proceedDirectly = withAuthorization(["financialInstitution"], proceedDirectlyImpl);
 
+// ─── Choice: ProceedWithWakala (MurabahahWad, financialInstitution) ───────
+// Phase 2, Twenty-Fourth Slice. Path A -- the deferred agency detour named
+// in this file's very first comment on ProceedDirectly, since the Second
+// Slice. Takes no arguments in the real Daml signature at all (agencyFee is
+// hardcoded to None there too -- ported exactly, not invented as a caller
+// argument).
+
+async function proceedWithWakalaImpl(session: SessionContext, wadId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wad WHERE id = $1 FOR UPDATE", [wadId]);
+    const wad = rows[0];
+    if (!wad) throw new DomainError("MurabahahWad not found");
+    if (wad.archived_at) throw new DomainError("MurabahahWad is no longer active");
+
+    const { rows: wakala } = await client.query(
+      `INSERT INTO murabahah_wakala
+         (murabahah_wad_id, cac_reg_number, business_name, terms_amount, terms_purpose,
+          terms_tenure_months, asset_description, asset_supplier, asset_supplier_ref, asset_estimated_cost)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        wadId, wad.cac_reg_number, wad.business_name, wad.terms_amount, wad.terms_purpose,
+        wad.terms_tenure_months, wad.asset_description, wad.asset_supplier, wad.asset_supplier_ref, wad.asset_estimated_cost,
+      ],
+    );
+    const murabahahWakalaId = wakala[0].id;
+
+    await client.query(
+      `UPDATE murabahah_wad SET archived_at = now(), superseded_by_kind = 'murabahah_wakala', superseded_by_id = $2 WHERE id = $1`,
+      [wadId, murabahahWakalaId],
+    );
+
+    return { murabahahWakalaId };
+  });
+}
+export const proceedWithWakala = withAuthorization(["financialInstitution"], proceedWithWakalaImpl);
+
+// ─── Choice: WithdrawWad (MurabahahWad, business) ──────────────────────────
+
+async function withdrawWadImpl(session: SessionContext, wadId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wad WHERE id = $1 FOR UPDATE", [wadId]);
+    const wad = rows[0];
+    if (!wad) throw new DomainError("MurabahahWad not found");
+    if (wad.archived_at) throw new DomainError("MurabahahWad is no longer active");
+
+    const { rows: record } = await client.query(
+      `INSERT INTO wad_withdrawal_record (murabahah_wad_id, cac_reg_number, business_name, reason)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [wadId, wad.cac_reg_number, wad.business_name, args.reason],
+    );
+    const wadWithdrawalRecordId = record[0].id;
+
+    await client.query(
+      `UPDATE murabahah_wad SET archived_at = now(), superseded_by_kind = 'wad_withdrawal_record', superseded_by_id = $2 WHERE id = $1`,
+      [wadId, wadWithdrawalRecordId],
+    );
+
+    return { wadWithdrawalRecordId };
+  });
+}
+export const withdrawWad = withAuthorization(["business"], withdrawWadImpl);
+
+// ─── Choice: AttachQuotation (MurabahahWad, financialInstitution) ─────────
+// Phase 2, Twenty-Fifth Slice. Nonconsuming in the real Daml -- "the Wa'd
+// stays active; the quotation is a side record."
+
+interface AttachQuotationArgs {
+  supplierName: string;
+  quotationRef: string;
+  quotedAmount: number;
+  validUntil?: string | null;
+}
+
+async function attachQuotationImpl(session: SessionContext, wadId: number, args: AttachQuotationArgs) {
+  if (!(args.quotedAmount > 0)) throw new DomainError("Quoted amount must be positive");
+  if (!args.quotationRef) throw new DomainError("Quotation reference must not be empty");
+  if (!args.supplierName) throw new DomainError("Supplier name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wad WHERE id = $1", [wadId]);
+    const wad = rows[0];
+    if (!wad) throw new DomainError("MurabahahWad not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_quotation
+         (murabahah_wad_id, cac_reg_number, business_name, supplier_name, quotation_ref, quoted_amount, asset_description, valid_until)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [wadId, wad.cac_reg_number, wad.business_name, args.supplierName, args.quotationRef, args.quotedAmount, wad.asset_description, args.validUntil ?? null],
+    );
+    return { supplierQuotationId: created[0].id };
+  });
+}
+export const attachQuotation = withAuthorization(["financialInstitution"], attachQuotationImpl);
+
+export async function listSupplierQuotations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_quotation ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── MurabahahWakala: RecordAssetPurchase + DeclineAgency ─────────────────
+// Both consuming on the real Daml MurabahahWakala template, business-
+// controlled. asset_purchase_record.murabahah_wad_id is set to the
+// *originating* Wad's id (via wakala.murabahah_wad_id), not a new wakala-
+// specific FK -- see migrations/025's header for why.
+
+interface RecordAssetPurchaseArgs {
+  actualCost: number;
+  purchaseDate: string;
+  invoiceRef: string;
+  freightCost?: number;
+  customsDuty?: number;
+  insurancePremium?: number;
+  otherAcquisitionCosts?: number;
+}
+
+async function recordAssetPurchaseImpl(session: SessionContext, wakalaId: number, args: RecordAssetPurchaseArgs) {
+  if (!(args.actualCost > 0)) throw new DomainError("Actual purchase cost must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wakala WHERE id = $1 FOR UPDATE", [wakalaId]);
+    const wakala = rows[0];
+    if (!wakala) throw new DomainError("MurabahahWakala not found");
+    if (wakala.archived_at) throw new DomainError("MurabahahWakala is no longer active");
+
+    const freightCost = args.freightCost ?? 0;
+    const customsDuty = args.customsDuty ?? 0;
+    const insurancePremium = args.insurancePremium ?? 0;
+    const otherAcquisitionCosts = args.otherAcquisitionCosts ?? 0;
+    const totalAcquisitionCost = args.actualCost + freightCost + customsDuty + insurancePremium + otherAcquisitionCosts;
+
+    const { rows: record } = await client.query(
+      `INSERT INTO asset_purchase_record
+         (murabahah_wad_id, cac_reg_number, business_name, terms_amount, terms_purpose,
+          terms_tenure_months, asset_description, asset_supplier, asset_supplier_ref,
+          asset_estimated_cost, actual_cost, purchase_date, invoice_ref, freight_cost,
+          customs_duty, insurance_premium, other_acquisition_costs, total_acquisition_cost,
+          purchased_via_wakala)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true)
+       RETURNING id`,
+      [
+        wakala.murabahah_wad_id,
+        wakala.cac_reg_number,
+        wakala.business_name,
+        wakala.terms_amount,
+        wakala.terms_purpose,
+        wakala.terms_tenure_months,
+        wakala.asset_description,
+        wakala.asset_supplier,
+        wakala.asset_supplier_ref,
+        wakala.asset_estimated_cost,
+        args.actualCost,
+        args.purchaseDate,
+        args.invoiceRef,
+        freightCost,
+        customsDuty,
+        insurancePremium,
+        otherAcquisitionCosts,
+        totalAcquisitionCost,
+      ],
+    );
+    const assetPurchaseRecordId = record[0].id;
+
+    await client.query(
+      `UPDATE murabahah_wakala SET archived_at = now(), superseded_by_kind = 'asset_purchase_record', superseded_by_id = $2 WHERE id = $1`,
+      [wakalaId, assetPurchaseRecordId],
+    );
+
+    return { assetPurchaseRecordId };
+  });
+}
+export const recordAssetPurchase = withAuthorization(["business"], recordAssetPurchaseImpl);
+
+async function declineAgencyImpl(session: SessionContext, wakalaId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_wakala WHERE id = $1 FOR UPDATE", [wakalaId]);
+    const wakala = rows[0];
+    if (!wakala) throw new DomainError("MurabahahWakala not found");
+    if (wakala.archived_at) throw new DomainError("MurabahahWakala is no longer active");
+
+    const { rows: record } = await client.query(
+      `INSERT INTO agency_withdrawal_record (murabahah_wakala_id, cac_reg_number, business_name, reason)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [wakalaId, wakala.cac_reg_number, wakala.business_name, args.reason],
+    );
+    const agencyWithdrawalRecordId = record[0].id;
+
+    await client.query(
+      `UPDATE murabahah_wakala SET archived_at = now(), superseded_by_kind = 'agency_withdrawal_record', superseded_by_id = $2 WHERE id = $1`,
+      [wakalaId, agencyWithdrawalRecordId],
+    );
+
+    return { agencyWithdrawalRecordId };
+  });
+}
+export const declineAgency = withAuthorization(["business"], declineAgencyImpl);
+
+export async function listMurabahahWakalas(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM murabahah_wakala ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listWadWithdrawalRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM wad_withdrawal_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listAgencyWithdrawalRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM agency_withdrawal_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── Choice: AcknowledgeDelivery (AssetPurchaseRecord, business) -- Qabdh ──
 
 async function acknowledgeDeliveryImpl(session: SessionContext, recordId: number) {
@@ -338,6 +561,86 @@ async function acceptProposalImpl(session: SessionContext, proposalId: number, a
   });
 }
 export const acceptProposal = withAuthorization(["business"], acceptProposalImpl);
+
+// ─── Choice: DeclineProposal (MurabahahProposal, business) ────────────────
+// Phase 2, Twenty-Fourth Slice. Consuming in the real Daml (no
+// `nonconsuming` keyword) -- archives the proposal, creates
+// ProposalDeclineRecord. murabahah_proposal_update already covers
+// `business` (no RLS gap here, unlike murabahah_wad's own update policy --
+// see migrations/025's header).
+
+async function declineProposalImpl(session: SessionContext, proposalId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_proposal WHERE id = $1 FOR UPDATE", [proposalId]);
+    const proposal = rows[0];
+    if (!proposal) throw new DomainError("MurabahahProposal not found");
+    if (proposal.archived_at) throw new DomainError("MurabahahProposal is no longer active");
+
+    const { rows: record } = await client.query(
+      `INSERT INTO proposal_decline_record (murabahah_proposal_id, facility_ref, cac_reg_number, business_name, reason)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [proposalId, proposal.facility_ref, proposal.cac_reg_number, proposal.business_name, args.reason],
+    );
+    const proposalDeclineRecordId = record[0].id;
+
+    await client.query(
+      `UPDATE murabahah_proposal SET archived_at = now(), superseded_by_kind = 'proposal_decline_record', superseded_by_id = $2 WHERE id = $1`,
+      [proposalId, proposalDeclineRecordId],
+    );
+
+    return { proposalDeclineRecordId };
+  });
+}
+export const declineProposal = withAuthorization(["business"], declineProposalImpl);
+
+export async function listProposalDeclineRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM proposal_decline_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ExpireProposal (MurabahahProposal, vetify) ────────────────────
+// Phase 2, Twenty-Fifth Slice. Returns `()` in the real Daml -- no
+// successor record, unlike AcceptProposal/DeclineProposal. Archives with
+// superseded_by_kind left NULL, same "no successor" shape WithdrawDemand
+// (Twenty-Third Slice) already established.
+
+async function expireProposalImpl(session: SessionContext, proposalId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_proposal WHERE id = $1 FOR UPDATE", [proposalId]);
+    const proposal = rows[0];
+    if (!proposal) throw new DomainError("MurabahahProposal not found");
+    if (proposal.archived_at) throw new DomainError("MurabahahProposal is no longer active");
+    if (!proposal.acceptance_expires_at) throw new DomainError("No acceptance expiry configured on this proposal");
+    if (new Date(proposal.acceptance_expires_at).getTime() >= Date.now()) {
+      throw new DomainError("Proposal acceptance window has not yet elapsed");
+    }
+
+    await client.query(`UPDATE murabahah_proposal SET archived_at = now() WHERE id = $1`, [proposalId]);
+    return { proposalId };
+  });
+}
+export const expireProposal = withAuthorization(["vetify"], expireProposalImpl);
+
+// ─── Choice: WithdrawProposal (MurabahahProposal, financialInstitution) ───
+// Also returns `()` in the real Daml -- no successor record.
+
+async function withdrawProposalImpl(session: SessionContext, proposalId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Withdrawal reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT archived_at FROM murabahah_proposal WHERE id = $1 FOR UPDATE", [proposalId]);
+    const proposal = rows[0];
+    if (!proposal) throw new DomainError("MurabahahProposal not found");
+    if (proposal.archived_at) throw new DomainError("MurabahahProposal is no longer active");
+
+    await client.query(`UPDATE murabahah_proposal SET archived_at = now() WHERE id = $1`, [proposalId]);
+    return { proposalId };
+  });
+}
+export const withdrawProposal = withAuthorization(["financialInstitution"], withdrawProposalImpl);
 
 // ─── Reads ──────────────────────────────────────────────────────────────
 
@@ -1554,6 +1857,147 @@ export const writeOffContract = withAuthorization(["financialInstitution"], writ
 export async function listWriteOffRecords(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM write_off_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── DemandNotice: IssueDemandNotice + EscalateToLegal/WithdrawDemand ─────
+// Phase 2, Twenty-Third Slice. IssueDemandNotice is nonconsuming on
+// MurabahahContract ("the Defaulted contract stays alive for recovery
+// tracking"); EscalateToLegal/WithdrawDemand are both consuming on
+// DemandNotice itself -- a demand notice is either escalated (terminal,
+// replaced by a LegalEscalation) or withdrawn (terminal, no successor).
+
+interface IssueDemandNoticeArgs {
+  demandDate: string;
+  demandRef: string;
+  responseDeadline: string;
+  gsmEligible: boolean;
+}
+
+async function issueDemandNoticeImpl(session: SessionContext, contractId: number, args: IssueDemandNoticeArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+    if (contract.status !== "Defaulted") throw new DomainError("Can only issue demand notice on a Defaulted contract");
+    if (!args.demandRef) throw new DomainError("Demand reference must not be empty");
+    if (new Date(args.responseDeadline).getTime() <= new Date(args.demandDate).getTime()) {
+      throw new DomainError("Response deadline must be after demand date");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO demand_notice
+         (murabahah_contract_id, facility_ref, cac_reg_number, business_name, demand_date,
+          outstanding_amount, demand_ref, response_deadline, gsm_eligible)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        contractId, contract.facility_ref, contract.cac_reg_number, contract.business_name,
+        args.demandDate, contract.outstanding_balance, args.demandRef, args.responseDeadline, args.gsmEligible,
+      ],
+    );
+    return { demandNoticeId: created[0].id };
+  });
+}
+export const issueDemandNotice = withAuthorization(["financialInstitution"], issueDemandNoticeImpl);
+
+interface EscalateToLegalArgs {
+  escalationDate: string;
+  solicitorRef: string;
+  legalAction: string;
+}
+
+async function escalateToLegalImpl(session: SessionContext, demandNoticeId: number, args: EscalateToLegalArgs) {
+  if (!args.solicitorRef) throw new DomainError("Solicitor reference must not be empty");
+  if (!args.legalAction) throw new DomainError("Legal action description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM demand_notice WHERE id = $1 FOR UPDATE", [demandNoticeId]);
+    const notice = rows[0];
+    if (!notice) throw new DomainError("DemandNotice not found");
+    if (notice.archived_at) throw new DomainError("DemandNotice is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO legal_escalation
+         (demand_notice_id, business_name, cac_reg_number, escalation_date, solicitor_ref, legal_action, outstanding_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [demandNoticeId, notice.business_name, notice.cac_reg_number, args.escalationDate, args.solicitorRef, args.legalAction, notice.outstanding_amount],
+    );
+    const legalEscalationId = created[0].id;
+
+    await client.query(
+      `UPDATE demand_notice SET archived_at = now(), superseded_by_kind = 'legal_escalation', superseded_by_id = $2 WHERE id = $1`,
+      [demandNoticeId, legalEscalationId],
+    );
+
+    return { legalEscalationId };
+  });
+}
+export const escalateToLegal = withAuthorization(["financialInstitution"], escalateToLegalImpl);
+
+async function withdrawDemandImpl(session: SessionContext, demandNoticeId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT archived_at FROM demand_notice WHERE id = $1 FOR UPDATE", [demandNoticeId]);
+    const notice = rows[0];
+    if (!notice) throw new DomainError("DemandNotice not found");
+    if (notice.archived_at) throw new DomainError("DemandNotice is no longer active");
+
+    await client.query(
+      `UPDATE demand_notice SET archived_at = now(), withdrawal_note = $2 WHERE id = $1`,
+      [demandNoticeId, args.note],
+    );
+    return { demandNoticeId };
+  });
+}
+export const withdrawDemand = withAuthorization(["financialInstitution"], withdrawDemandImpl);
+
+export async function listDemandNotices(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM demand_notice ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── LegalEscalation: RecordCourtOrder + ResolveLegal ─────────────────────
+// Both `create this with` field-replacements on the real Daml template (no
+// contract key on SDK 3.4.11/LF 2.2) -- collapsed to plain UPDATEs, same
+// rule as every other keyless field-replace choice in this migration.
+
+async function recordCourtOrderImpl(session: SessionContext, legalEscalationId: number, args: { courtOrderRef: string }) {
+  if (!args.courtOrderRef) throw new DomainError("Court order reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM legal_escalation WHERE id = $1 FOR UPDATE", [legalEscalationId]);
+    if (!rows[0]) throw new DomainError("LegalEscalation not found");
+    await client.query(
+      `UPDATE legal_escalation SET court_ref = $2, updated_at = now() WHERE id = $1`,
+      [legalEscalationId, args.courtOrderRef],
+    );
+    return { legalEscalationId };
+  });
+}
+export const recordCourtOrder = withAuthorization(["financialInstitution"], recordCourtOrderImpl);
+
+async function resolveLegalImpl(session: SessionContext, legalEscalationId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Resolution note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT resolved_at FROM legal_escalation WHERE id = $1 FOR UPDATE", [legalEscalationId]);
+    const escalation = rows[0];
+    if (!escalation) throw new DomainError("LegalEscalation not found");
+    if (escalation.resolved_at) throw new DomainError("Already resolved");
+    await client.query(
+      `UPDATE legal_escalation SET resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [legalEscalationId],
+    );
+    return { legalEscalationId };
+  });
+}
+export const resolveLegal = withAuthorization(["financialInstitution"], resolveLegalImpl);
+
+export async function listLegalEscalations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM legal_escalation ORDER BY created_at DESC`);
     return rows;
   });
 }

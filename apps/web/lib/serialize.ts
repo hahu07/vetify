@@ -182,6 +182,73 @@ export function serializeMurabahahWad(row: Record<string, unknown>) {
   };
 }
 
+export function serializeMurabahahWakala(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahWadId: String(row.murabahah_wad_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    terms: { amount: num(row.terms_amount), purpose: row.terms_purpose, tenureMonths: row.terms_tenure_months },
+    assetDetails: {
+      description: row.asset_description,
+      supplier: row.asset_supplier,
+      supplierRef: row.asset_supplier_ref,
+      estimatedCost: num(row.asset_estimated_cost),
+    },
+    agencyFee: num(row.agency_fee) ?? null,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+  };
+}
+
+export function serializeWadWithdrawalRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahWadId: String(row.murabahah_wad_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    withdrawnAt: row.withdrawn_at,
+  };
+}
+
+export function serializeAgencyWithdrawalRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahWakalaId: String(row.murabahah_wakala_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    declinedAt: row.declined_at,
+  };
+}
+
+export function serializeProposalDeclineRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahProposalId: String(row.murabahah_proposal_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    declinedAt: row.declined_at,
+  };
+}
+
+export function serializeSupplierQuotation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahWadId: String(row.murabahah_wad_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    supplierName: row.supplier_name,
+    quotationRef: row.quotation_ref,
+    quotedAmount: num(row.quoted_amount),
+    assetDescription: row.asset_description,
+    validUntil: row.valid_until ?? null,
+  };
+}
+
 export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
   return {
     id: String(row.id),
@@ -517,6 +584,40 @@ export function serializeWriteOffRecord(row: Record<string, unknown>) {
     writeOffApprovedBy: row.write_off_approved_by,
     proposedByOfficerId: row.proposed_by_officer_id,
     confirmedByOfficerId: row.confirmed_by_officer_id,
+  };
+}
+
+export function serializeDemandNotice(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    demandDate: row.demand_date,
+    outstandingAmount: num(row.outstanding_amount),
+    demandRef: row.demand_ref,
+    responseDeadline: row.response_deadline,
+    gsmEligible: row.gsm_eligible,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+    supersededById: row.superseded_by_id != null ? String(row.superseded_by_id) : null,
+    withdrawalNote: row.withdrawal_note ?? null,
+  };
+}
+
+export function serializeLegalEscalation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    demandNoticeId: String(row.demand_notice_id),
+    businessName: row.business_name,
+    cacRegNumber: row.cac_reg_number,
+    escalationDate: row.escalation_date,
+    solicitorRef: row.solicitor_ref,
+    legalAction: row.legal_action,
+    outstandingAmount: num(row.outstanding_amount),
+    courtRef: row.court_ref ?? null,
+    resolvedAt: row.resolved_at ?? null,
   };
 }
 

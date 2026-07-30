@@ -31,6 +31,11 @@ import {
   recordCollectionAttempt,
   recordRecoveryPayment,
   writeOffContract,
+  issueDemandNotice,
+  escalateToLegal,
+  withdrawDemand,
+  recordCourtOrder,
+  resolveLegal,
   createGsmInvocation,
   recordGsmSweep,
   cancelGsm,
@@ -110,6 +115,8 @@ async function cleanup(cac: string) {
     `DELETE FROM write_off_record WHERE murabahah_contract_id IN (SELECT id FROM murabahah_contract WHERE cac_reg_number = $1)`,
     [cac],
   );
+  await fixtureClient.query(`DELETE FROM legal_escalation WHERE cac_reg_number = $1`, [cac]);
+  await fixtureClient.query(`DELETE FROM demand_notice WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(
     `DELETE FROM direct_debit_collection_attempt WHERE murabahah_contract_id IN (SELECT id FROM murabahah_contract WHERE cac_reg_number = $1)`,
     [cac],
@@ -470,6 +477,146 @@ test("writeOffContract: happy path -- four-eyes RecoveryOfficer/RiskOfficer writ
     await cleanup(cac);
     await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
     await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [recoveryOfficerId, riskOfficerId]);
+  }
+});
+
+// ─── issueDemandNotice / escalateToLegal / withdrawDemand / recordCourtOrder / resolveLegal ──
+
+test("issueDemandNotice: rejects on a non-Defaulted contract", async () => {
+  const cac = "RC8300014";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await assert.rejects(
+      () => issueDemandNotice(fiSession(), contractId, { demandDate: "2026-06-01", demandRef: "DN-1", responseDeadline: "2026-06-15", gsmEligible: false }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only issue demand notice on a Defaulted contract",
+    );
+  } finally {
+    await cleanup(cac);
+  }
+});
+
+test("issueDemandNotice: response deadline must be after demand date", async () => {
+  const cac = "RC8300015";
+  const tag = "TEST-SENTINEL-COLLECTIONS-5";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    await assert.rejects(
+      () => issueDemandNotice(fiSession(), contractId, { demandDate: "2026-06-15", demandRef: "DN-1", responseDeadline: "2026-06-01", gsmEligible: false }),
+      (err: unknown) => err instanceof DomainError && err.message === "Response deadline must be after demand date",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+test("issueDemandNotice: happy path -- nonconsuming, the contract stays Defaulted", async () => {
+  const cac = "RC8300016";
+  const tag = "TEST-SENTINEL-COLLECTIONS-6";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    const result = await issueDemandNotice(fiSession(), contractId, {
+      demandDate: "2026-06-01", demandRef: "DN-2026-001", responseDeadline: "2026-06-15", gsmEligible: true,
+    });
+    assert.ok(result.demandNoticeId);
+
+    const { rows: contract } = await fixtureClient.query("SELECT status FROM murabahah_contract WHERE id = $1", [contractId]);
+    assert.equal(contract[0].status, "Defaulted");
+
+    const { rows: notice } = await fixtureClient.query("SELECT demand_ref, gsm_eligible, archived_at FROM demand_notice WHERE id = $1", [result.demandNoticeId]);
+    assert.equal(notice[0].demand_ref, "DN-2026-001");
+    assert.equal(notice[0].gsm_eligible, true);
+    assert.equal(notice[0].archived_at, null);
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+test("withdrawDemand: rejects an empty note, archives the notice with no successor on success", async () => {
+  const cac = "RC8300017";
+  const tag = "TEST-SENTINEL-COLLECTIONS-7";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    const notice = await issueDemandNotice(fiSession(), contractId, {
+      demandDate: "2026-06-01", demandRef: "DN-2026-002", responseDeadline: "2026-06-15", gsmEligible: false,
+    });
+    await assert.rejects(
+      () => withdrawDemand(fiSession(), notice.demandNoticeId, { note: "" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Note must not be empty",
+    );
+    await withdrawDemand(fiSession(), notice.demandNoticeId, { note: "Business settled directly" });
+    const { rows } = await fixtureClient.query("SELECT archived_at, withdrawal_note, superseded_by_kind FROM demand_notice WHERE id = $1", [notice.demandNoticeId]);
+    assert.ok(rows[0].archived_at);
+    assert.equal(rows[0].withdrawal_note, "Business settled directly");
+    assert.equal(rows[0].superseded_by_kind, null);
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+test("escalateToLegal: happy path archives the notice with a legal_escalation successor", async () => {
+  const cac = "RC8300018";
+  const tag = "TEST-SENTINEL-COLLECTIONS-8";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    const notice = await issueDemandNotice(fiSession(), contractId, {
+      demandDate: "2026-06-01", demandRef: "DN-2026-003", responseDeadline: "2026-06-15", gsmEligible: false,
+    });
+    const escalation = await escalateToLegal(fiSession(), notice.demandNoticeId, {
+      escalationDate: "2026-06-20", solicitorRef: "SOL-001", legalAction: "Commence recovery proceedings",
+    });
+    assert.ok(escalation.legalEscalationId);
+
+    const { rows: noticeRows } = await fixtureClient.query("SELECT archived_at, superseded_by_kind, superseded_by_id FROM demand_notice WHERE id = $1", [notice.demandNoticeId]);
+    assert.ok(noticeRows[0].archived_at);
+    assert.equal(noticeRows[0].superseded_by_kind, "legal_escalation");
+    assert.equal(Number(noticeRows[0].superseded_by_id), Number(escalation.legalEscalationId));
+
+    const { rows: escalationRows } = await fixtureClient.query("SELECT solicitor_ref, court_ref, resolved_at FROM legal_escalation WHERE id = $1", [escalation.legalEscalationId]);
+    assert.equal(escalationRows[0].solicitor_ref, "SOL-001");
+    assert.equal(escalationRows[0].court_ref, null);
+    assert.equal(escalationRows[0].resolved_at, null);
+
+    // Once escalated, the notice is no longer active -- a second escalation attempt fails.
+    await assert.rejects(
+      () => escalateToLegal(fiSession(), notice.demandNoticeId, { escalationDate: "2026-06-21", solicitorRef: "SOL-002", legalAction: "test" }),
+      (err: unknown) => err instanceof DomainError && err.message === "DemandNotice is no longer active",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+test("recordCourtOrder / resolveLegal: happy path, and resolving twice fails", async () => {
+  const cac = "RC8300019";
+  const tag = "TEST-SENTINEL-COLLECTIONS-9";
+  try {
+    const contractId = await buildDefaultedContractFixture(cac, `FAC-${cac}`, tag);
+    const notice = await issueDemandNotice(fiSession(), contractId, {
+      demandDate: "2026-06-01", demandRef: "DN-2026-004", responseDeadline: "2026-06-15", gsmEligible: false,
+    });
+    const escalation = await escalateToLegal(fiSession(), notice.demandNoticeId, {
+      escalationDate: "2026-06-20", solicitorRef: "SOL-003", legalAction: "Commence recovery proceedings",
+    });
+
+    await recordCourtOrder(fiSession(), escalation.legalEscalationId, { courtOrderRef: "CO-2026-001" });
+    const { rows: afterCourtOrder } = await fixtureClient.query("SELECT court_ref FROM legal_escalation WHERE id = $1", [escalation.legalEscalationId]);
+    assert.equal(afterCourtOrder[0].court_ref, "CO-2026-001");
+
+    await resolveLegal(fiSession(), escalation.legalEscalationId, { note: "Settled out of court" });
+    const { rows: afterResolve } = await fixtureClient.query("SELECT resolved_at FROM legal_escalation WHERE id = $1", [escalation.legalEscalationId]);
+    assert.ok(afterResolve[0].resolved_at);
+
+    await assert.rejects(
+      () => resolveLegal(fiSession(), escalation.legalEscalationId, { note: "test" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Already resolved",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
   }
 });
 
