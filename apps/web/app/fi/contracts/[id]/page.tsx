@@ -24,6 +24,12 @@ import {
   useReleaseCollateral,
   useEnforceCollateral,
   useCollateralValuationDocuments,
+  useCollateralValuationRecords,
+  useCollateralInspectionRecords,
+  useRevalue,
+  useRecordInspection,
+  usePendingCollateralEnforcements,
+  useProposeEnforceCollateral,
   useRestructuringRequests,
   useApproveRestructuring,
   useRejectRestructuring,
@@ -286,6 +292,223 @@ function CollateralActionModal({
   );
 }
 
+// Phase 2, Thirty-Seventh Slice: Revalue/RecordInspection/ProposeEnforceCollateral --
+// same modal-over-backdrop shape as CollateralActionModal above, but each is
+// its own single-purpose form (no four-eyes on Revalue/RecordInspection;
+// ProposeEnforceCollateral needs only the proposing RecoveryOfficer -- the
+// confirming RiskOfficer step happens later, by vetify, on ConfirmEnforce).
+
+function RevalueModal({ rahn, onClose }: { rahn: RahnAgreementItem; onClose: () => void }) {
+  const [newValue, setNewValue] = useState<number | "">("");
+  const [valuationDate, setValuationDate] = useState("");
+  const [valuatorRef, setValuatorRef] = useState("");
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const revalue = useRevalue();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!newValue || !valuationDate || !valuatorRef.trim()) {
+      setError("New value, valuation date, and valuator reference are all required");
+      return;
+    }
+    try {
+      await revalue.mutateAsync({ id: rahn.id, newValue: Number(newValue), valuationDate, valuatorRef, notes: notes || null });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to revalue collateral");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Revalue Collateral</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Current value: {formatNaira(rahn.collateralValue)}
+        </p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">New Value (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={newValue} onChange={(e) => setNewValue(e.target.value === "" ? "" : Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Valuation Date</label>
+          <input type="date" className="input text-sm" value={valuationDate} onChange={(e) => setValuationDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Valuator Reference</label>
+          <input className="input text-sm" placeholder="Appraiser name or certification ref" value={valuatorRef} onChange={(e) => setValuatorRef(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+          <textarea rows={2} className="input text-sm resize-none" value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={revalue.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {revalue.isPending ? "Submitting…" : "Revalue"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const INSPECTION_CONDITIONS = ["Satisfactory", "RequiresAttention", "Impaired"] as const;
+
+function RecordInspectionModal({ rahn, onClose }: { rahn: RahnAgreementItem; onClose: () => void }) {
+  const [inspectionDate, setInspectionDate] = useState("");
+  const [inspectedBy, setInspectedBy] = useState("");
+  const [condition, setCondition] = useState<(typeof INSPECTION_CONDITIONS)[number]>("Satisfactory");
+  const [inspectionNotes, setInspectionNotes] = useState("");
+  const [nextInspectionDate, setNextInspectionDate] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const recordInspection = useRecordInspection();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!inspectionDate || !inspectedBy.trim()) {
+      setError("Inspection date and inspected-by are both required");
+      return;
+    }
+    try {
+      await recordInspection.mutateAsync({
+        id: rahn.id, inspectionDate, inspectedBy, condition,
+        inspectionNotes: inspectionNotes || null, nextInspectionDate: nextInspectionDate || null,
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record inspection");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Record Inspection</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{rahn.collateralDescription}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Inspection Date</label>
+          <input type="date" className="input text-sm" value={inspectionDate} onChange={(e) => setInspectionDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Inspected By</label>
+          <input className="input text-sm" placeholder="Field officer or agency name" value={inspectedBy} onChange={(e) => setInspectedBy(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Condition</label>
+          <select className="input text-sm" value={condition} onChange={(e) => setCondition(e.target.value as (typeof INSPECTION_CONDITIONS)[number])}>
+            {INSPECTION_CONDITIONS.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Next Inspection Date (optional)</label>
+          <input type="date" className="input text-sm" value={nextInspectionDate} onChange={(e) => setNextInspectionDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Notes (optional)</label>
+          <textarea rows={2} className="input text-sm resize-none" value={inspectionNotes} onChange={(e) => setInspectionNotes(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={recordInspection.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {recordInspection.isPending ? "Submitting…" : "Record Inspection"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProposeEnforceModal({ rahn, onClose }: { rahn: RahnAgreementItem; onClose: () => void }) {
+  const { data: officers } = useOfficers();
+  const [reason, setReason] = useState("");
+  const [gsmExhausted, setGsmExhausted] = useState(false);
+  const [gsmRef, setGsmRef] = useState("");
+  const [proposedByOfficerId, setProposedByOfficerId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const propose = useProposeEnforceCollateral();
+
+  const proposers = (officers ?? []).filter((o) => o.active && o.roles.includes("RecoveryOfficer"));
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!reason.trim() || !proposedByOfficerId) {
+      setError("A reason and a proposing RecoveryOfficer are both required");
+      return;
+    }
+    try {
+      await propose.mutateAsync({ id: rahn.id, reason, gsmExhausted, gsmRef: gsmRef || null, proposedByOfficerId });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to propose enforcement");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Propose Collateral Enforcement</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600">
+            <X size={18} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Sent to vetify for confirmation (maker-checker) — this does not enforce the collateral directly.
+        </p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+          <textarea rows={2} className="input text-sm resize-none" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        <div className="mb-3 flex items-center gap-2">
+          <input id="gsmExhausted" type="checkbox" checked={gsmExhausted} onChange={(e) => setGsmExhausted(e.target.checked)} />
+          <label htmlFor="gsmExhausted" className="text-xs text-gray-700">GSM sweeps attempted before Rahn escalation</label>
+        </div>
+        {gsmExhausted && (
+          <div className="mb-3">
+            <label className="block text-xs font-medium text-gray-700 mb-1">GSM Reference (optional)</label>
+            <input className="input text-sm" value={gsmRef} onChange={(e) => setGsmRef(e.target.value)} />
+          </div>
+        )}
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Proposed By (RecoveryOfficer)</label>
+          <select className="input text-sm" value={proposedByOfficerId} onChange={(e) => setProposedByOfficerId(e.target.value)}>
+            <option value="">Select an officer…</option>
+            {proposers.map((o) => (
+              <option key={o.id} value={o.officer_id}>{o.officer_name} ({o.officer_id})</option>
+            ))}
+          </select>
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={propose.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {propose.isPending ? "Submitting…" : "Propose Enforcement"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FiContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { data: contracts, isLoading } = useMurabahahContracts();
@@ -294,6 +517,9 @@ export default function FiContractDetailPage() {
   const { data: ibraRequests } = useIbraRequests();
   const { data: rahnAgreements } = useRahnAgreements();
   const { data: valuationDocuments } = useCollateralValuationDocuments();
+  const { data: valuationRecords } = useCollateralValuationRecords();
+  const { data: inspectionRecords } = useCollateralInspectionRecords();
+  const { data: pendingEnforcements } = usePendingCollateralEnforcements();
   const { data: restructuringRequests } = useRestructuringRequests();
   const { data: disputeRecords } = useDisputeRecords();
   const { data: arbitrationRequests } = useArbitrationRequests();
@@ -332,6 +558,9 @@ export default function FiContractDetailPage() {
   const [collateralModal, setCollateralModal] = useState<{ rahn: RahnAgreementItem; mode: "release" | "enforce" } | null>(null);
   const [collateralDescription, setCollateralDescription] = useState("");
   const [collateralValue, setCollateralValue] = useState<number | "">("");
+  const [revalueModalRahn, setRevalueModalRahn] = useState<RahnAgreementItem | null>(null);
+  const [inspectionModalRahn, setInspectionModalRahn] = useState<RahnAgreementItem | null>(null);
+  const [proposeEnforceModalRahn, setProposeEnforceModalRahn] = useState<RahnAgreementItem | null>(null);
   const [grantModalRequest, setGrantModalRequest] = useState<IbraRequestItem | null>(null);
   const [defaultReason, setDefaultReason] = useState("");
   const [defaultedBy, setDefaultedBy] = useState("");
@@ -370,6 +599,9 @@ export default function FiContractDetailPage() {
   const contractIbraRequests = (ibraRequests ?? []).filter((r) => r.murabahahContractId === contract.id);
   const contractRahn = (rahnAgreements ?? []).find((r) => r.murabahahContractId === contract.id);
   const contractValuationDocs = (valuationDocuments ?? []).filter((d) => d.rahnAgreementId === contractRahn?.id);
+  const contractValuationRecords = (valuationRecords ?? []).filter((r) => r.rahnAgreementId === contractRahn?.id);
+  const contractInspectionRecords = (inspectionRecords ?? []).filter((r) => r.rahnAgreementId === contractRahn?.id);
+  const contractPendingEnforcement = (pendingEnforcements ?? []).find((p) => p.rahnAgreementId === contractRahn?.id && p.status === "Pending");
   const contractRestructuringRequests = (restructuringRequests ?? []).filter((r) => r.murabahahContractId === contract.id);
   const contractDisputes = (disputeRecords ?? []).filter((d) => d.murabahahContractId === contract.id);
   const contractMandate = (mandates ?? []).find((m) => m.murabahahContractId === contract.id);
@@ -1331,16 +1563,36 @@ export default function FiContractDetailPage() {
                   </p>
                 </div>
                 {contractRahn.collateralStatus === "CollateralActive" && (
-                  <div className="flex items-center gap-2 flex-shrink-0">
+                  <div className="flex items-center gap-2 flex-shrink-0 flex-wrap justify-end">
+                    <button onClick={() => setRevalueModalRahn(contractRahn)} className="btn-secondary text-xs px-3 py-1.5">
+                      Revalue
+                    </button>
+                    <button onClick={() => setInspectionModalRahn(contractRahn)} className="btn-secondary text-xs px-3 py-1.5">
+                      Record Inspection
+                    </button>
                     <button onClick={() => setCollateralModal({ rahn: contractRahn, mode: "release" })} className="btn-secondary text-xs px-3 py-1.5">
                       Release
                     </button>
                     <button onClick={() => setCollateralModal({ rahn: contractRahn, mode: "enforce" })} className="btn-danger text-xs px-3 py-1.5">
                       Enforce
                     </button>
+                    {!contractPendingEnforcement && (
+                      <button onClick={() => setProposeEnforceModalRahn(contractRahn)} className="btn-danger text-xs px-3 py-1.5">
+                        Propose Enforcement
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
+
+              {contractPendingEnforcement && (
+                <div className="mt-4 pt-4 border-t border-gray-100">
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                    <p className="text-xs font-semibold text-amber-700">Enforcement proposed, awaiting vetify confirmation</p>
+                    <p className="text-xs text-amber-600 mt-1">{contractPendingEnforcement.reason}</p>
+                  </div>
+                </div>
+              )}
 
               {contractValuationDocs.length > 0 && (
                 <div className="mt-4 pt-4 border-t border-gray-100 space-y-2">
@@ -1352,6 +1604,44 @@ export default function FiContractDetailPage() {
                         {d.notes && <span className="text-gray-400"> — {d.notes}</span>}
                       </span>
                       <span className="font-mono text-gray-600">{formatNaira(d.valuationAmount)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {contractValuationRecords.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-gray-100 space-y-2">
+                  <h4 className="text-xs font-semibold text-gray-700">Formal Revaluation History</h4>
+                  {contractValuationRecords.map((r) => (
+                    <div key={r.id} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-gray-700">
+                        {r.valuatorRef} · {formatDate(r.valuationDate)}
+                        {r.notes && <span className="text-gray-400"> — {r.notes}</span>}
+                      </span>
+                      <span className="font-mono text-gray-600">
+                        {formatNaira(r.previousValue)} → {formatNaira(r.valuationAmount)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {contractInspectionRecords.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-gray-100 space-y-2">
+                  <h4 className="text-xs font-semibold text-gray-700">Inspection History</h4>
+                  {contractInspectionRecords.map((r) => (
+                    <div key={r.id} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="text-gray-700">
+                        {r.inspectedBy} · {formatDate(r.inspectionDate)}
+                        {r.inspectionNotes && <span className="text-gray-400"> — {r.inspectionNotes}</span>}
+                      </span>
+                      <span
+                        className={`font-medium ${
+                          r.condition === "Satisfactory" ? "text-emerald-600" : r.condition === "RequiresAttention" ? "text-amber-600" : "text-red-600"
+                        }`}
+                      >
+                        {r.condition}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -1405,6 +1695,9 @@ export default function FiContractDetailPage() {
       {collateralModal && (
         <CollateralActionModal rahn={collateralModal.rahn} mode={collateralModal.mode} onClose={() => setCollateralModal(null)} />
       )}
+      {revalueModalRahn && <RevalueModal rahn={revalueModalRahn} onClose={() => setRevalueModalRahn(null)} />}
+      {inspectionModalRahn && <RecordInspectionModal rahn={inspectionModalRahn} onClose={() => setInspectionModalRahn(null)} />}
+      {proposeEnforceModalRahn && <ProposeEnforceModal rahn={proposeEnforceModalRahn} onClose={() => setProposeEnforceModalRahn(null)} />}
     </Layout>
   );
 }

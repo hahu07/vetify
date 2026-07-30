@@ -1496,6 +1496,133 @@ export function useEnforceCollateral() {
   });
 }
 
+// ─── Phase 2, Thirty-Seventh Slice: Revalue/RecordInspection/enforcement maker-checker ──
+// Closes out RahnAgreement's remaining UI (Revalue/RecordInspection were
+// ported backend-side in the Twenty-Sixth Slice, ProposeEnforceCollateral/
+// ConfirmEnforce/RejectEnforce in the Twenty-Eighth).
+
+export interface CollateralValuationRecordItem {
+  id: string;
+  rahnAgreementId: string;
+  cacRegNumber: string;
+  businessName: string;
+  previousValue: number;
+  valuationAmount: number;
+  valuationDate: string;
+  valuatorRef: string;
+  notes?: string;
+}
+
+export interface CollateralInspectionRecordItem {
+  id: string;
+  rahnAgreementId: string;
+  cacRegNumber: string;
+  businessName: string;
+  inspectionDate: string;
+  inspectedBy: string;
+  condition: "Satisfactory" | "RequiresAttention" | "Impaired";
+  inspectionNotes?: string;
+  nextInspectionDate?: string;
+  mandateStatus?: string;
+  estimatedGsmRecoverable?: number;
+}
+
+export interface PendingCollateralEnforcementItem {
+  id: string;
+  rahnAgreementId: string;
+  cacRegNumber: string;
+  businessName: string;
+  reason: string;
+  gsmExhausted: boolean;
+  gsmRef?: string;
+  proposedByOfficerId: string;
+  status: "Pending" | "Confirmed" | "Rejected";
+  resolvedAt?: string;
+}
+
+export function useCollateralValuationRecords() {
+  return useQuery({
+    queryKey: ["collateral-valuation-records"],
+    queryFn: async () => (await apiClient.get<CollateralValuationRecordItem[]>("/collateral-valuation-records")).data,
+  });
+}
+
+export function useCollateralInspectionRecords() {
+  return useQuery({
+    queryKey: ["collateral-inspection-records"],
+    queryFn: async () => (await apiClient.get<CollateralInspectionRecordItem[]>("/collateral-inspection-records")).data,
+  });
+}
+
+export function useRevalue() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, newValue, valuationDate, valuatorRef, notes,
+    }: { id: string; newValue: number; valuationDate: string; valuatorRef: string; notes?: string | null }) =>
+      apiClient.post(`/rahn-agreements/${id}/revalue`, { newValue, valuationDate, valuatorRef, notes }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["rahn-agreements"] });
+      qc.invalidateQueries({ queryKey: ["collateral-valuation-records"] });
+    },
+  });
+}
+
+export function useRecordInspection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, inspectionDate, inspectedBy, condition, inspectionNotes, nextInspectionDate,
+    }: {
+      id: string; inspectionDate: string; inspectedBy: string;
+      condition: "Satisfactory" | "RequiresAttention" | "Impaired";
+      inspectionNotes?: string | null; nextInspectionDate?: string | null;
+    }) =>
+      apiClient
+        .post(`/rahn-agreements/${id}/record-inspection`, { inspectionDate, inspectedBy, condition, inspectionNotes, nextInspectionDate })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["collateral-inspection-records"] }),
+  });
+}
+
+export function usePendingCollateralEnforcements() {
+  return useQuery({
+    queryKey: ["pending-collateral-enforcements"],
+    queryFn: async () => (await apiClient.get<PendingCollateralEnforcementItem[]>("/pending-collateral-enforcements")).data,
+  });
+}
+
+export function useProposeEnforceCollateral() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, reason, gsmExhausted, gsmRef, proposedByOfficerId,
+    }: { id: string; reason: string; gsmExhausted: boolean; gsmRef?: string | null; proposedByOfficerId: string }) =>
+      apiClient.post(`/rahn-agreements/${id}/propose-enforce`, { reason, gsmExhausted, gsmRef, proposedByOfficerId }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-collateral-enforcements"] }),
+  });
+}
+
+export function useConfirmEnforce() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, confirmedByOfficerId }: { id: string; confirmedByOfficerId: string }) =>
+      apiClient.post(`/pending-collateral-enforcements/${id}/confirm`, { confirmedByOfficerId }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["pending-collateral-enforcements"] });
+      qc.invalidateQueries({ queryKey: ["rahn-agreements"] });
+    },
+  });
+}
+
+export function useRejectEnforce() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => apiClient.post(`/pending-collateral-enforcements/${id}/reject`, {}).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["pending-collateral-enforcements"] }),
+  });
+}
+
 // ─── Phase 2, seventh slice: collateral valuation document upload ─────────
 
 export interface CollateralValuationDocumentItem {
