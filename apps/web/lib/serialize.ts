@@ -81,6 +81,20 @@ export function serializeApprovedBusiness(row: Record<string, unknown>) {
   };
 }
 
+export function serializeRevocationRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    approvedBusinessId: String(row.approved_business_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    verificationRef: row.verification_ref,
+    complianceRef: row.compliance_ref,
+    reason: row.reason,
+    revokedBy: row.revoked_by,
+    revokedAt: row.revoked_at,
+  };
+}
+
 // node-postgres returns NUMERIC columns as strings (deliberately, to avoid
 // silent float rounding -- see addendum A in web2-migration-design.md).
 // Converting to a JS number here is fine for a demo/PoC API response (no
@@ -134,6 +148,30 @@ export function serializeUnderwritingResult(row: Record<string, unknown>) {
     autoDecided: row.auto_decided,
     underwritingStartedAt: row.underwriting_started_at ?? undefined,
     validUntil: row.valid_until ?? undefined,
+    policySnapshot: row.policy_snapshot ?? undefined,
+  };
+}
+
+export function serializeUnderwritingPolicy(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    policyVersion: row.policy_version,
+    autoApproveMin: row.auto_approve_min,
+    autoRejectMax: row.auto_reject_max,
+    minDscrRatio: num(row.min_dscr_ratio) ?? null,
+    minLoanAmount: num(row.min_loan_amount) ?? null,
+    maxLoanAmount: num(row.max_loan_amount) ?? null,
+    indicativeProfitMarginPct: num(row.indicative_profit_margin_pct) ?? null,
+    requestSlaHours: row.request_sla_hours,
+    offerValidityDays: row.offer_validity_days,
+    effectiveFrom: row.effective_from,
+    effectiveTo: row.effective_to ?? null,
+    writeOffThresholdAmount: num(row.write_off_threshold_amount) ?? null,
+    maxRestructuringsPerFacility: row.max_restructurings_per_facility ?? null,
+    permittedSectors: row.permitted_sectors ?? null,
+    requiredCollateralTypes: row.required_collateral_types ?? [],
+    maxSectorConcentrationPct: num(row.max_sector_concentration_pct) ?? null,
+    scoringWeights: row.scoring_weights,
   };
 }
 
@@ -163,6 +201,62 @@ export function serializeFinancingDecision(row: Record<string, unknown>) {
     decidedByName: row.decided_by_name ?? undefined,
     reasonCode: row.reason_code ?? undefined,
     decisionFactors: row.decision_factors ?? [],
+  };
+}
+
+export function serializeWithdrawalRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    reason: row.reason,
+    withdrawnAt: row.withdrawn_at,
+  };
+}
+
+export function serializeRequestClosureRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    outcome: row.outcome,
+    reason: row.reason ?? undefined,
+    closedAt: row.closed_at,
+  };
+}
+
+export function serializeFinancingAmendment(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingRequestId: String(row.financing_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    originalTerms: { amount: num(row.original_amount), purpose: row.original_purpose, tenureMonths: row.original_tenure_months },
+    proposedTerms: { amount: num(row.proposed_amount), purpose: row.proposed_purpose, tenureMonths: row.proposed_tenure_months },
+    proposedAt: row.proposed_at,
+    proposalNote: row.proposal_note ?? undefined,
+    status: row.status,
+    declineReason: row.decline_reason ?? undefined,
+  };
+}
+
+export function serializeFundingGovernanceRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    financingDecisionId: String(row.financing_decision_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    financingRef: row.financing_ref,
+    decisionOutcome: row.decision_outcome,
+    aiRecommendationFollowed: row.ai_recommendation_followed,
+    governanceNote: row.governance_note ?? undefined,
+    assessedBy: row.assessed_by,
+    assessedAt: row.assessed_at,
   };
 }
 
@@ -249,6 +343,36 @@ export function serializeSupplierQuotation(row: Record<string, unknown>) {
   };
 }
 
+export function serializeCollateralValuationRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    previousValue: num(row.previous_value),
+    valuationAmount: num(row.valuation_amount),
+    valuationDate: row.valuation_date,
+    valuatorRef: row.valuator_ref,
+    notes: row.notes ?? null,
+  };
+}
+
+export function serializeCollateralInspectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionDate: row.inspection_date,
+    inspectedBy: row.inspected_by,
+    condition: row.condition,
+    inspectionNotes: row.inspection_notes ?? null,
+    nextInspectionDate: row.next_inspection_date ?? null,
+    mandateStatus: row.mandate_status ?? null,
+    estimatedGsmRecoverable: num(row.estimated_gsm_recoverable) ?? null,
+  };
+}
+
 export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
   return {
     id: String(row.id),
@@ -266,6 +390,30 @@ export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
     totalAcquisitionCost: num(row.total_acquisition_cost),
     purchasedViaWakala: row.purchased_via_wakala,
     deliveryAcknowledged: row.delivery_acknowledged,
+  };
+}
+
+export function serializeAssetRejectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    defectDescription: row.defect_description,
+    rejectedAt: row.rejected_at,
+  };
+}
+
+export function serializeAcquisitionCancellationRequest(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    status: row.status,
+    resolvedAt: row.resolved_at ?? null,
   };
 }
 
@@ -346,6 +494,7 @@ export function serializeRepaymentRecord(row: Record<string, unknown>) {
     amountPaid: num(row.amount_paid),
     remainingBalance: num(row.remaining_balance),
     wasLate: row.was_late,
+    directDebitRef: row.direct_debit_ref ?? undefined,
   };
 }
 
@@ -436,6 +585,21 @@ export function serializeRahnAgreement(row: Record<string, unknown>) {
     collateralValue: num(row.collateral_value),
     collateralStatus: row.collateral_status,
     releaseEvidence: row.release_evidence ?? undefined,
+  };
+}
+
+export function serializePendingCollateralEnforcement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    gsmExhausted: row.gsm_exhausted,
+    gsmRef: row.gsm_ref ?? null,
+    proposedByOfficerId: row.proposed_by_officer_id,
+    status: row.status,
+    resolvedAt: row.resolved_at ?? null,
   };
 }
 
@@ -667,6 +831,50 @@ export function serializeHamishJiddiyyah(row: Record<string, unknown>) {
   };
 }
 
+export function serializeRegulatoryInspectionRequest(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    inspectionScope: row.inspection_scope,
+    responseDeadline: row.response_deadline,
+    requestedAt: row.requested_at,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+  };
+}
+
+export function serializeInspectionResponse(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    regulatoryInspectionRequestId: String(row.regulatory_inspection_request_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    responseRef: row.response_ref,
+    documents: row.documents ?? [],
+    respondedByName: row.responded_by_name,
+    responseDate: row.response_date,
+    archivedAt: row.archived_at ?? null,
+    supersededByKind: row.superseded_by_kind ?? null,
+  };
+}
+
+export function serializeInspectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    inspectionResponseId: String(row.inspection_response_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    inspectionRef: row.inspection_ref,
+    findings: row.findings ?? [],
+    passed: row.passed,
+    followUpNeeded: row.follow_up_needed,
+    closingNote: row.closing_note,
+  };
+}
+
 // ─── Phase 2, Eleventh Slice: Stage 0 (FinancingProviderOnboarding) ───────
 
 export function serializeProviderOnboarding(row: Record<string, unknown>) {
@@ -711,5 +919,325 @@ export function serializeProviderVerificationPolicy(row: Record<string, unknown>
     autoRejectMax: row.auto_reject_max,
     effectiveFrom: row.effective_from,
     scoringWeights: row.scoring_weights,
+  };
+}
+
+// ─── Phase 2, Thirtieth Slice: standalone audit/governance records ────────
+
+export function serializeShariahAuditRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    auditDate: row.audit_date,
+    auditPeriod: row.audit_period,
+    auditorRef: row.auditor_ref,
+    findings: row.findings ?? [],
+    overallCompliant: row.overall_compliant,
+    recommendations: row.recommendations ?? [],
+    nextAuditDate: row.next_audit_date ?? null,
+  };
+}
+
+export function serializeShariahException(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    exceptionType: row.exception_type,
+    description: row.description,
+    severity: row.severity,
+    detectedAt: row.detected_at,
+    resolutionNote: row.resolution_note ?? null,
+    resolvedAt: row.resolved_at ?? null,
+  };
+}
+
+export function serializeMurabahahStatement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    statementDate: row.statement_date,
+    statementPeriod: row.statement_period,
+    totalFinanced: num(row.total_financed),
+    totalRepaid: num(row.total_repaid),
+    outstandingBalance: num(row.outstanding_balance),
+    installmentsPaid: row.installments_paid,
+    totalInstallments: row.total_installments,
+    contractStatus: row.contract_status,
+    shariahAuditRef: row.shariah_audit_ref ?? null,
+  };
+}
+
+export function serializeMonitoringAlert(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref ?? null,
+    alertType: row.alert_type,
+    alertSeverity: row.alert_severity,
+    alertDescription: row.alert_description,
+    detectedAt: row.detected_at,
+    dismissed: row.dismissed,
+    dismissalNote: row.dismissal_note ?? null,
+  };
+}
+
+export function serializePortfolioRiskReport(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    reportDate: row.report_date,
+    reportPeriod: row.report_period,
+    metrics: {
+      probabilityOfDefault: num(row.probability_of_default),
+      lossGivenDefault: num(row.loss_given_default),
+      expectedLoss: num(row.expected_loss),
+      exposureAtDefault: num(row.exposure_at_default),
+      concentrationRisk: num(row.concentration_risk),
+      sectorConcentration: row.sector_concentration,
+      delinquencyRate: num(row.delinquency_rate),
+      activeContractCount: row.active_contract_count,
+    },
+    generatedByAgent: row.generated_by_agent,
+    modelVersion: row.model_version,
+  };
+}
+
+export function serializeForceMajeureDeclaration(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    declarationRef: row.declaration_ref,
+    eventDescription: row.event_description,
+    affectedRegion: row.affected_region,
+    suspensionStart: row.suspension_start,
+    suspensionEnd: row.suspension_end,
+    regulatoryBasis: row.regulatory_basis,
+    isActive: row.is_active,
+  };
+}
+
+export function serializeCharityOrganizationRegistry(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    approvedOrganizations: row.approved_organizations ?? [],
+    shariahBoardRef: row.shariah_board_ref,
+    effectiveDate: row.effective_date,
+    version: row.version,
+  };
+}
+
+// ─── Phase 2, Thirty-First Slice: AssetPurchaseRecord supporting records (Batch B) ──
+
+export function serializeDeliveryMilestone(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    milestoneDescription: row.milestone_description,
+    quantityDelivered: num(row.quantity_delivered),
+    milestoneDate: row.milestone_date,
+    evidenceRef: row.evidence_ref ?? null,
+  };
+}
+
+export function serializeSupplierFailureRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    failureType: row.failure_type,
+    failureDescription: row.failure_description,
+    refundAmount: num(row.refund_amount) ?? null,
+    failedAt: row.failed_at,
+  };
+}
+
+export function serializeSupplierPaymentRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    supplierDetails: row.supplier_details ?? null,
+    amountPaid: num(row.amount_paid),
+    paymentDate: row.payment_date,
+    paymentRef: row.payment_ref,
+    bankConfirmationRef: row.bank_confirmation_ref ?? null,
+    purchasedViaWakala: row.purchased_via_wakala,
+  };
+}
+
+export function serializeDocumentEntry(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    documentRef: row.document_ref,
+    registeredBy: row.registered_by,
+    uploadedAt: row.uploaded_at,
+    verifiedAt: row.verified_at ?? null,
+    superseded: row.superseded,
+  };
+}
+
+export function serializePurchaseOrder(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    supplierName: row.supplier_name,
+    supplierDetails: row.supplier_details,
+    orderedItems: row.ordered_items ?? [],
+    totalOrderValue: num(row.total_order_value),
+    deliveryDeadline: row.delivery_deadline,
+    poRef: row.po_ref,
+    issuedAt: row.issued_at,
+    status: row.status,
+  };
+}
+
+export function serializeCapitalCallRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    trancheNumber: row.tranche_number,
+    trancheAmount: num(row.tranche_amount),
+    disbursementDate: row.disbursement_date,
+    purposeOfTranche: row.purpose_of_tranche,
+    disbursementRef: row.disbursement_ref,
+    cumulativeDisbursed: num(row.cumulative_disbursed),
+    remainingFacility: num(row.remaining_facility),
+  };
+}
+
+// ─── Phase 2, Thirty-Third Slice: MurabahahContract instruments (Batch D) ──
+
+export function serializeCreditCovenant(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    covenantType: row.covenant_type,
+    threshold: num(row.threshold),
+    measurementFrequency: row.measurement_frequency,
+  };
+}
+
+export function serializeCovenantMeasurementRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    creditCovenantId: String(row.credit_covenant_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    covenantType: row.covenant_type,
+    threshold: num(row.threshold),
+    measuredValue: num(row.measured_value),
+    measureDate: row.measure_date,
+    measuredBy: row.measured_by,
+    breached: row.breached,
+  };
+}
+
+export function serializeGuaranteeAgreement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    guaranteeType: row.guarantee_type,
+    guaranteedAmount: num(row.guaranteed_amount),
+    guarantorName: row.guarantor_name,
+    guarantorId: row.guarantor_id,
+    effectiveDate: row.effective_date,
+    expiryDate: row.expiry_date ?? null,
+    guaranteeStatus: row.guarantee_status,
+  };
+}
+
+export function serializeTakafulPolicy(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    murabahahContractId: String(row.murabahah_contract_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    policyNumber: row.policy_number,
+    takafulOperator: row.takaful_operator,
+    coverageType: row.coverage_type,
+    coverageAmount: num(row.coverage_amount),
+    premiumAmount: num(row.premium_amount),
+    startDate: row.start_date,
+    expiryDate: row.expiry_date,
+    assetRef: row.asset_ref ?? null,
+  };
+}
+
+export function serializeIbraRebateProposal(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    ibraRequestId: String(row.ibra_request_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    outstandingBalance: num(row.outstanding_balance),
+    suggestedRebate: num(row.suggested_rebate),
+    rationale: row.rationale,
+    settlementType: row.settlement_type,
+  };
+}
+
+export function serializePartialIbraGrant(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    ibraRequestId: String(row.ibra_request_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    outstandingBalance: num(row.outstanding_balance),
+    rebateAmount: num(row.rebate_amount),
+    approvedSettlementAmount: num(row.approved_settlement_amount),
+    effectiveDate: row.effective_date,
+    grantedAt: row.granted_at,
+  };
+}
+
+// ─── Phase 2, Thirty-Fourth Slice: SARReport + RevokeCertification (Batch E) ──
+
+export function serializeSarReport(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    sarRef: row.sar_ref,
+    suspiciousActivity: row.suspicious_activity,
+    reportDate: row.report_date,
+    reportedByParty: row.reported_by_party,
+    confidential: row.confidential,
+  };
+}
+
+export function serializeShariahCertificationRevocation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    shariahContractCertificationId: String(row.shariah_contract_certification_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    originalCertificationRef: row.original_certification_ref,
+    revocationRef: row.revocation_ref,
+    reason: row.reason,
+    revokedBy: row.revoked_by,
+    revokedAt: row.revoked_at,
   };
 }

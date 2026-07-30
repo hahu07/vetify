@@ -17,6 +17,154 @@ import type { AssetDetails } from "@/lib/types-murabahah";
 const PENDING_UNDERWRITING_STATUSES = ["Submitted", "UnderwritingManualReview"];
 const OPEN_FINANCING_STATUSES = ["Submitted", "Underwriting"];
 
+// ─── UnderwritingPolicy (vetify-wide singleton; create + UpdatePolicy) ────
+// Phase 2, Thirty-Fifth Slice -- the last item from the original template
+// survey. See migrations/036's header for why this has no maker-checker
+// layer (unlike VerificationPolicy/CompliancePolicy) and why it's a
+// singleton rather than per-institution.
+
+interface UnderwritingPolicyArgs {
+  policyVersion: string;
+  autoApproveMin: number;
+  autoRejectMax: number;
+  minDscrRatio?: number | null;
+  minLoanAmount?: number | null;
+  maxLoanAmount?: number | null;
+  indicativeProfitMarginPct?: number | null;
+  requestSlaHours: number;
+  offerValidityDays: number;
+  effectiveFrom: string;
+  writeOffThresholdAmount?: number | null;
+  maxRestructuringsPerFacility?: number | null;
+  permittedSectors?: string[] | null;
+  requiredCollateralTypes?: string[];
+  maxSectorConcentrationPct?: number | null;
+  scoringWeights: Record<string, number>;
+}
+
+function validateUnderwritingPolicyFields(args: UnderwritingPolicyArgs): void {
+  if (!args.policyVersion) throw new DomainError("policyVersion must not be empty");
+  if (!(args.autoApproveMin > args.autoRejectMax)) throw new DomainError("autoApproveMin must exceed autoRejectMax");
+  if (!(args.requestSlaHours > 0)) throw new DomainError("requestSlaHours must be positive");
+  if (!(args.offerValidityDays > 0)) throw new DomainError("offerValidityDays must be positive");
+  if (args.minLoanAmount != null && args.maxLoanAmount != null && args.minLoanAmount > args.maxLoanAmount) {
+    throw new DomainError("minLoanAmount must not exceed maxLoanAmount");
+  }
+}
+
+async function createUnderwritingPolicyImpl(session: SessionContext, args: UnderwritingPolicyArgs) {
+  validateUnderwritingPolicyFields(args);
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO underwriting_policy
+         (policy_version, auto_approve_min, auto_reject_max, min_dscr_ratio, min_loan_amount, max_loan_amount,
+          indicative_profit_margin_pct, request_sla_hours, offer_validity_days, effective_from,
+          write_off_threshold_amount, max_restructurings_per_facility, permitted_sectors,
+          required_collateral_types, max_sector_concentration_pct, scoring_weights)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING id`,
+      [
+        args.policyVersion, args.autoApproveMin, args.autoRejectMax, args.minDscrRatio ?? null,
+        args.minLoanAmount ?? null, args.maxLoanAmount ?? null, args.indicativeProfitMarginPct ?? null,
+        args.requestSlaHours, args.offerValidityDays, args.effectiveFrom, args.writeOffThresholdAmount ?? null,
+        args.maxRestructuringsPerFacility ?? null, args.permittedSectors ? JSON.stringify(args.permittedSectors) : null,
+        JSON.stringify(args.requiredCollateralTypes ?? []), args.maxSectorConcentrationPct ?? null,
+        JSON.stringify(args.scoringWeights),
+      ],
+    );
+    return { underwritingPolicyId: rows[0].id };
+  });
+}
+export const createUnderwritingPolicy = withAuthorization(["vetify"], createUnderwritingPolicyImpl);
+
+async function updateUnderwritingPolicyImpl(session: SessionContext, policyId: number, args: UnderwritingPolicyArgs) {
+  validateUnderwritingPolicyFields(args);
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM underwriting_policy WHERE id = $1 FOR UPDATE", [policyId]);
+    if (!rows[0]) throw new DomainError("UnderwritingPolicy not found");
+
+    const { rows: updated } = await client.query(
+      `UPDATE underwriting_policy
+         SET policy_version = $2, auto_approve_min = $3, auto_reject_max = $4, min_dscr_ratio = $5,
+             min_loan_amount = $6, max_loan_amount = $7, indicative_profit_margin_pct = $8,
+             request_sla_hours = $9, offer_validity_days = $10, effective_from = $11,
+             write_off_threshold_amount = $12, max_restructurings_per_facility = $13, permitted_sectors = $14,
+             required_collateral_types = $15, max_sector_concentration_pct = $16, scoring_weights = $17,
+             effective_to = NULL, updated_at = now()
+         WHERE id = $1
+         RETURNING id`,
+      [
+        policyId, args.policyVersion, args.autoApproveMin, args.autoRejectMax, args.minDscrRatio ?? null,
+        args.minLoanAmount ?? null, args.maxLoanAmount ?? null, args.indicativeProfitMarginPct ?? null,
+        args.requestSlaHours, args.offerValidityDays, args.effectiveFrom, args.writeOffThresholdAmount ?? null,
+        args.maxRestructuringsPerFacility ?? null, args.permittedSectors ? JSON.stringify(args.permittedSectors) : null,
+        JSON.stringify(args.requiredCollateralTypes ?? []), args.maxSectorConcentrationPct ?? null,
+        JSON.stringify(args.scoringWeights),
+      ],
+    );
+    return { underwritingPolicyId: updated[0].id };
+  });
+}
+export const updateUnderwritingPolicy = withAuthorization(["vetify"], updateUnderwritingPolicyImpl);
+
+export async function listUnderwritingPolicies(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM underwriting_policy ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+/** Mirrors resolveUnderwritingPolicy: fetches the active policy (if any) and
+ * enforces its gates. Returns the snapshot + computed SLA expiry, or
+ * (null, null) when no policy is active -- exactly the real Daml's `None ->
+ * return (None, None)` backward-compatible fallback. */
+async function resolveUnderwritingPolicy(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  autoDecided: boolean,
+  assessment: RiskAssessment,
+  requestedAmount: number,
+  businessSector: string,
+): Promise<{ snapshot: Record<string, unknown> | null; expiresAt: string | null }> {
+  const { rows } = await client.query(
+    `SELECT * FROM underwriting_policy WHERE effective_to IS NULL ORDER BY created_at DESC LIMIT 1`,
+  );
+  const policy = rows[0];
+  if (!policy) return { snapshot: null, expiresAt: null };
+
+  if (!(new Date(policy.effective_from as string).getTime() <= Date.now())) {
+    throw new DomainError("UnderwritingPolicy is not yet effective");
+  }
+  if (autoDecided && !(assessment.score >= (policy.auto_approve_min as number))) {
+    throw new DomainError(`Agent auto-decision requires score >= ${policy.auto_approve_min}`);
+  }
+  if (policy.max_loan_amount != null && !(requestedAmount <= Number(policy.max_loan_amount))) {
+    throw new DomainError("Requested amount exceeds policy maximum loan amount");
+  }
+  if (policy.min_loan_amount != null && !(requestedAmount >= Number(policy.min_loan_amount))) {
+    throw new DomainError("Requested amount is below policy minimum loan amount");
+  }
+  if (policy.permitted_sectors != null && !(policy.permitted_sectors as string[]).includes(businessSector)) {
+    throw new DomainError("Business sector is not permitted under this institution's lending policy");
+  }
+
+  const snapshot = {
+    policyVersion: policy.policy_version,
+    autoApproveMin: policy.auto_approve_min,
+    autoRejectMax: policy.auto_reject_max,
+    minDscrRatio: policy.min_dscr_ratio,
+    minLoanAmount: policy.min_loan_amount,
+    maxLoanAmount: policy.max_loan_amount,
+    indicativeProfitMarginPct: policy.indicative_profit_margin_pct,
+    requestSlaHours: policy.request_sla_hours,
+    offerValidityDays: policy.offer_validity_days,
+    effectiveFrom: policy.effective_from,
+    capturedAt: new Date().toISOString(),
+    scoringWeights: policy.scoring_weights,
+  };
+  const expiresAt = new Date(Date.now() + Number(policy.request_sla_hours) * 60 * 60 * 1000).toISOString();
+  return { snapshot, expiresAt };
+}
+
 // ─── Choice: RequestFinancing (business, on ApprovedBusiness) ─────────────
 
 interface RequestFinancingArgs {
@@ -107,9 +255,17 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
       throw new DomainError("High-risk assessments cannot be auto-decided; human review required");
     }
 
-    await client.query(`UPDATE financing_request SET status = 'Underwriting', updated_at = now() WHERE id = $1`, [
-      financingRequestId,
-    ]);
+    // Look up the active policy to capture a snapshot and compute the SLA
+    // expiry -- mirrors resolveUnderwritingPolicy exactly; a no-policy
+    // system behaves identically to before this slice.
+    const { snapshot, expiresAt } = await resolveUnderwritingPolicy(
+      client, args.autoDecided, args.assessment, Number(row.terms_amount), row.business_sector,
+    );
+
+    await client.query(
+      `UPDATE financing_request SET status = 'Underwriting', expires_at = $2, updated_at = now() WHERE id = $1`,
+      [financingRequestId, expiresAt],
+    );
 
     const { rows: result } = await client.query(
       `INSERT INTO underwriting_result
@@ -117,8 +273,8 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
           assessment_risk_category, assessment_recommended_limit, assessment_recommendation,
           assessment_probability_of_default, assessment_loss_given_default, assessment_exposure_at_default,
           assessment_behavioural_score, assessment_cashflow_risk_score, assessment_creditworthiness_score,
-          assessment_fraud_score, auto_decided, underwriting_started_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+          assessment_fraud_score, auto_decided, underwriting_started_at, valid_until, policy_snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now(), $17, $18)
        RETURNING id`,
       [
         financingRequestId,
@@ -137,6 +293,8 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
         args.assessment.creditworthinessScore ?? null,
         args.assessment.fraudScore ?? null,
         args.autoDecided,
+        expiresAt,
+        snapshot ? JSON.stringify(snapshot) : null,
       ],
     );
     return { underwritingResultId: result[0].id };
@@ -163,6 +321,16 @@ async function flagUnderwritingForManualReviewImpl(
     }
     if (args.riskScore < 0 || args.riskScore > 100) {
       throw new DomainError("Risk score must be 0-100");
+    }
+    // If a policy is active, this institution's own Medium band must be
+    // respected -- mirrors resolveUnderwritingPolicy's band check; a
+    // no-policy system skips this, unchanged from before this slice.
+    const { rows: policyRows } = await client.query(
+      `SELECT auto_approve_min, auto_reject_max FROM underwriting_policy WHERE effective_to IS NULL ORDER BY created_at DESC LIMIT 1`,
+    );
+    const policy = policyRows[0];
+    if (policy && !(args.riskScore > policy.auto_reject_max && args.riskScore < policy.auto_approve_min)) {
+      throw new DomainError("Risk score is outside the Medium band for this institution's policy");
     }
     const { rows: updated } = await client.query(
       `UPDATE financing_request
@@ -513,6 +681,258 @@ export async function listUnderwritingRejections(session: SessionContext) {
 export async function listFinancingDecisions(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM financing_decision ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-Second Slice: Batch C (Withdraw/Expire/Cancel/Amend) ──
+// WithdrawRequest/ExpireRequest/CancelRequest are all consuming -- the same
+// archive-with-successor shape this migration has used since the Second
+// Slice. ProposeAmendment is nonconsuming; AcceptAmendment is the same
+// keyless field-replace shape as ProceedWithReplacement/Revalue.
+
+// ─── Choice: WithdrawRequest (FinancingRequest, business) ──────────────────
+
+async function withdrawRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Withdrawal reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only withdraw a Submitted or Underwriting request");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO withdrawal_record (financing_request_id, cac_reg_number, business_name, financing_ref, reason, withdrawn_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason],
+    );
+    const withdrawalRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'withdrawal_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, withdrawalRecordId],
+    );
+    return { withdrawalRecordId };
+  });
+}
+export const withdrawRequest = withAuthorization(["business"], withdrawRequestImpl);
+
+export async function listWithdrawalRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM withdrawal_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ExpireRequest / CancelRequest (FinancingRequest, vetify) ──────
+
+async function expireRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only expire a Submitted or Underwriting request");
+    }
+    if (!request.expires_at) throw new DomainError("No SLA expiry configured on this request");
+    if (!(new Date(request.expires_at).getTime() < Date.now())) {
+      throw new DomainError("Request SLA has not yet elapsed");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO request_closure_record (financing_request_id, cac_reg_number, business_name, financing_ref, outcome, reason, closed_at)
+       VALUES ($1, $2, $3, $4, 'Expired', $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason ?? null],
+    );
+    const requestClosureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'request_closure_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, requestClosureRecordId],
+    );
+    return { requestClosureRecordId };
+  });
+}
+export const expireRequest = withAuthorization(["vetify"], expireRequestImpl);
+
+async function cancelRequestImpl(session: SessionContext, requestId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Cancellation reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only cancel a Submitted or Underwriting request");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO request_closure_record (financing_request_id, cac_reg_number, business_name, financing_ref, outcome, reason, closed_at)
+       VALUES ($1, $2, $3, $4, 'Cancelled', $5, now())
+       RETURNING id`,
+      [requestId, request.cac_reg_number, request.business_name, request.financing_ref, args.reason],
+    );
+    const requestClosureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE financing_request SET archived_at = now(), superseded_by_kind = 'request_closure_record', superseded_by_id = $2 WHERE id = $1`,
+      [requestId, requestClosureRecordId],
+    );
+    return { requestClosureRecordId };
+  });
+}
+export const cancelRequest = withAuthorization(["vetify"], cancelRequestImpl);
+
+export async function listRequestClosureRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM request_closure_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProposeAmendment (FinancingRequest, financialInstitution) ────
+// Nonconsuming -- the original request stays active.
+
+interface ProposeAmendmentArgs {
+  proposedTerms: FinancingTerms;
+  proposalNote?: string | null;
+}
+
+async function proposeAmendmentImpl(session: SessionContext, requestId: number, args: ProposeAmendmentArgs) {
+  if (!(args.proposedTerms.amount > 0)) throw new DomainError("Proposed amount must be positive");
+  if (!(args.proposedTerms.tenureMonths > 0)) throw new DomainError("Proposed tenure must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_request WHERE id = $1", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.archived_at || !OPEN_FINANCING_STATUSES.includes(request.status)) {
+      throw new DomainError("Can only propose amendments to Submitted or Underwriting requests");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO financing_amendment
+         (financing_request_id, cac_reg_number, business_name, financing_ref,
+          original_amount, original_purpose, original_tenure_months,
+          proposed_amount, proposed_purpose, proposed_tenure_months, proposed_at, proposal_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), $11)
+       RETURNING id`,
+      [
+        requestId, request.cac_reg_number, request.business_name, request.financing_ref,
+        request.terms_amount, request.terms_purpose, request.terms_tenure_months,
+        args.proposedTerms.amount, args.proposedTerms.purpose, args.proposedTerms.tenureMonths, args.proposalNote ?? null,
+      ],
+    );
+    return { financingAmendmentId: created[0].id };
+  });
+}
+export const proposeAmendment = withAuthorization(["financialInstitution"], proposeAmendmentImpl);
+
+// ─── Choice: AcceptAmendment (FinancingAmendment, business) ───────────────
+// Keyless field-replace on FinancingRequest (archive+recreate with new
+// terms in the real Daml) -- collapses to a plain UPDATE, same convention as
+// ProceedWithReplacement/Revalue. Capped at 10 amendments.
+
+async function acceptAmendmentImpl(session: SessionContext, amendmentId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_amendment WHERE id = $1 FOR UPDATE", [amendmentId]);
+    const amendment = rows[0];
+    if (!amendment) throw new DomainError("FinancingAmendment not found");
+    if (amendment.status !== "Pending") throw new DomainError("FinancingAmendment is not pending");
+
+    const { rows: reqRows } = await client.query(
+      "SELECT * FROM financing_request WHERE id = $1 FOR UPDATE",
+      [amendment.financing_request_id],
+    );
+    const request = reqRows[0];
+    if (!request) throw new DomainError("Financing request not found");
+    if (request.financing_ref !== amendment.financing_ref) {
+      throw new DomainError("Amendment must reference the matching request");
+    }
+    if (!(request.amendment_count < 10)) {
+      throw new DomainError("Maximum 10 amendments reached; a new financing request is required");
+    }
+
+    await client.query(
+      `UPDATE financing_request
+         SET terms_amount = $2, terms_purpose = $3, terms_tenure_months = $4,
+             term_history = term_history || $5::jsonb,
+             amendment_count = amendment_count + 1, status = 'Submitted', expires_at = NULL, updated_at = now()
+         WHERE id = $1`,
+      [
+        amendment.financing_request_id, amendment.proposed_amount, amendment.proposed_purpose, amendment.proposed_tenure_months,
+        JSON.stringify([{ amount: Number(request.terms_amount), purpose: request.terms_purpose, tenureMonths: request.terms_tenure_months }]),
+      ],
+    );
+    await client.query(`UPDATE financing_amendment SET status = 'Accepted', updated_at = now() WHERE id = $1`, [amendmentId]);
+
+    return { financingRequestId: amendment.financing_request_id };
+  });
+}
+export const acceptAmendment = withAuthorization(["business"], acceptAmendmentImpl);
+
+async function declineAmendmentImpl(session: SessionContext, amendmentId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM financing_amendment WHERE id = $1 FOR UPDATE", [amendmentId]);
+    const amendment = rows[0];
+    if (!amendment) throw new DomainError("FinancingAmendment not found");
+    if (amendment.status !== "Pending") throw new DomainError("FinancingAmendment is not pending");
+
+    await client.query(
+      `UPDATE financing_amendment SET status = 'Declined', decline_reason = $2, updated_at = now() WHERE id = $1`,
+      [amendmentId, args.reason],
+    );
+    return { financingAmendmentId: amendmentId };
+  });
+}
+export const declineAmendment = withAuthorization(["business"], declineAmendmentImpl);
+
+export async function listFinancingAmendments(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM financing_amendment ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordGovernanceAssessment (FinancingDecision, financialInstitution) ──
+// Nonconsuming -- the decision record is immutable; governance is a
+// separate side-contract.
+
+interface RecordGovernanceAssessmentArgs {
+  aiRecommendationFollowed: boolean;
+  governanceNote?: string | null;
+  assessedBy: string;
+}
+
+async function recordGovernanceAssessmentImpl(session: SessionContext, decisionId: number, args: RecordGovernanceAssessmentArgs) {
+  if (!args.assessedBy) throw new DomainError("Governance assessor name required");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM financing_decision WHERE id = $1", [decisionId]);
+    const decision = rows[0];
+    if (!decision) throw new DomainError("FinancingDecision not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO funding_governance_record
+         (financing_decision_id, cac_reg_number, business_name, financing_ref, decision_outcome,
+          ai_recommendation_followed, governance_note, assessed_by, assessed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       RETURNING id`,
+      [
+        decisionId, decision.cac_reg_number, decision.business_name, decision.financing_ref, decision.outcome,
+        args.aiRecommendationFollowed, args.governanceNote ?? null, args.assessedBy,
+      ],
+    );
+    return { fundingGovernanceRecordId: created[0].id };
+  });
+}
+export const recordGovernanceAssessment = withAuthorization(["financialInstitution"], recordGovernanceAssessmentImpl);
+
+export async function listFundingGovernanceRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM funding_governance_record ORDER BY created_at DESC`);
     return rows;
   });
 }

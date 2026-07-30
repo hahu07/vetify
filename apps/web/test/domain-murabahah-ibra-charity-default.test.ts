@@ -21,6 +21,8 @@ import {
   requestIbra,
   grantIbra,
   declineIbra,
+  grantPartialIbra,
+  proposeRebate,
   setCharityAmount,
   confirmCharityPayment,
   defaultContract,
@@ -93,6 +95,8 @@ async function cleanup(cac: string) {
   await fixtureClient.query(`DELETE FROM late_payment_charity WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM repayment_record WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM default_record WHERE cac_reg_number = $1`, [cac]);
+  await fixtureClient.query(`DELETE FROM partial_ibra_grant WHERE cac_reg_number = $1`, [cac]);
+  await fixtureClient.query(`DELETE FROM ibra_rebate_proposal WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM ibra_grant_record WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM ibra_decline_record WHERE cac_reg_number = $1`, [cac]);
   await fixtureClient.query(`DELETE FROM ibra_request WHERE cac_reg_number = $1`, [cac]);
@@ -423,5 +427,115 @@ test("closeDefaultedContract: rejects a non-zero outstanding balance", async () 
   } finally {
     await cleanup(cac);
     await fixtureClient.query(`DELETE FROM authorized_sentinel WHERE authorized_by = $1`, [tag]);
+  }
+});
+
+// ─── grantPartialIbra ────────────────────────────────────────────────────────
+
+test("grantPartialIbra: rejects a wrong settlement type, happy path creates a PartialIbraGrant", async () => {
+  const cac = "RC7000013";
+  const creditOfficerId = "OFF-CREDIT-PARTIAL-1";
+  const riskOfficerId = "OFF-RISK-PARTIAL-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(creditOfficerId, "CreditOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    const requestFull = await requestIbra(businessSession(cac), contractId, { requestedSettlementDate: "2026-03-01", settlementType: "FullIbra" });
+
+    await assert.rejects(
+      () =>
+        grantPartialIbra(fiSession(), Number(requestFull.ibraRequestId), {
+          rebateAmount: 10_000, approvedSettlementAmount: 250_000,
+          proposedByOfficerId: creditOfficerId, confirmedByOfficerId: riskOfficerId,
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "GrantPartialIbra requires PartialIbra settlement type",
+    );
+    await declineIbra(fiSession(), Number(requestFull.ibraRequestId), { reason: "Test cleanup path" });
+
+    const requestPartial = await requestIbra(businessSession(cac), contractId, {
+      requestedSettlementDate: "2026-03-01", settlementType: "PartialIbra", requestedAmount: 200_000,
+    });
+    const grant = await grantPartialIbra(fiSession(), Number(requestPartial.ibraRequestId), {
+      rebateAmount: 20_000, approvedSettlementAmount: 280_000,
+      proposedByOfficerId: creditOfficerId, confirmedByOfficerId: riskOfficerId,
+    });
+    assert.ok(grant.partialIbraGrantId);
+
+    const { rows } = await fixtureClient.query(
+      "SELECT rebate_amount, approved_settlement_amount FROM partial_ibra_grant WHERE id = $1",
+      [grant.partialIbraGrantId],
+    );
+    assert.equal(Number(rows[0].rebate_amount), 20_000);
+    assert.equal(Number(rows[0].approved_settlement_amount), 280_000);
+
+    const { rows: reqRow } = await fixtureClient.query(
+      "SELECT archived_at, superseded_by_kind FROM ibra_request WHERE id = $1",
+      [requestPartial.ibraRequestId],
+    );
+    assert.ok(reqRow[0].archived_at);
+    assert.equal(reqRow[0].superseded_by_kind, "partial_ibra_grant");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [creditOfficerId, riskOfficerId]);
+  }
+});
+
+test("grantPartialIbra: rejects an approved settlement amount that is not less than outstanding balance", async () => {
+  const cac = "RC7000014";
+  const creditOfficerId = "OFF-CREDIT-PARTIAL-2";
+  const riskOfficerId = "OFF-RISK-PARTIAL-2";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(creditOfficerId, "CreditOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    const request = await requestIbra(businessSession(cac), contractId, {
+      requestedSettlementDate: "2026-03-01", settlementType: "PartialIbra", requestedAmount: 200_000,
+    });
+
+    await assert.rejects(
+      () =>
+        grantPartialIbra(fiSession(), Number(request.ibraRequestId), {
+          rebateAmount: 0, approvedSettlementAmount: 300_000,
+          proposedByOfficerId: creditOfficerId, confirmedByOfficerId: riskOfficerId,
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Approved settlement must be less than outstanding balance",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [creditOfficerId, riskOfficerId]);
+  }
+});
+
+// ─── proposeRebate ───────────────────────────────────────────────────────────
+
+test("proposeRebate: rejects an empty rationale, happy path creates an IbraRebateProposal without archiving the request", async () => {
+  const cac = "RC7000015";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    const request = await requestIbra(businessSession(cac), contractId, { requestedSettlementDate: "2026-03-01", settlementType: "FullIbra" });
+
+    await assert.rejects(
+      () => proposeRebate(fiSession(), Number(request.ibraRequestId), { suggestedRebate: 10_000, rationale: "" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Rationale must not be empty",
+    );
+    await assert.rejects(
+      () => proposeRebate(fiSession(), Number(request.ibraRequestId), { suggestedRebate: 999_999, rationale: "Too generous" }),
+      (err: unknown) => err instanceof DomainError && err.message === "Suggested rebate cannot exceed outstanding balance",
+    );
+
+    const proposal = await proposeRebate(fiSession(), Number(request.ibraRequestId), {
+      suggestedRebate: 12_000, rationale: "Strong repayment history warrants a modest rebate",
+    });
+    assert.ok(proposal.ibraRebateProposalId);
+
+    const { rows: propRow } = await fixtureClient.query("SELECT suggested_rebate, rationale FROM ibra_rebate_proposal WHERE id = $1", [
+      proposal.ibraRebateProposalId,
+    ]);
+    assert.equal(Number(propRow[0].suggested_rebate), 12_000);
+
+    const { rows: reqRow } = await fixtureClient.query("SELECT archived_at FROM ibra_request WHERE id = $1", [request.ibraRequestId]);
+    assert.equal(reqRow[0].archived_at, null);
+  } finally {
+    await cleanup(cac);
   }
 });

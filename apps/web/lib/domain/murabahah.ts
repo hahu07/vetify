@@ -426,6 +426,170 @@ async function offerMurabahahImpl(session: SessionContext, recordId: number, arg
 }
 export const offerMurabahah = withAuthorization(["financialInstitution"], offerMurabahahImpl);
 
+// ─── Pre-Qabdh rejection/replacement/cancellation (AssetPurchaseRecord) ───
+// Phase 2, Twenty-Seventh Slice. Deferred since migration 006's own header
+// ("supporting/exception choices" named out of scope at the time). Ports
+// RejectDelivery, ProceedWithReplacement, RequestCancellation, and
+// ConfirmCancellation/RejectCancellation.
+
+// ─── Choice: RejectDelivery (AssetPurchaseRecord, business) ───────────────
+// Nonconsuming -- the AssetPurchaseRecord stays live; the FI must replace
+// the asset (ProceedWithReplacement) or the parties agree to cancel
+// (RequestCancellation -> ConfirmCancellation).
+
+async function rejectDeliveryImpl(
+  session: SessionContext,
+  recordId: number,
+  args: { reason: string; defectDescription: string },
+) {
+  if (!args.reason) throw new DomainError("Rejection reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.delivery_acknowledged) throw new DomainError("Cannot reject an already-acknowledged delivery");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO asset_rejection_record
+         (asset_purchase_record_id, cac_reg_number, business_name, reason, defect_description, rejected_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.reason, args.defectDescription ?? ""],
+    );
+    return { assetRejectionRecordId: created[0].id };
+  });
+}
+export const rejectDelivery = withAuthorization(["business"], rejectDeliveryImpl);
+
+export async function listAssetRejectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM asset_rejection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProceedWithReplacement (AssetPurchaseRecord, financialInstitution) ──
+// The real Daml body is `create this with <replacement fields>, ancillary
+// costs reset to 0.0` -- same keyless field-replace shape as Revalue
+// (Twenty-Sixth Slice), collapses to a plain UPDATE rather than an
+// archive/recreate pair.
+
+async function proceedWithReplacementImpl(
+  session: SessionContext,
+  recordId: number,
+  args: { newActualCost: number; newPurchaseDate: string; newInvoiceRef: string; replacementNote: string },
+) {
+  if (!(args.newActualCost > 0)) throw new DomainError("Replacement cost must be positive");
+  if (!args.newInvoiceRef) throw new DomainError("Invoice reference must not be empty");
+  if (!args.replacementNote) throw new DomainError("Replacement note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const totalAcquisitionCost = args.newActualCost;
+    await client.query(
+      `UPDATE asset_purchase_record
+         SET actual_cost = $2, purchase_date = $3, invoice_ref = $4,
+             freight_cost = 0, customs_duty = 0, insurance_premium = 0, other_acquisition_costs = 0,
+             total_acquisition_cost = $5, delivery_acknowledged = false, updated_at = now()
+         WHERE id = $1`,
+      [recordId, args.newActualCost, args.newPurchaseDate, args.newInvoiceRef, totalAcquisitionCost],
+    );
+    return { assetPurchaseRecordId: recordId };
+  });
+}
+export const proceedWithReplacement = withAuthorization(["financialInstitution"], proceedWithReplacementImpl);
+
+// ─── Choice: RequestCancellation (AssetPurchaseRecord, business) ──────────
+// Nonconsuming -- the AssetPurchaseRecord stays live until the FI confirms.
+
+async function requestCancellationImpl(session: SessionContext, recordId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Cancellation reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO acquisition_cancellation_request (asset_purchase_record_id, cac_reg_number, business_name, reason)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.reason],
+    );
+    return { acquisitionCancellationRequestId: created[0].id };
+  });
+}
+export const requestCancellation = withAuthorization(["business"], requestCancellationImpl);
+
+// ─── Choice: ConfirmCancellation (AssetPurchaseRecord, financialInstitution) ──
+// Consuming on AssetPurchaseRecord -- the real Daml body exercises
+// AcceptCancellation on the request as an atomic sub-step, then archives
+// this purchase record too. Returns `()` -- no successor, archives with
+// superseded_by_kind left NULL, same shape as ExpireProposal/WithdrawProposal.
+
+async function confirmCancellationImpl(session: SessionContext, recordId: number, args: { requestId: number }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: reqRows } = await client.query(
+      "SELECT * FROM acquisition_cancellation_request WHERE id = $1 FOR UPDATE",
+      [args.requestId],
+    );
+    const request = reqRows[0];
+    if (!request) throw new DomainError("AcquisitionCancellationRequest not found");
+    if (Number(request.asset_purchase_record_id) !== recordId) {
+      throw new DomainError("AcquisitionCancellationRequest does not belong to this AssetPurchaseRecord");
+    }
+    if (request.status !== "Pending") throw new DomainError("AcquisitionCancellationRequest is not pending");
+
+    await client.query(
+      `UPDATE acquisition_cancellation_request SET status = 'Confirmed', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [args.requestId],
+    );
+    await client.query(
+      `UPDATE asset_purchase_record SET archived_at = now(), updated_at = now() WHERE id = $1`,
+      [recordId],
+    );
+    return { assetPurchaseRecordId: recordId };
+  });
+}
+export const confirmCancellation = withAuthorization(["financialInstitution"], confirmCancellationImpl);
+
+// ─── Choice: RejectCancellation (AcquisitionCancellationRequest, financialInstitution) ──
+// The AssetPurchaseRecord remains live.
+
+async function rejectCancellationImpl(session: SessionContext, requestId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM acquisition_cancellation_request WHERE id = $1 FOR UPDATE",
+      [requestId],
+    );
+    const request = rows[0];
+    if (!request) throw new DomainError("AcquisitionCancellationRequest not found");
+    if (request.status !== "Pending") throw new DomainError("AcquisitionCancellationRequest is not pending");
+
+    await client.query(
+      `UPDATE acquisition_cancellation_request SET status = 'Rejected', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [requestId],
+    );
+    return { acquisitionCancellationRequestId: requestId };
+  });
+}
+export const rejectCancellation = withAuthorization(["financialInstitution"], rejectCancellationImpl);
+
+export async function listAcquisitionCancellationRequests(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM acquisition_cancellation_request ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── Choice: CertifyShariahTerms (MurabahahProposal, advisor+vetify dual) ──
 // G11 -- the SSB's per-contract sign-off, closing the AAOIFI GSIFI No. 1/2
 // governance loop the Stage-3 sector pre-check alone leaves open.
@@ -723,10 +887,28 @@ interface RecordPaymentArgs {
   paymentDate: string;
   amountPaid: number;
   installmentNo: number;
+  // Phase 2, Thirty-Fourth Slice (Batch E) -- PaymentIdempotencyGuard.
+  // Only set for Direct Debit collections; manual/cash payments (undefined)
+  // are not deduplicated this way, mirroring the real Daml's `Optional Text`.
+  directDebitRef?: string | null;
 }
 
 async function recordPaymentImpl(session: SessionContext, contractId: number, args: RecordPaymentArgs) {
   return withTransaction(session, async (client) => {
+    // PaymentIdempotencyGuard (Batch E) -- a real Postgres UNIQUE constraint,
+    // atomic within this transaction. Only Direct Debit collections carry a
+    // ref; manual/cash payments (directDebitRef undefined/null) skip this.
+    if (args.directDebitRef) {
+      try {
+        await client.query(`INSERT INTO payment_idempotency_guard (direct_debit_ref) VALUES ($1)`, [args.directDebitRef]);
+      } catch (err) {
+        if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+          throw new DomainError(`Payment with directDebitRef ${args.directDebitRef} has already been recorded`);
+        }
+        throw err;
+      }
+    }
+
     const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1 FOR UPDATE", [contractId]);
     const contract = rows[0];
     if (!contract) throw new DomainError("MurabahahContract not found");
@@ -769,8 +951,8 @@ async function recordPaymentImpl(session: SessionContext, contractId: number, ar
     const { rows: recordRows } = await client.query(
       `INSERT INTO repayment_record
          (murabahah_contract_id, facility_ref, cac_reg_number, business_name, installment_no,
-          due_date, payment_date, amount_paid, remaining_balance, was_late)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          due_date, payment_date, amount_paid, remaining_balance, was_late, direct_debit_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         contractId,
@@ -783,6 +965,7 @@ async function recordPaymentImpl(session: SessionContext, contractId: number, ar
         args.amountPaid,
         newBalance,
         isLate,
+        args.directDebitRef ?? null,
       ],
     );
     const repaymentRecordId = recordRows[0].id;
@@ -1078,6 +1261,123 @@ async function declineIbraImpl(session: SessionContext, ibraRequestId: number, a
 }
 export const declineIbra = withAuthorization(["financialInstitution"], declineIbraImpl);
 
+// ─── Choice: GrantPartialIbra (IbraRequest, financialInstitution) ─────────
+// Phase 2, Thirty-Third Slice (Batch D). Same four-eyes CreditOfficer/
+// RiskOfficer shape as the already-ported GrantIbra.
+
+interface GrantPartialIbraArgs {
+  rebateAmount: number;
+  approvedSettlementAmount: number;
+  proposedByOfficerId: string;
+  confirmedByOfficerId: string;
+}
+
+async function grantPartialIbraImpl(session: SessionContext, ibraRequestId: number, args: GrantPartialIbraArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM ibra_request WHERE id = $1 FOR UPDATE", [ibraRequestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("IbraRequest not found");
+    if (request.archived_at) throw new DomainError("IbraRequest is no longer active");
+    if (request.settlement_type !== "PartialIbra") {
+      throw new DomainError("GrantPartialIbra requires PartialIbra settlement type");
+    }
+    const outstandingBalance = Number(request.outstanding_balance);
+    if (!(args.approvedSettlementAmount > 0)) throw new DomainError("Approved settlement amount must be positive");
+    if (!(args.approvedSettlementAmount < outstandingBalance)) {
+      throw new DomainError("Approved settlement must be less than outstanding balance");
+    }
+    if (!(args.rebateAmount >= 0)) throw new DomainError("Rebate must be non-negative");
+    if (args.proposedByOfficerId === args.confirmedByOfficerId) {
+      throw new DomainError("Confirming officer must differ from proposing officer (four-eyes)");
+    }
+
+    const { rows: proposer } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [
+      args.proposedByOfficerId,
+    ]);
+    if (!proposer[0] || !proposer[0].active) throw new DomainError(`Officer ${args.proposedByOfficerId} is not active`);
+    if (!(proposer[0].roles ?? []).includes("CreditOfficer")) {
+      throw new DomainError(`Officer ${args.proposedByOfficerId} does not hold the required role`);
+    }
+    const { rows: confirmer } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [
+      args.confirmedByOfficerId,
+    ]);
+    if (!confirmer[0] || !confirmer[0].active) throw new DomainError(`Officer ${args.confirmedByOfficerId} is not active`);
+    if (!(confirmer[0].roles ?? []).includes("RiskOfficer")) {
+      throw new DomainError(`Officer ${args.confirmedByOfficerId} does not hold the required role`);
+    }
+
+    const { rows: grant } = await client.query(
+      `INSERT INTO partial_ibra_grant
+         (ibra_request_id, facility_ref, cac_reg_number, business_name, outstanding_balance,
+          rebate_amount, approved_settlement_amount, effective_date, proposed_by_officer_id, confirmed_by_officer_id, granted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+       RETURNING id`,
+      [
+        ibraRequestId, request.facility_ref, request.cac_reg_number, request.business_name, request.outstanding_balance,
+        args.rebateAmount, args.approvedSettlementAmount, request.requested_settlement_date, args.proposedByOfficerId, args.confirmedByOfficerId,
+      ],
+    );
+
+    await client.query(
+      `UPDATE ibra_request SET archived_at = now(), superseded_by_kind = 'partial_ibra_grant', superseded_by_id = $2 WHERE id = $1`,
+      [ibraRequestId, grant[0].id],
+    );
+
+    return { partialIbraGrantId: grant[0].id };
+  });
+}
+export const grantPartialIbra = withAuthorization(["financialInstitution"], grantPartialIbraImpl);
+
+export async function listPartialIbraGrants(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM partial_ibra_grant ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProposeRebate (IbraRequest, financialInstitution) ────────────
+// Nonconsuming -- an internal advisory calculation tool for the FI's own
+// financing team, not vetify. The IbraRequest stays live.
+
+interface ProposeRebateArgs {
+  suggestedRebate: number;
+  rationale: string;
+}
+
+async function proposeRebateImpl(session: SessionContext, ibraRequestId: number, args: ProposeRebateArgs) {
+  if (!(args.suggestedRebate >= 0)) throw new DomainError("Suggested rebate must be non-negative");
+  if (!args.rationale) throw new DomainError("Rationale must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM ibra_request WHERE id = $1", [ibraRequestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("IbraRequest not found");
+    if (request.archived_at) throw new DomainError("IbraRequest is no longer active");
+    if (!(args.suggestedRebate <= Number(request.outstanding_balance))) {
+      throw new DomainError("Suggested rebate cannot exceed outstanding balance");
+    }
+
+    const { rows: created } = await client.query(
+      `INSERT INTO ibra_rebate_proposal
+         (ibra_request_id, facility_ref, cac_reg_number, business_name, outstanding_balance, suggested_rebate, rationale, settlement_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        ibraRequestId, request.facility_ref, request.cac_reg_number, request.business_name, request.outstanding_balance,
+        args.suggestedRebate, args.rationale, request.settlement_type,
+      ],
+    );
+    return { ibraRebateProposalId: created[0].id };
+  });
+}
+export const proposeRebate = withAuthorization(["financialInstitution"], proposeRebateImpl);
+
+export async function listIbraRebateProposals(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM ibra_rebate_proposal ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── Choice: SetCharityAmount (LatePaymentCharity, financialInstitution) ──
 
 async function setCharityAmountImpl(session: SessionContext, charityId: number, args: { amount: number }) {
@@ -1272,30 +1572,222 @@ async function releaseCollateralImpl(
 }
 export const releaseCollateral = withAuthorization(["financialInstitution"], releaseCollateralImpl);
 
+// Extracted so ConfirmEnforce (below) can invoke the same core logic inside
+// its own transaction/client, atomically with archiving the
+// PendingCollateralEnforcement it was exercised on -- mirrors the real
+// Daml's `exercise rahnCid EnforceCollateral with ...` nested-exercise
+// shape. Guards/checkFourEyes unchanged from the original single-entry form.
+async function applyEnforceCollateral(client: PoolClient, rahnAgreementId: number, args: CollateralOfficerArgs & { reason: string }) {
+  const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1 FOR UPDATE", [rahnAgreementId]);
+  const rahn = rows[0];
+  if (!rahn) throw new DomainError("RahnAgreement not found");
+  if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only enforce Active collateral");
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+
+  await checkFourEyes(client, args.proposedByOfficerId, "RecoveryOfficer", args.confirmedByOfficerId, "RiskOfficer");
+
+  await client.query(
+    `UPDATE rahn_agreement
+       SET collateral_status = 'CollateralEnforced', proposed_by_officer_id = $2, confirmed_by_officer_id = $3, updated_at = now()
+       WHERE id = $1`,
+    [rahnAgreementId, args.proposedByOfficerId, args.confirmedByOfficerId],
+  );
+  return { rahnAgreementId };
+}
+
 async function enforceCollateralImpl(session: SessionContext, rahnAgreementId: number, args: CollateralOfficerArgs & { reason: string }) {
+  return withTransaction(session, (client) => applyEnforceCollateral(client, rahnAgreementId, args));
+}
+export const enforceCollateral = withAuthorization(["financialInstitution"], enforceCollateralImpl);
+
+// ─── Choice: Revalue (RahnAgreement, financialInstitution) ────────────────
+// Phase 2, Twenty-Sixth Slice. Named as deferred directly in migrations/012's
+// own header when that slice built the business-driven valuation *document
+// upload* instead -- a deliberately separate, lower-stakes feature. This is
+// the real FI-controlled revaluation decision `create this with
+// collateralValue = newValue` collapses to a plain UPDATE (no contract key
+// on SDK 3.4.11/LF 2.2), same rule as every other keyless field-replace
+// choice already ported.
+
+interface RevalueArgs {
+  newValue: number;
+  valuationDate: string;
+  valuatorRef: string;
+  notes?: string | null;
+}
+
+async function revalueImpl(session: SessionContext, rahnAgreementId: number, args: RevalueArgs) {
+  if (!(args.newValue > 0)) throw new DomainError("New collateral value must be positive");
+  if (!args.valuatorRef) throw new DomainError("Valuator reference must not be empty");
   return withTransaction(session, async (client) => {
     const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1 FOR UPDATE", [rahnAgreementId]);
     const rahn = rows[0];
     if (!rahn) throw new DomainError("RahnAgreement not found");
-    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only enforce Active collateral");
-    if (!args.reason) throw new DomainError("Reason must not be empty");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Collateral must be Active to revalue");
 
-    await checkFourEyes(client, args.proposedByOfficerId, "RecoveryOfficer", args.confirmedByOfficerId, "RiskOfficer");
+    const previousValue = rahn.collateral_value;
+    await client.query(`UPDATE rahn_agreement SET collateral_value = $2, updated_at = now() WHERE id = $1`, [rahnAgreementId, args.newValue]);
 
-    await client.query(
-      `UPDATE rahn_agreement
-         SET collateral_status = 'CollateralEnforced', proposed_by_officer_id = $2, confirmed_by_officer_id = $3, updated_at = now()
-         WHERE id = $1`,
-      [rahnAgreementId, args.proposedByOfficerId, args.confirmedByOfficerId],
+    const { rows: record } = await client.query(
+      `INSERT INTO collateral_valuation_record
+         (rahn_agreement_id, cac_reg_number, business_name, previous_value, valuation_amount, valuation_date, valuator_ref, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [rahnAgreementId, rahn.cac_reg_number, rahn.business_name, previousValue, args.newValue, args.valuationDate, args.valuatorRef, args.notes ?? null],
     );
-    return { rahnAgreementId };
+    return { rahnAgreementId, collateralValuationRecordId: record[0].id };
   });
 }
-export const enforceCollateral = withAuthorization(["financialInstitution"], enforceCollateralImpl);
+export const revalue = withAuthorization(["financialInstitution"], revalueImpl);
+
+// ─── Choice: RecordInspection (RahnAgreement, financialInstitution) ───────
+// Nonconsuming in the real Daml -- a periodic physical inspection doesn't
+// change collateral status.
+
+interface RecordInspectionArgs {
+  inspectionDate: string;
+  inspectedBy: string;
+  condition: "Satisfactory" | "RequiresAttention" | "Impaired";
+  inspectionNotes?: string | null;
+  nextInspectionDate?: string | null;
+  mandateStatus?: string | null;
+  estimatedGsmRecoverable?: number | null;
+}
+
+async function recordInspectionImpl(session: SessionContext, rahnAgreementId: number, args: RecordInspectionArgs) {
+  if (!args.inspectedBy) throw new DomainError("Inspected-by must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1", [rahnAgreementId]);
+    const rahn = rows[0];
+    if (!rahn) throw new DomainError("RahnAgreement not found");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only inspect Active collateral");
+
+    const { rows: record } = await client.query(
+      `INSERT INTO collateral_inspection_record
+         (rahn_agreement_id, cac_reg_number, business_name, inspection_date, inspected_by, condition,
+          inspection_notes, next_inspection_date, mandate_status, estimated_gsm_recoverable)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        rahnAgreementId, rahn.cac_reg_number, rahn.business_name, args.inspectionDate, args.inspectedBy, args.condition,
+        args.inspectionNotes ?? null, args.nextInspectionDate ?? null, args.mandateStatus ?? null, args.estimatedGsmRecoverable ?? null,
+      ],
+    );
+    return { collateralInspectionRecordId: record[0].id };
+  });
+}
+export const recordInspection = withAuthorization(["financialInstitution"], recordInspectionImpl);
+
+export async function listCollateralValuationRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM collateral_valuation_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listCollateralInspectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM collateral_inspection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
 
 export async function listRahnAgreements(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM rahn_agreement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ProposeEnforceCollateral / ConfirmEnforce / RejectEnforce ────────────
+// Phase 2, Twenty-Eighth Slice -- the maker-checker variant of
+// EnforceCollateral: the FI's RecoveryOfficer proposes (ProposeEnforceCollateral,
+// nonconsuming on RahnAgreement), and vetify -- not a second FI officer --
+// confirms or rejects. ConfirmEnforce's real Daml body is a nested
+// `exercise rahnCid EnforceCollateral with ...`, ported by calling
+// applyEnforceCollateral inside this choice's own transaction so the
+// PendingCollateralEnforcement resolution and the RahnAgreement update stay
+// atomic, same technique as ConfirmCancellation (Twenty-Seventh Slice).
+
+async function requireActiveRecoveryOfficer(client: PoolClient, officerId: string) {
+  const { rows } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [officerId]);
+  const officer = rows[0];
+  if (!officer || !officer.active) throw new DomainError(`Officer ${officerId} is not active`);
+  if (!(officer.roles ?? []).includes("RecoveryOfficer")) {
+    throw new DomainError(`Officer ${officerId} does not hold the required role`);
+  }
+}
+
+interface ProposeEnforceCollateralArgs {
+  reason: string;
+  gsmExhausted: boolean;
+  gsmRef?: string | null;
+  proposedByOfficerId: string;
+}
+
+async function proposeEnforceCollateralImpl(session: SessionContext, rahnAgreementId: number, args: ProposeEnforceCollateralArgs) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1", [rahnAgreementId]);
+    const rahn = rows[0];
+    if (!rahn) throw new DomainError("RahnAgreement not found");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only propose enforcement on Active collateral");
+
+    await requireActiveRecoveryOfficer(client, args.proposedByOfficerId);
+
+    const { rows: created } = await client.query(
+      `INSERT INTO pending_collateral_enforcement
+         (rahn_agreement_id, cac_reg_number, business_name, reason, gsm_exhausted, gsm_ref, proposed_by_officer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [rahnAgreementId, rahn.cac_reg_number, rahn.business_name, args.reason, args.gsmExhausted, args.gsmRef ?? null, args.proposedByOfficerId],
+    );
+    return { pendingCollateralEnforcementId: created[0].id };
+  });
+}
+export const proposeEnforceCollateral = withAuthorization(["financialInstitution"], proposeEnforceCollateralImpl);
+
+async function confirmEnforceImpl(session: SessionContext, pendingId: number, args: { confirmedByOfficerId: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM pending_collateral_enforcement WHERE id = $1 FOR UPDATE", [pendingId]);
+    const pending = rows[0];
+    if (!pending) throw new DomainError("PendingCollateralEnforcement not found");
+    if (pending.status !== "Pending") throw new DomainError("PendingCollateralEnforcement is not pending");
+
+    const enforcement = await applyEnforceCollateral(client, Number(pending.rahn_agreement_id), {
+      reason: pending.reason,
+      proposedByOfficerId: pending.proposed_by_officer_id,
+      confirmedByOfficerId: args.confirmedByOfficerId,
+    });
+
+    await client.query(
+      `UPDATE pending_collateral_enforcement SET status = 'Confirmed', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [pendingId],
+    );
+    return { rahnAgreementId: enforcement.rahnAgreementId };
+  });
+}
+export const confirmEnforce = withAuthorization(["vetify"], confirmEnforceImpl);
+
+async function rejectEnforceImpl(session: SessionContext, pendingId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM pending_collateral_enforcement WHERE id = $1 FOR UPDATE", [pendingId]);
+    const pending = rows[0];
+    if (!pending) throw new DomainError("PendingCollateralEnforcement not found");
+    if (pending.status !== "Pending") throw new DomainError("PendingCollateralEnforcement is not pending");
+
+    await client.query(
+      `UPDATE pending_collateral_enforcement SET status = 'Rejected', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [pendingId],
+    );
+    return { pendingCollateralEnforcementId: pendingId };
+  });
+}
+export const rejectEnforce = withAuthorization(["vetify"], rejectEnforceImpl);
+
+export async function listPendingCollateralEnforcements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM pending_collateral_enforcement ORDER BY created_at DESC`);
     return rows;
   });
 }
@@ -2219,6 +2711,1145 @@ export const forfeitDeposit = withAuthorization(["financialInstitution"], forfei
 export async function listHamishJiddiyyah(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM hamish_jiddiyyah ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Twenty-Ninth Slice: regulatory inspection workflow ──────────
+// RegulatoryInspectionRequest is created directly by vetify -- no exercised
+// choice creates it in the real Daml (confirmed against MurabahahTests.daml's
+// M-RI test, a bare `createCmd` as vetify). No `business` visibility on any
+// of the three templates -- this is CBN oversight of the FI, not something
+// the underlying business sees.
+
+interface CreateRegulatoryInspectionRequestArgs {
+  cacRegNumber: string;
+  businessName: string;
+  inspectionRef: string;
+  inspectionScope: string;
+  responseDeadline: string;
+}
+
+async function createRegulatoryInspectionRequestImpl(session: SessionContext, args: CreateRegulatoryInspectionRequestArgs) {
+  if (!args.inspectionRef) throw new DomainError("Inspection reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO regulatory_inspection_request
+         (cac_reg_number, business_name, inspection_ref, inspection_scope, response_deadline)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.inspectionRef, args.inspectionScope, args.responseDeadline],
+    );
+    return { regulatoryInspectionRequestId: rows[0].id };
+  });
+}
+export const createRegulatoryInspectionRequest = withAuthorization(["vetify"], createRegulatoryInspectionRequestImpl);
+
+// ─── Choice: ExtendDeadline (RegulatoryInspectionRequest, vetify) ─────────
+// Keyless field-replace (`create this with responseDeadline = newDeadline`)
+// -- collapses to a plain UPDATE, same convention as Revalue/ProceedWithReplacement.
+
+async function extendDeadlineImpl(session: SessionContext, requestId: number, args: { newDeadline: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM regulatory_inspection_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("RegulatoryInspectionRequest not found");
+    if (request.archived_at) throw new DomainError("RegulatoryInspectionRequest is no longer active");
+    if (!(new Date(args.newDeadline).getTime() > new Date(dateOnlyString(request.response_deadline)!).getTime())) {
+      throw new DomainError("New deadline must be later than current");
+    }
+
+    await client.query(
+      `UPDATE regulatory_inspection_request SET response_deadline = $2, updated_at = now() WHERE id = $1`,
+      [requestId, args.newDeadline],
+    );
+    return { regulatoryInspectionRequestId: requestId };
+  });
+}
+export const extendDeadline = withAuthorization(["vetify"], extendDeadlineImpl);
+
+// ─── Choice: RespondToInspection (RegulatoryInspectionRequest, financialInstitution) ──
+// Consuming -- archives the request, creates InspectionResponse.
+
+interface RespondToInspectionArgs {
+  responseRef: string;
+  documents: string[];
+  respondedByName: string;
+  responseDate: string;
+}
+
+async function respondToInspectionImpl(session: SessionContext, requestId: number, args: RespondToInspectionArgs) {
+  if (!args.responseRef) throw new DomainError("Response reference must not be empty");
+  if (!args.respondedByName) throw new DomainError("Responded-by name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM regulatory_inspection_request WHERE id = $1 FOR UPDATE", [requestId]);
+    const request = rows[0];
+    if (!request) throw new DomainError("RegulatoryInspectionRequest not found");
+    if (request.archived_at) throw new DomainError("RegulatoryInspectionRequest is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO inspection_response
+         (regulatory_inspection_request_id, cac_reg_number, business_name, inspection_ref,
+          response_ref, documents, responded_by_name, response_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        requestId, request.cac_reg_number, request.business_name, request.inspection_ref,
+        args.responseRef, JSON.stringify(args.documents ?? []), args.respondedByName, args.responseDate,
+      ],
+    );
+    const inspectionResponseId = created[0].id;
+
+    await client.query(
+      `UPDATE regulatory_inspection_request
+         SET archived_at = now(), superseded_by_kind = 'inspection_response', superseded_by_id = $2
+         WHERE id = $1`,
+      [requestId, inspectionResponseId],
+    );
+    return { inspectionResponseId };
+  });
+}
+export const respondToInspection = withAuthorization(["financialInstitution"], respondToInspectionImpl);
+
+// ─── Choice: CloseInspection (InspectionResponse, vetify) ─────────────────
+// Consuming -- archives the response, creates the immutable InspectionRecord.
+
+interface CloseInspectionArgs {
+  findings: string[];
+  passed: boolean;
+  followUpNeeded: boolean;
+  closingNote: string;
+}
+
+async function closeInspectionImpl(session: SessionContext, responseId: number, args: CloseInspectionArgs) {
+  if (!args.closingNote) throw new DomainError("Closing note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM inspection_response WHERE id = $1 FOR UPDATE", [responseId]);
+    const response = rows[0];
+    if (!response) throw new DomainError("InspectionResponse not found");
+    if (response.archived_at) throw new DomainError("InspectionResponse is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO inspection_record
+         (inspection_response_id, cac_reg_number, business_name, inspection_ref, findings, passed, follow_up_needed, closing_note)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id`,
+      [
+        responseId, response.cac_reg_number, response.business_name, response.inspection_ref,
+        JSON.stringify(args.findings ?? []), args.passed, args.followUpNeeded, args.closingNote,
+      ],
+    );
+    const inspectionRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE inspection_response
+         SET archived_at = now(), superseded_by_kind = 'inspection_record', superseded_by_id = $2
+         WHERE id = $1`,
+      [responseId, inspectionRecordId],
+    );
+    return { inspectionRecordId };
+  });
+}
+export const closeInspection = withAuthorization(["vetify"], closeInspectionImpl);
+
+export async function listRegulatoryInspectionRequests(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM regulatory_inspection_request ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listInspectionResponses(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM inspection_response ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listInspectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM inspection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirtieth Slice: standalone audit/governance records ────────
+// Seven templates, none dependent on any existing choice body -- vetify or
+// the FI creates each one directly. Grouped into one batch per the "bigger
+// batches, same rigor" plan.
+
+// ─── ShariahAuditRecord (vetify creates directly; no further choices) ─────
+
+interface CreateShariahAuditRecordArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  auditDate: string;
+  auditPeriod: string;
+  auditorRef: string;
+  findings: string[];
+  overallCompliant: boolean;
+  recommendations: string[];
+  nextAuditDate?: string | null;
+}
+
+async function createShariahAuditRecordImpl(session: SessionContext, args: CreateShariahAuditRecordArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO shariah_audit_record
+         (cac_reg_number, business_name, facility_ref, audit_date, audit_period, auditor_ref,
+          findings, overall_compliant, recommendations, next_audit_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.auditDate, args.auditPeriod, args.auditorRef,
+        JSON.stringify(args.findings ?? []), args.overallCompliant, JSON.stringify(args.recommendations ?? []), args.nextAuditDate ?? null,
+      ],
+    );
+    return { shariahAuditRecordId: rows[0].id };
+  });
+}
+export const createShariahAuditRecord = withAuthorization(["vetify"], createShariahAuditRecordImpl);
+
+export async function listShariahAuditRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_audit_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ShariahException (vetify creates + ResolveException) ─────────────────
+
+interface CreateShariahExceptionArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  exceptionType: string;
+  description: string;
+  severity: "MinorException" | "MajorException" | "CriticalException";
+}
+
+async function createShariahExceptionImpl(session: SessionContext, args: CreateShariahExceptionArgs) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO shariah_exception
+         (cac_reg_number, business_name, facility_ref, exception_type, description, severity, detected_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.exceptionType, args.description, args.severity],
+    );
+    return { shariahExceptionId: rows[0].id };
+  });
+}
+export const createShariahException = withAuthorization(["vetify"], createShariahExceptionImpl);
+
+async function resolveExceptionImpl(session: SessionContext, exceptionId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Resolution note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT resolution_note FROM shariah_exception WHERE id = $1 FOR UPDATE", [exceptionId]);
+    const exception = rows[0];
+    if (!exception) throw new DomainError("ShariahException not found");
+    if (exception.resolution_note !== null) throw new DomainError("Exception is already resolved");
+
+    await client.query(
+      `UPDATE shariah_exception SET resolution_note = $2, resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [exceptionId, args.note],
+    );
+    return { shariahExceptionId: exceptionId };
+  });
+}
+export const resolveException = withAuthorization(["vetify"], resolveExceptionImpl);
+
+export async function listShariahExceptions(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_exception ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── MurabahahStatement (vetify creates directly; no further choices) ─────
+
+interface CreateMurabahahStatementArgs {
+  cacRegNumber: string;
+  businessName: string;
+  statementDate: string;
+  statementPeriod: string;
+  totalFinanced: number;
+  totalRepaid: number;
+  outstandingBalance: number;
+  installmentsPaid: number;
+  totalInstallments: number;
+  contractStatus: string;
+  shariahAuditRef?: string | null;
+}
+
+async function createMurabahahStatementImpl(session: SessionContext, args: CreateMurabahahStatementArgs) {
+  if (!(args.totalFinanced > 0)) throw new DomainError("totalFinanced must be positive");
+  if (!(args.totalRepaid >= 0)) throw new DomainError("totalRepaid must be non-negative");
+  if (!(args.outstandingBalance >= 0)) throw new DomainError("outstandingBalance must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO murabahah_statement
+         (cac_reg_number, business_name, statement_date, statement_period, total_financed, total_repaid,
+          outstanding_balance, installments_paid, total_installments, contract_status, shariah_audit_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.statementDate, args.statementPeriod, args.totalFinanced, args.totalRepaid,
+        args.outstandingBalance, args.installmentsPaid, args.totalInstallments, args.contractStatus, args.shariahAuditRef ?? null,
+      ],
+    );
+    return { murabahahStatementId: rows[0].id };
+  });
+}
+export const createMurabahahStatement = withAuthorization(["vetify"], createMurabahahStatementImpl);
+
+export async function listMurabahahStatements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM murabahah_statement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── MonitoringAlert (vetify creates + DismissAlert) ───────────────────────
+
+interface CreateMonitoringAlertArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  alertType: string;
+  alertSeverity: string;
+  alertDescription: string;
+}
+
+async function createMonitoringAlertImpl(session: SessionContext, args: CreateMonitoringAlertArgs) {
+  if (!args.alertDescription) throw new DomainError("Alert description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO monitoring_alert
+         (cac_reg_number, business_name, facility_ref, alert_type, alert_severity, alert_description, detected_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.facilityRef ?? null, args.alertType, args.alertSeverity, args.alertDescription],
+    );
+    return { monitoringAlertId: rows[0].id };
+  });
+}
+export const createMonitoringAlert = withAuthorization(["vetify"], createMonitoringAlertImpl);
+
+async function dismissAlertImpl(session: SessionContext, alertId: number, args: { dismissNote: string }) {
+  if (!args.dismissNote) throw new DomainError("Dismissal note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT dismissed FROM monitoring_alert WHERE id = $1 FOR UPDATE", [alertId]);
+    const alert = rows[0];
+    if (!alert) throw new DomainError("MonitoringAlert not found");
+    if (alert.dismissed) throw new DomainError("Alert is already dismissed");
+
+    await client.query(
+      `UPDATE monitoring_alert SET dismissed = true, dismissal_note = $2, updated_at = now() WHERE id = $1`,
+      [alertId, args.dismissNote],
+    );
+    return { monitoringAlertId: alertId };
+  });
+}
+export const dismissAlert = withAuthorization(["vetify"], dismissAlertImpl);
+
+export async function listMonitoringAlerts(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM monitoring_alert ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── PortfolioRiskReport (vetify creates directly; portfolio-wide, no cacRegNumber) ──
+
+interface PortfolioRiskMetricsArgs {
+  probabilityOfDefault: number;
+  lossGivenDefault: number;
+  expectedLoss: number;
+  exposureAtDefault: number;
+  concentrationRisk: number;
+  sectorConcentration: string;
+  delinquencyRate: number;
+  activeContractCount: number;
+}
+
+interface CreatePortfolioRiskReportArgs {
+  reportDate: string;
+  reportPeriod: string;
+  metrics: PortfolioRiskMetricsArgs;
+  generatedByAgent: string;
+  modelVersion: string;
+}
+
+async function createPortfolioRiskReportImpl(session: SessionContext, args: CreatePortfolioRiskReportArgs) {
+  if (!(args.metrics.activeContractCount >= 0)) throw new DomainError("activeContractCount must be non-negative");
+  if (!(args.metrics.exposureAtDefault >= 0)) throw new DomainError("exposureAtDefault must be non-negative");
+  if (!(args.metrics.expectedLoss >= 0)) throw new DomainError("expectedLoss must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO portfolio_risk_report
+         (report_date, report_period, probability_of_default, loss_given_default, expected_loss,
+          exposure_at_default, concentration_risk, sector_concentration, delinquency_rate,
+          active_contract_count, generated_by_agent, model_version)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       RETURNING id`,
+      [
+        args.reportDate, args.reportPeriod, args.metrics.probabilityOfDefault, args.metrics.lossGivenDefault, args.metrics.expectedLoss,
+        args.metrics.exposureAtDefault, args.metrics.concentrationRisk, args.metrics.sectorConcentration, args.metrics.delinquencyRate,
+        args.metrics.activeContractCount, args.generatedByAgent, args.modelVersion,
+      ],
+    );
+    return { portfolioRiskReportId: rows[0].id };
+  });
+}
+export const createPortfolioRiskReport = withAuthorization(["vetify"], createPortfolioRiskReportImpl);
+
+export async function listPortfolioRiskReports(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM portfolio_risk_report ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ForceMajeureDeclaration (vetify creates + LiftDeclaration; portfolio-wide) ──
+
+interface CreateForceMajeureDeclarationArgs {
+  declarationRef: string;
+  eventDescription: string;
+  affectedRegion: string;
+  suspensionStart: string;
+  suspensionEnd: string;
+  regulatoryBasis: string;
+}
+
+async function createForceMajeureDeclarationImpl(session: SessionContext, args: CreateForceMajeureDeclarationArgs) {
+  if (!args.declarationRef) throw new DomainError("declarationRef must not be empty");
+  if (!args.eventDescription) throw new DomainError("eventDescription must not be empty");
+  if (!(new Date(args.suspensionEnd).getTime() > new Date(args.suspensionStart).getTime())) {
+    throw new DomainError("suspensionEnd must be later than suspensionStart");
+  }
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO force_majeure_declaration
+         (declaration_ref, event_description, affected_region, suspension_start, suspension_end, regulatory_basis)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [args.declarationRef, args.eventDescription, args.affectedRegion, args.suspensionStart, args.suspensionEnd, args.regulatoryBasis],
+    );
+    return { forceMajeureDeclarationId: rows[0].id };
+  });
+}
+export const createForceMajeureDeclaration = withAuthorization(["vetify"], createForceMajeureDeclarationImpl);
+
+async function liftDeclarationImpl(session: SessionContext, declarationId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Lifting note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT is_active FROM force_majeure_declaration WHERE id = $1 FOR UPDATE", [declarationId]);
+    const declaration = rows[0];
+    if (!declaration) throw new DomainError("ForceMajeureDeclaration not found");
+    if (!declaration.is_active) throw new DomainError("Declaration has already been lifted");
+
+    await client.query(`UPDATE force_majeure_declaration SET is_active = false, updated_at = now() WHERE id = $1`, [declarationId]);
+    return { forceMajeureDeclarationId: declarationId };
+  });
+}
+export const liftDeclaration = withAuthorization(["vetify"], liftDeclarationImpl);
+
+export async function listForceMajeureDeclarations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM force_majeure_declaration ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── CharityOrganizationRegistry (financialInstitution creates + UpdateRegistry; FI-wide) ──
+
+interface CharityOrgArgs {
+  approvedOrganizations: [string, string][];
+  shariahBoardRef: string;
+  effectiveDate: string;
+  version: string;
+}
+
+async function createCharityOrganizationRegistryImpl(session: SessionContext, args: CharityOrgArgs) {
+  if (!args.approvedOrganizations || args.approvedOrganizations.length === 0) {
+    throw new DomainError("Updated list must not be empty");
+  }
+  if (!args.shariahBoardRef) throw new DomainError("shariahBoardRef must not be empty");
+  if (!args.version) throw new DomainError("version must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO charity_organization_registry (approved_organizations, shariah_board_ref, effective_date, version)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [JSON.stringify(args.approvedOrganizations), args.shariahBoardRef, args.effectiveDate, args.version],
+    );
+    return { charityOrganizationRegistryId: rows[0].id };
+  });
+}
+export const createCharityOrganizationRegistry = withAuthorization(["financialInstitution"], createCharityOrganizationRegistryImpl);
+
+interface UpdateRegistryArgs {
+  newOrganizations: [string, string][];
+  newVersion: string;
+  updatedBoardRef: string;
+}
+
+async function updateRegistryImpl(session: SessionContext, registryId: number, args: UpdateRegistryArgs) {
+  if (!args.newOrganizations || args.newOrganizations.length === 0) throw new DomainError("Updated list must not be empty");
+  if (!args.newVersion) throw new DomainError("New version must not be empty");
+  if (!args.updatedBoardRef) throw new DomainError("Updated board reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM charity_organization_registry WHERE id = $1 FOR UPDATE", [registryId]);
+    if (!rows[0]) throw new DomainError("CharityOrganizationRegistry not found");
+
+    await client.query(
+      `UPDATE charity_organization_registry
+         SET approved_organizations = $2, version = $3, shariah_board_ref = $4, updated_at = now()
+         WHERE id = $1`,
+      [registryId, JSON.stringify(args.newOrganizations), args.newVersion, args.updatedBoardRef],
+    );
+    return { charityOrganizationRegistryId: registryId };
+  });
+}
+export const updateRegistry = withAuthorization(["financialInstitution"], updateRegistryImpl);
+
+export async function listCharityOrganizationRegistries(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM charity_organization_registry ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-First Slice: AssetPurchaseRecord supporting records (Batch B) ──
+// Four are choices on the already-ported AssetPurchaseRecord
+// (RecordDeliveryMilestone, RecordSupplierFailure, RecordSupplierPayment,
+// RegisterDocument); PurchaseOrder/CapitalCallRecord are created directly
+// by financialInstitution, no dependency on an AssetPurchaseRecord fixture.
+
+// ─── Choice: RecordDeliveryMilestone (AssetPurchaseRecord, business) ──────
+// Nonconsuming -- the purchase record stays live.
+
+interface RecordDeliveryMilestoneArgs {
+  milestoneDescription: string;
+  quantityDelivered: number;
+  milestoneDate: string;
+  evidenceRef?: string | null;
+}
+
+async function recordDeliveryMilestoneImpl(session: SessionContext, recordId: number, args: RecordDeliveryMilestoneArgs) {
+  if (!args.milestoneDescription) throw new DomainError("Milestone description must not be empty");
+  if (!(args.quantityDelivered > 0)) throw new DomainError("Quantity delivered must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.delivery_acknowledged) throw new DomainError("Cannot record milestone after delivery is fully acknowledged");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO delivery_milestone
+         (asset_purchase_record_id, cac_reg_number, business_name, milestone_description, quantity_delivered, milestone_date, evidence_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.milestoneDescription, args.quantityDelivered, args.milestoneDate, args.evidenceRef ?? null],
+    );
+    return { deliveryMilestoneId: created[0].id };
+  });
+}
+export const recordDeliveryMilestone = withAuthorization(["business"], recordDeliveryMilestoneImpl);
+
+export async function listDeliveryMilestones(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM delivery_milestone ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordSupplierFailure (AssetPurchaseRecord, financialInstitution) ──
+// Consuming -- archives the AssetPurchaseRecord; the Wakala sub-flow must restart.
+
+interface RecordSupplierFailureArgs {
+  failureType: "SupplierCancelled" | "SupplierBankrupt" | "RefundIssued";
+  failureDescription: string;
+  refundAmount?: number | null;
+}
+
+async function recordSupplierFailureImpl(session: SessionContext, recordId: number, args: RecordSupplierFailureArgs) {
+  if (!args.failureDescription) throw new DomainError("Failure description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_failure_record
+         (asset_purchase_record_id, cac_reg_number, business_name, failure_type, failure_description, refund_amount, failed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.failureType, args.failureDescription, args.refundAmount ?? null],
+    );
+    const supplierFailureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE asset_purchase_record
+         SET archived_at = now(), superseded_by_kind = 'supplier_failure_record', superseded_by_id = $2
+         WHERE id = $1`,
+      [recordId, supplierFailureRecordId],
+    );
+    return { supplierFailureRecordId };
+  });
+}
+export const recordSupplierFailure = withAuthorization(["financialInstitution"], recordSupplierFailureImpl);
+
+export async function listSupplierFailureRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_failure_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordSupplierPayment (AssetPurchaseRecord, financialInstitution) ──
+// Nonconsuming -- the purchase record stays active.
+
+interface RecordSupplierPaymentArgs {
+  supplierDetails?: Record<string, unknown> | null;
+  amountPaid: number;
+  paymentDate: string;
+  paymentRef: string;
+  bankConfirmationRef?: string | null;
+}
+
+async function recordSupplierPaymentImpl(session: SessionContext, recordId: number, args: RecordSupplierPaymentArgs) {
+  if (!(args.amountPaid > 0)) throw new DomainError("Payment amount must be positive");
+  if (!args.paymentRef) throw new DomainError("Payment reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_payment_record
+         (asset_purchase_record_id, cac_reg_number, business_name, supplier_details, amount_paid, payment_date,
+          payment_ref, bank_confirmation_ref, purchased_via_wakala)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        recordId, record.cac_reg_number, record.business_name, args.supplierDetails ? JSON.stringify(args.supplierDetails) : null,
+        args.amountPaid, args.paymentDate, args.paymentRef, args.bankConfirmationRef ?? null, record.purchased_via_wakala,
+      ],
+    );
+    return { supplierPaymentRecordId: created[0].id };
+  });
+}
+export const recordSupplierPayment = withAuthorization(["financialInstitution"], recordSupplierPaymentImpl);
+
+export async function listSupplierPaymentRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_payment_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RegisterDocument (AssetPurchaseRecord, financialInstitution) ─
+// Nonconsuming, creates a managed-lifecycle DocumentEntry.
+
+interface DocumentRefArgs {
+  docType: string;
+  contentHash: string;
+  storageRef: string;
+}
+
+async function registerDocumentImpl(session: SessionContext, recordId: number, args: { documentRef: DocumentRefArgs; registeredBy: string }) {
+  if (!args.registeredBy) throw new DomainError("Registered-by name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO document_entry (asset_purchase_record_id, cac_reg_number, business_name, document_ref, registered_by, uploaded_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, JSON.stringify(args.documentRef), args.registeredBy],
+    );
+    return { documentEntryId: created[0].id };
+  });
+}
+export const registerDocument = withAuthorization(["financialInstitution"], registerDocumentImpl);
+
+// ─── Choice: VerifyDocument (DocumentEntry, vetify) ───────────────────────
+
+async function verifyDocumentImpl(session: SessionContext, documentEntryId: number, args: { verifyNote?: string | null }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT verified_at, superseded FROM document_entry WHERE id = $1 FOR UPDATE", [documentEntryId]);
+    const entry = rows[0];
+    if (!entry) throw new DomainError("DocumentEntry not found");
+    if (entry.verified_at !== null) throw new DomainError("Document already verified");
+    if (entry.superseded) throw new DomainError("Document is superseded");
+
+    await client.query(`UPDATE document_entry SET verified_at = now(), updated_at = now() WHERE id = $1`, [documentEntryId]);
+    return { documentEntryId };
+  });
+}
+export const verifyDocument = withAuthorization(["vetify"], verifyDocumentImpl);
+
+// ─── Choice: SupersedeDocument (DocumentEntry, financialInstitution) ──────
+
+async function supersedeDocumentImpl(
+  session: SessionContext,
+  documentEntryId: number,
+  args: { newDocumentRef: DocumentRefArgs; reason: string },
+) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT superseded FROM document_entry WHERE id = $1 FOR UPDATE", [documentEntryId]);
+    const entry = rows[0];
+    if (!entry) throw new DomainError("DocumentEntry not found");
+    if (entry.superseded) throw new DomainError("Document is already superseded");
+
+    await client.query(
+      `UPDATE document_entry SET document_ref = $2, verified_at = NULL, superseded = false, updated_at = now() WHERE id = $1`,
+      [documentEntryId, JSON.stringify(args.newDocumentRef)],
+    );
+    return { documentEntryId };
+  });
+}
+export const supersedeDocument = withAuthorization(["financialInstitution"], supersedeDocumentImpl);
+
+export async function listDocumentEntries(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM document_entry ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── PurchaseOrder (financialInstitution creates directly + lifecycle choices) ──
+
+interface CreatePurchaseOrderArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  supplierName: string;
+  supplierDetails: Record<string, unknown>;
+  orderedItems: Record<string, unknown>[];
+  totalOrderValue: number;
+  deliveryDeadline: string;
+  poRef: string;
+}
+
+async function createPurchaseOrderImpl(session: SessionContext, args: CreatePurchaseOrderArgs) {
+  if (!(args.totalOrderValue > 0)) throw new DomainError("totalOrderValue must be positive");
+  if (!args.poRef) throw new DomainError("poRef must not be empty");
+  if (!args.orderedItems || args.orderedItems.length === 0) throw new DomainError("orderedItems must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO purchase_order
+         (cac_reg_number, business_name, facility_ref, supplier_name, supplier_details, ordered_items,
+          total_order_value, delivery_deadline, po_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef, args.supplierName, JSON.stringify(args.supplierDetails),
+        JSON.stringify(args.orderedItems), args.totalOrderValue, args.deliveryDeadline, args.poRef,
+      ],
+    );
+    return { purchaseOrderId: rows[0].id };
+  });
+}
+export const createPurchaseOrder = withAuthorization(["financialInstitution"], createPurchaseOrderImpl);
+
+async function confirmPOImpl(session: SessionContext, poId: number, args: { confirmationRef: string }) {
+  if (!args.confirmationRef) throw new DomainError("Confirmation reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    if (!rows[0]) throw new DomainError("PurchaseOrder not found");
+    await client.query(`UPDATE purchase_order SET status = 'POConfirmed', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const confirmPO = withAuthorization(["financialInstitution"], confirmPOImpl);
+
+async function markPartiallyFulfilledImpl(session: SessionContext, poId: number, args: { deliveryRef: string }) {
+  if (!args.deliveryRef) throw new DomainError("Delivery reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POConfirmed" || po.status === "POIssued")) {
+      throw new DomainError("Can only mark Confirmed or Issued PO as partially fulfilled");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POPartiallyFulfilled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const markPartiallyFulfilled = withAuthorization(["financialInstitution"], markPartiallyFulfilledImpl);
+
+async function markFulfilledImpl(session: SessionContext, poId: number, args: { deliveryRef: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POConfirmed" || po.status === "POPartiallyFulfilled")) {
+      throw new DomainError("PO must be Confirmed or PartiallyFulfilled to mark as Fulfilled");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POFulfilled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const markFulfilled = withAuthorization(["financialInstitution"], markFulfilledImpl);
+
+async function cancelPOImpl(session: SessionContext, poId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POIssued" || po.status === "POConfirmed")) {
+      throw new DomainError("Can only cancel an Issued or Confirmed PO");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POCancelled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const cancelPO = withAuthorization(["financialInstitution"], cancelPOImpl);
+
+export async function listPurchaseOrders(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM purchase_order ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── CapitalCallRecord (financialInstitution creates directly; immutable) ──
+
+interface CreateCapitalCallRecordArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  trancheNumber: number;
+  trancheAmount: number;
+  disbursementDate: string;
+  purposeOfTranche: string;
+  disbursementRef: string;
+  cumulativeDisbursed: number;
+  remainingFacility: number;
+}
+
+async function createCapitalCallRecordImpl(session: SessionContext, args: CreateCapitalCallRecordArgs) {
+  if (!(args.trancheAmount > 0)) throw new DomainError("trancheAmount must be positive");
+  if (!args.disbursementRef) throw new DomainError("disbursementRef must not be empty");
+  if (!args.purposeOfTranche) throw new DomainError("purposeOfTranche must not be empty");
+  if (!(args.cumulativeDisbursed >= args.trancheAmount)) throw new DomainError("cumulativeDisbursed must be at least trancheAmount");
+  if (!(args.remainingFacility >= 0)) throw new DomainError("remainingFacility must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO capital_call_record
+         (cac_reg_number, business_name, facility_ref, tranche_number, tranche_amount, disbursement_date,
+          purpose_of_tranche, disbursement_ref, cumulative_disbursed, remaining_facility)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef, args.trancheNumber, args.trancheAmount, args.disbursementDate,
+        args.purposeOfTranche, args.disbursementRef, args.cumulativeDisbursed, args.remainingFacility,
+      ],
+    );
+    return { capitalCallRecordId: rows[0].id };
+  });
+}
+export const createCapitalCallRecord = withAuthorization(["financialInstitution"], createCapitalCallRecordImpl);
+
+export async function listCapitalCallRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM capital_call_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-Third Slice: MurabahahContract instruments (Batch D) ──
+// CreditCovenant, GuaranteeAgreement, TakafulPolicy are all created
+// directly by financialInstitution against a live MurabahahContract -- no
+// exercised choice creates any of them in the real Daml.
+
+// ─── CreditCovenant (financialInstitution creates directly + RecordCovenantMeasurement, vetify) ──
+
+interface CreateCreditCovenantArgs {
+  covenantType: string;
+  threshold: number;
+  measurementFrequency: string;
+}
+
+async function createCreditCovenantImpl(session: SessionContext, contractId: number, args: CreateCreditCovenantArgs) {
+  if (!(args.threshold > 0)) throw new DomainError("threshold must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO credit_covenant (murabahah_contract_id, cac_reg_number, business_name, covenant_type, threshold, measurement_frequency)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [contractId, contract.cac_reg_number, contract.business_name, args.covenantType, args.threshold, args.measurementFrequency],
+    );
+    return { creditCovenantId: created[0].id };
+  });
+}
+export const createCreditCovenant = withAuthorization(["financialInstitution"], createCreditCovenantImpl);
+
+interface RecordCovenantMeasurementArgs {
+  measuredValue: number;
+  measureDate: string;
+  measuredBy: string;
+}
+
+async function recordCovenantMeasurementImpl(session: SessionContext, covenantId: number, args: RecordCovenantMeasurementArgs) {
+  if (!args.measuredBy) throw new DomainError("Measured-by must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM credit_covenant WHERE id = $1", [covenantId]);
+    const covenant = rows[0];
+    if (!covenant) throw new DomainError("CreditCovenant not found");
+
+    const threshold = Number(covenant.threshold);
+    const { rows: created } = await client.query(
+      `INSERT INTO covenant_measurement_record
+         (credit_covenant_id, cac_reg_number, business_name, covenant_type, threshold, measured_value, measure_date, measured_by, breached)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        covenantId, covenant.cac_reg_number, covenant.business_name, covenant.covenant_type, threshold,
+        args.measuredValue, args.measureDate, args.measuredBy, args.measuredValue < threshold,
+      ],
+    );
+    return { covenantMeasurementRecordId: created[0].id };
+  });
+}
+export const recordCovenantMeasurement = withAuthorization(["vetify"], recordCovenantMeasurementImpl);
+
+export async function listCreditCovenants(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM credit_covenant ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+export async function listCovenantMeasurementRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM covenant_measurement_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── GuaranteeAgreement (financialInstitution creates directly + EnforceGuarantee/ReleaseGuarantee) ──
+// "guarantor" collapses to the guarantorName/guarantorId text fields --
+// no natural session party role exists for a one-off individual guarantor.
+
+interface CreateGuaranteeAgreementArgs {
+  guaranteeType: string;
+  guaranteedAmount: number;
+  guarantorName: string;
+  guarantorId: string;
+  effectiveDate: string;
+  expiryDate?: string | null;
+}
+
+async function createGuaranteeAgreementImpl(session: SessionContext, contractId: number, args: CreateGuaranteeAgreementArgs) {
+  if (!args.guaranteeType) throw new DomainError("guaranteeType must not be empty");
+  if (!(args.guaranteedAmount > 0)) throw new DomainError("guaranteedAmount must be positive");
+  if (!args.guarantorName) throw new DomainError("guarantorName must not be empty");
+  if (!args.guarantorId) throw new DomainError("guarantorId must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO guarantee_agreement
+         (murabahah_contract_id, cac_reg_number, business_name, facility_ref, guarantee_type, guaranteed_amount,
+          guarantor_name, guarantor_id, effective_date, expiry_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        contractId, contract.cac_reg_number, contract.business_name, contract.facility_ref, args.guaranteeType, args.guaranteedAmount,
+        args.guarantorName, args.guarantorId, args.effectiveDate, args.expiryDate ?? null,
+      ],
+    );
+    return { guaranteeAgreementId: created[0].id };
+  });
+}
+export const createGuaranteeAgreement = withAuthorization(["financialInstitution"], createGuaranteeAgreementImpl);
+
+async function enforceGuaranteeImpl(session: SessionContext, guaranteeId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT guarantee_status FROM guarantee_agreement WHERE id = $1 FOR UPDATE", [guaranteeId]);
+    const guarantee = rows[0];
+    if (!guarantee) throw new DomainError("GuaranteeAgreement not found");
+    if (guarantee.guarantee_status !== "GuaranteeActive") throw new DomainError("Can only enforce an Active guarantee");
+
+    await client.query(`UPDATE guarantee_agreement SET guarantee_status = 'GuaranteeEnforced', updated_at = now() WHERE id = $1`, [guaranteeId]);
+    return { guaranteeAgreementId: guaranteeId };
+  });
+}
+export const enforceGuarantee = withAuthorization(["financialInstitution"], enforceGuaranteeImpl);
+
+async function releaseGuaranteeImpl(session: SessionContext, guaranteeId: number, args: { note: string }) {
+  if (!args.note) throw new DomainError("Release note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT guarantee_status FROM guarantee_agreement WHERE id = $1 FOR UPDATE", [guaranteeId]);
+    const guarantee = rows[0];
+    if (!guarantee) throw new DomainError("GuaranteeAgreement not found");
+    if (guarantee.guarantee_status !== "GuaranteeActive") throw new DomainError("Can only release an Active guarantee");
+
+    await client.query(`UPDATE guarantee_agreement SET guarantee_status = 'GuaranteeReleased', updated_at = now() WHERE id = $1`, [guaranteeId]);
+    return { guaranteeAgreementId: guaranteeId };
+  });
+}
+export const releaseGuarantee = withAuthorization(["financialInstitution"], releaseGuaranteeImpl);
+
+export async function listGuaranteeAgreements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM guarantee_agreement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── TakafulPolicy (financialInstitution creates directly; immutable) ─────
+
+interface CreateTakafulPolicyArgs {
+  policyNumber: string;
+  takafulOperator: string;
+  coverageType: string;
+  coverageAmount: number;
+  premiumAmount: number;
+  startDate: string;
+  expiryDate: string;
+  assetRef?: string | null;
+}
+
+async function createTakafulPolicyImpl(session: SessionContext, contractId: number, args: CreateTakafulPolicyArgs) {
+  if (!(args.premiumAmount > 0)) throw new DomainError("premiumAmount must be positive");
+  if (!(args.coverageAmount > 0)) throw new DomainError("coverageAmount must be positive");
+  if (!(new Date(args.expiryDate).getTime() > new Date(args.startDate).getTime())) {
+    throw new DomainError("expiryDate must be later than startDate");
+  }
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1", [contractId]);
+    const contract = rows[0];
+    if (!contract) throw new DomainError("MurabahahContract not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO takaful_policy
+         (murabahah_contract_id, cac_reg_number, business_name, policy_number, takaful_operator, coverage_type,
+          coverage_amount, premium_amount, start_date, expiry_date, asset_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        contractId, contract.cac_reg_number, contract.business_name, args.policyNumber, args.takafulOperator, args.coverageType,
+        args.coverageAmount, args.premiumAmount, args.startDate, args.expiryDate, args.assetRef ?? null,
+      ],
+    );
+    return { takafulPolicyId: created[0].id };
+  });
+}
+export const createTakafulPolicy = withAuthorization(["financialInstitution"], createTakafulPolicyImpl);
+
+export async function listTakafulPolicies(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM takaful_policy ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-Fourth Slice: SARReport + RevokeCertification (Batch E) ──
+
+// ─── SARReport (vetify creates directly; no business observer; immutable) ──
+
+interface CreateSarReportArgs {
+  cacRegNumber: string;
+  businessName: string;
+  sarRef: string;
+  suspiciousActivity: string;
+  reportDate: string;
+  reportedByParty: string;
+  confidential?: boolean;
+}
+
+async function createSarReportImpl(session: SessionContext, args: CreateSarReportArgs) {
+  if (!args.sarRef) throw new DomainError("sarRef must not be empty");
+  if (!args.suspiciousActivity) throw new DomainError("suspiciousActivity must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO sar_report (cac_reg_number, business_name, sar_ref, suspicious_activity, report_date, reported_by_party, confidential)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.sarRef, args.suspiciousActivity, args.reportDate, args.reportedByParty, args.confidential ?? true],
+    );
+    return { sarReportId: rows[0].id };
+  });
+}
+export const createSarReport = withAuthorization(["vetify"], createSarReportImpl);
+
+export async function listSarReports(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM sar_report ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RevokeCertification (ShariahContractCertification, advisor) ──
+// Named as deferred since this migration's very first Murabahah slice --
+// consuming, archives the certification (so AcceptProposal's fetch fails,
+// blocking execution until a fresh certification is issued), creates an
+// immutable ShariahCertificationRevocation audit record.
+
+interface RevokeCertificationArgs {
+  revocationRef: string;
+  reason: string;
+  revokedBy: string;
+}
+
+async function revokeCertificationImpl(session: SessionContext, certificationId: number, args: RevokeCertificationArgs) {
+  if (!args.revocationRef) throw new DomainError("Revocation reference must not be empty");
+  if (!args.reason) throw new DomainError("Revocation reason must not be empty");
+  if (!args.revokedBy) throw new DomainError("Revoking member must be named");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM shariah_contract_certification WHERE id = $1 FOR UPDATE",
+      [certificationId],
+    );
+    const cert = rows[0];
+    if (!cert) throw new DomainError("ShariahContractCertification not found");
+    if (cert.archived_at) throw new DomainError("ShariahContractCertification is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO shariah_certification_revocation
+         (shariah_contract_certification_id, facility_ref, cac_reg_number, business_name,
+          original_certification_ref, revocation_ref, reason, revoked_by, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       RETURNING id`,
+      [
+        certificationId, cert.facility_ref, cert.cac_reg_number, cert.business_name,
+        cert.certification_ref, args.revocationRef, args.reason, args.revokedBy,
+      ],
+    );
+    const shariahCertificationRevocationId = created[0].id;
+
+    await client.query(
+      `UPDATE shariah_contract_certification
+         SET archived_at = now(), superseded_by_kind = 'shariah_certification_revocation', superseded_by_id = $2
+         WHERE id = $1`,
+      [certificationId, shariahCertificationRevocationId],
+    );
+    return { shariahCertificationRevocationId };
+  });
+}
+export const revokeCertification = withAuthorization(["advisor"], revokeCertificationImpl);
+
+export async function listShariahCertificationRevocations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_certification_revocation ORDER BY created_at DESC`);
     return rows;
   });
 }
