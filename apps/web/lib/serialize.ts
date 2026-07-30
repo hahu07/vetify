@@ -299,6 +299,30 @@ export function serializeAssetPurchaseRecord(row: Record<string, unknown>) {
   };
 }
 
+export function serializeAssetRejectionRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    defectDescription: row.defect_description,
+    rejectedAt: row.rejected_at,
+  };
+}
+
+export function serializeAcquisitionCancellationRequest(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    status: row.status,
+    resolvedAt: row.resolved_at ?? null,
+  };
+}
+
 export function serializeMurabahahProposal(row: Record<string, unknown>) {
   return {
     id: String(row.id),

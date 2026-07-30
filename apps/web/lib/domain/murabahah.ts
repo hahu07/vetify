@@ -426,6 +426,170 @@ async function offerMurabahahImpl(session: SessionContext, recordId: number, arg
 }
 export const offerMurabahah = withAuthorization(["financialInstitution"], offerMurabahahImpl);
 
+// ─── Pre-Qabdh rejection/replacement/cancellation (AssetPurchaseRecord) ───
+// Phase 2, Twenty-Seventh Slice. Deferred since migration 006's own header
+// ("supporting/exception choices" named out of scope at the time). Ports
+// RejectDelivery, ProceedWithReplacement, RequestCancellation, and
+// ConfirmCancellation/RejectCancellation.
+
+// ─── Choice: RejectDelivery (AssetPurchaseRecord, business) ───────────────
+// Nonconsuming -- the AssetPurchaseRecord stays live; the FI must replace
+// the asset (ProceedWithReplacement) or the parties agree to cancel
+// (RequestCancellation -> ConfirmCancellation).
+
+async function rejectDeliveryImpl(
+  session: SessionContext,
+  recordId: number,
+  args: { reason: string; defectDescription: string },
+) {
+  if (!args.reason) throw new DomainError("Rejection reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.delivery_acknowledged) throw new DomainError("Cannot reject an already-acknowledged delivery");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO asset_rejection_record
+         (asset_purchase_record_id, cac_reg_number, business_name, reason, defect_description, rejected_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.reason, args.defectDescription ?? ""],
+    );
+    return { assetRejectionRecordId: created[0].id };
+  });
+}
+export const rejectDelivery = withAuthorization(["business"], rejectDeliveryImpl);
+
+export async function listAssetRejectionRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM asset_rejection_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: ProceedWithReplacement (AssetPurchaseRecord, financialInstitution) ──
+// The real Daml body is `create this with <replacement fields>, ancillary
+// costs reset to 0.0` -- same keyless field-replace shape as Revalue
+// (Twenty-Sixth Slice), collapses to a plain UPDATE rather than an
+// archive/recreate pair.
+
+async function proceedWithReplacementImpl(
+  session: SessionContext,
+  recordId: number,
+  args: { newActualCost: number; newPurchaseDate: string; newInvoiceRef: string; replacementNote: string },
+) {
+  if (!(args.newActualCost > 0)) throw new DomainError("Replacement cost must be positive");
+  if (!args.newInvoiceRef) throw new DomainError("Invoice reference must not be empty");
+  if (!args.replacementNote) throw new DomainError("Replacement note must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const totalAcquisitionCost = args.newActualCost;
+    await client.query(
+      `UPDATE asset_purchase_record
+         SET actual_cost = $2, purchase_date = $3, invoice_ref = $4,
+             freight_cost = 0, customs_duty = 0, insurance_premium = 0, other_acquisition_costs = 0,
+             total_acquisition_cost = $5, delivery_acknowledged = false, updated_at = now()
+         WHERE id = $1`,
+      [recordId, args.newActualCost, args.newPurchaseDate, args.newInvoiceRef, totalAcquisitionCost],
+    );
+    return { assetPurchaseRecordId: recordId };
+  });
+}
+export const proceedWithReplacement = withAuthorization(["financialInstitution"], proceedWithReplacementImpl);
+
+// ─── Choice: RequestCancellation (AssetPurchaseRecord, business) ──────────
+// Nonconsuming -- the AssetPurchaseRecord stays live until the FI confirms.
+
+async function requestCancellationImpl(session: SessionContext, recordId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Cancellation reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO acquisition_cancellation_request (asset_purchase_record_id, cac_reg_number, business_name, reason)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.reason],
+    );
+    return { acquisitionCancellationRequestId: created[0].id };
+  });
+}
+export const requestCancellation = withAuthorization(["business"], requestCancellationImpl);
+
+// ─── Choice: ConfirmCancellation (AssetPurchaseRecord, financialInstitution) ──
+// Consuming on AssetPurchaseRecord -- the real Daml body exercises
+// AcceptCancellation on the request as an atomic sub-step, then archives
+// this purchase record too. Returns `()` -- no successor, archives with
+// superseded_by_kind left NULL, same shape as ExpireProposal/WithdrawProposal.
+
+async function confirmCancellationImpl(session: SessionContext, recordId: number, args: { requestId: number }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: reqRows } = await client.query(
+      "SELECT * FROM acquisition_cancellation_request WHERE id = $1 FOR UPDATE",
+      [args.requestId],
+    );
+    const request = reqRows[0];
+    if (!request) throw new DomainError("AcquisitionCancellationRequest not found");
+    if (Number(request.asset_purchase_record_id) !== recordId) {
+      throw new DomainError("AcquisitionCancellationRequest does not belong to this AssetPurchaseRecord");
+    }
+    if (request.status !== "Pending") throw new DomainError("AcquisitionCancellationRequest is not pending");
+
+    await client.query(
+      `UPDATE acquisition_cancellation_request SET status = 'Confirmed', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [args.requestId],
+    );
+    await client.query(
+      `UPDATE asset_purchase_record SET archived_at = now(), updated_at = now() WHERE id = $1`,
+      [recordId],
+    );
+    return { assetPurchaseRecordId: recordId };
+  });
+}
+export const confirmCancellation = withAuthorization(["financialInstitution"], confirmCancellationImpl);
+
+// ─── Choice: RejectCancellation (AcquisitionCancellationRequest, financialInstitution) ──
+// The AssetPurchaseRecord remains live.
+
+async function rejectCancellationImpl(session: SessionContext, requestId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM acquisition_cancellation_request WHERE id = $1 FOR UPDATE",
+      [requestId],
+    );
+    const request = rows[0];
+    if (!request) throw new DomainError("AcquisitionCancellationRequest not found");
+    if (request.status !== "Pending") throw new DomainError("AcquisitionCancellationRequest is not pending");
+
+    await client.query(
+      `UPDATE acquisition_cancellation_request SET status = 'Rejected', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [requestId],
+    );
+    return { acquisitionCancellationRequestId: requestId };
+  });
+}
+export const rejectCancellation = withAuthorization(["financialInstitution"], rejectCancellationImpl);
+
+export async function listAcquisitionCancellationRequests(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM acquisition_cancellation_request ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 // ─── Choice: CertifyShariahTerms (MurabahahProposal, advisor+vetify dual) ──
 // G11 -- the SSB's per-contract sign-off, closing the AAOIFI GSIFI No. 1/2
 // governance loop the Stage-3 sector pre-check alone leaves open.
