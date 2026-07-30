@@ -646,6 +646,46 @@ export async function listApprovedBusinesses(session: SessionContext) {
   });
 }
 
+// ─── Choice: Revoke (ApprovedBusiness, vetify) ─────────────────────────────
+// Phase 2, Thirty-Fourth Slice (Batch E). Consuming -- archives
+// ApprovedBusiness, creates an immutable RevocationRecord. Same
+// archive-with-successor shape as every other decline/withdraw/cancel
+// choice in this migration.
+
+async function revokeBusinessImpl(session: SessionContext, approvedBusinessId: number, args: { reason: string; revokedBy: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  if (!args.revokedBy) throw new DomainError("revokedBy must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM approved_business WHERE id = $1 FOR UPDATE", [approvedBusinessId]);
+    const business = rows[0];
+    if (!business) throw new DomainError("ApprovedBusiness not found");
+    if (business.archived_at) throw new DomainError("ApprovedBusiness is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO revocation_record
+         (approved_business_id, cac_reg_number, business_name, verification_ref, compliance_ref, reason, revoked_by, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+       RETURNING id`,
+      [approvedBusinessId, business.cac_reg_number, business.business_name, business.verification_ref, business.compliance_ref, args.reason, args.revokedBy],
+    );
+    const revocationRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE approved_business SET archived_at = now(), superseded_by_kind = 'revocation_record', superseded_by_id = $2 WHERE id = $1`,
+      [approvedBusinessId, revocationRecordId],
+    );
+    return { revocationRecordId };
+  });
+}
+export const revokeBusiness = withAuthorization(["vetify"], revokeBusinessImpl);
+
+export async function listRevocationRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM revocation_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
 export async function listVerificationResults(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(

@@ -81,6 +81,20 @@ export function serializeApprovedBusiness(row: Record<string, unknown>) {
   };
 }
 
+export function serializeRevocationRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    approvedBusinessId: String(row.approved_business_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    verificationRef: row.verification_ref,
+    complianceRef: row.compliance_ref,
+    reason: row.reason,
+    revokedBy: row.revoked_by,
+    revokedAt: row.revoked_at,
+  };
+}
+
 // node-postgres returns NUMERIC columns as strings (deliberately, to avoid
 // silent float rounding -- see addendum A in web2-migration-design.md).
 // Converting to a JS number here is fine for a demo/PoC API response (no
@@ -456,6 +470,7 @@ export function serializeRepaymentRecord(row: Record<string, unknown>) {
     amountPaid: num(row.amount_paid),
     remainingBalance: num(row.remaining_balance),
     wasLate: row.was_late,
+    directDebitRef: row.direct_debit_ref ?? undefined,
   };
 }
 
@@ -1170,5 +1185,35 @@ export function serializePartialIbraGrant(row: Record<string, unknown>) {
     approvedSettlementAmount: num(row.approved_settlement_amount),
     effectiveDate: row.effective_date,
     grantedAt: row.granted_at,
+  };
+}
+
+// ─── Phase 2, Thirty-Fourth Slice: SARReport + RevokeCertification (Batch E) ──
+
+export function serializeSarReport(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    sarRef: row.sar_ref,
+    suspiciousActivity: row.suspicious_activity,
+    reportDate: row.report_date,
+    reportedByParty: row.reported_by_party,
+    confidential: row.confidential,
+  };
+}
+
+export function serializeShariahCertificationRevocation(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    shariahContractCertificationId: String(row.shariah_contract_certification_id),
+    facilityRef: row.facility_ref,
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    originalCertificationRef: row.original_certification_ref,
+    revocationRef: row.revocation_ref,
+    reason: row.reason,
+    revokedBy: row.revoked_by,
+    revokedAt: row.revoked_at,
   };
 }

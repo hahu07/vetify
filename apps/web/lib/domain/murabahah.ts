@@ -887,10 +887,28 @@ interface RecordPaymentArgs {
   paymentDate: string;
   amountPaid: number;
   installmentNo: number;
+  // Phase 2, Thirty-Fourth Slice (Batch E) -- PaymentIdempotencyGuard.
+  // Only set for Direct Debit collections; manual/cash payments (undefined)
+  // are not deduplicated this way, mirroring the real Daml's `Optional Text`.
+  directDebitRef?: string | null;
 }
 
 async function recordPaymentImpl(session: SessionContext, contractId: number, args: RecordPaymentArgs) {
   return withTransaction(session, async (client) => {
+    // PaymentIdempotencyGuard (Batch E) -- a real Postgres UNIQUE constraint,
+    // atomic within this transaction. Only Direct Debit collections carry a
+    // ref; manual/cash payments (directDebitRef undefined/null) skip this.
+    if (args.directDebitRef) {
+      try {
+        await client.query(`INSERT INTO payment_idempotency_guard (direct_debit_ref) VALUES ($1)`, [args.directDebitRef]);
+      } catch (err) {
+        if (err && typeof err === "object" && "code" in err && err.code === "23505") {
+          throw new DomainError(`Payment with directDebitRef ${args.directDebitRef} has already been recorded`);
+        }
+        throw err;
+      }
+    }
+
     const { rows } = await client.query("SELECT * FROM murabahah_contract WHERE id = $1 FOR UPDATE", [contractId]);
     const contract = rows[0];
     if (!contract) throw new DomainError("MurabahahContract not found");
@@ -933,8 +951,8 @@ async function recordPaymentImpl(session: SessionContext, contractId: number, ar
     const { rows: recordRows } = await client.query(
       `INSERT INTO repayment_record
          (murabahah_contract_id, facility_ref, cac_reg_number, business_name, installment_no,
-          due_date, payment_date, amount_paid, remaining_balance, was_late)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          due_date, payment_date, amount_paid, remaining_balance, was_late, direct_debit_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         contractId,
@@ -947,6 +965,7 @@ async function recordPaymentImpl(session: SessionContext, contractId: number, ar
         args.amountPaid,
         newBalance,
         isLate,
+        args.directDebitRef ?? null,
       ],
     );
     const repaymentRecordId = recordRows[0].id;
@@ -3739,6 +3758,98 @@ export const createTakafulPolicy = withAuthorization(["financialInstitution"], c
 export async function listTakafulPolicies(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM takaful_policy ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Phase 2, Thirty-Fourth Slice: SARReport + RevokeCertification (Batch E) ──
+
+// ─── SARReport (vetify creates directly; no business observer; immutable) ──
+
+interface CreateSarReportArgs {
+  cacRegNumber: string;
+  businessName: string;
+  sarRef: string;
+  suspiciousActivity: string;
+  reportDate: string;
+  reportedByParty: string;
+  confidential?: boolean;
+}
+
+async function createSarReportImpl(session: SessionContext, args: CreateSarReportArgs) {
+  if (!args.sarRef) throw new DomainError("sarRef must not be empty");
+  if (!args.suspiciousActivity) throw new DomainError("suspiciousActivity must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO sar_report (cac_reg_number, business_name, sar_ref, suspicious_activity, report_date, reported_by_party, confidential)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [args.cacRegNumber, args.businessName, args.sarRef, args.suspiciousActivity, args.reportDate, args.reportedByParty, args.confidential ?? true],
+    );
+    return { sarReportId: rows[0].id };
+  });
+}
+export const createSarReport = withAuthorization(["vetify"], createSarReportImpl);
+
+export async function listSarReports(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM sar_report ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RevokeCertification (ShariahContractCertification, advisor) ──
+// Named as deferred since this migration's very first Murabahah slice --
+// consuming, archives the certification (so AcceptProposal's fetch fails,
+// blocking execution until a fresh certification is issued), creates an
+// immutable ShariahCertificationRevocation audit record.
+
+interface RevokeCertificationArgs {
+  revocationRef: string;
+  reason: string;
+  revokedBy: string;
+}
+
+async function revokeCertificationImpl(session: SessionContext, certificationId: number, args: RevokeCertificationArgs) {
+  if (!args.revocationRef) throw new DomainError("Revocation reference must not be empty");
+  if (!args.reason) throw new DomainError("Revocation reason must not be empty");
+  if (!args.revokedBy) throw new DomainError("Revoking member must be named");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      "SELECT * FROM shariah_contract_certification WHERE id = $1 FOR UPDATE",
+      [certificationId],
+    );
+    const cert = rows[0];
+    if (!cert) throw new DomainError("ShariahContractCertification not found");
+    if (cert.archived_at) throw new DomainError("ShariahContractCertification is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO shariah_certification_revocation
+         (shariah_contract_certification_id, facility_ref, cac_reg_number, business_name,
+          original_certification_ref, revocation_ref, reason, revoked_by, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+       RETURNING id`,
+      [
+        certificationId, cert.facility_ref, cert.cac_reg_number, cert.business_name,
+        cert.certification_ref, args.revocationRef, args.reason, args.revokedBy,
+      ],
+    );
+    const shariahCertificationRevocationId = created[0].id;
+
+    await client.query(
+      `UPDATE shariah_contract_certification
+         SET archived_at = now(), superseded_by_kind = 'shariah_certification_revocation', superseded_by_id = $2
+         WHERE id = $1`,
+      [certificationId, shariahCertificationRevocationId],
+    );
+    return { shariahCertificationRevocationId };
+  });
+}
+export const revokeCertification = withAuthorization(["advisor"], revokeCertificationImpl);
+
+export async function listShariahCertificationRevocations(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM shariah_certification_revocation ORDER BY created_at DESC`);
     return rows;
   });
 }

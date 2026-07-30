@@ -11,5 +11,6 @@ export const POST = withRoute(async (session, req) => {
     paymentDate: body.paymentDate,
     amountPaid: body.amountPaid,
     installmentNo: body.installmentNo,
+    directDebitRef: body.directDebitRef ?? null,
   });
 });
