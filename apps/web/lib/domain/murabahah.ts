@@ -3085,3 +3085,348 @@ export async function listCharityOrganizationRegistries(session: SessionContext)
     return rows;
   });
 }
+
+// ─── Phase 2, Thirty-First Slice: AssetPurchaseRecord supporting records (Batch B) ──
+// Four are choices on the already-ported AssetPurchaseRecord
+// (RecordDeliveryMilestone, RecordSupplierFailure, RecordSupplierPayment,
+// RegisterDocument); PurchaseOrder/CapitalCallRecord are created directly
+// by financialInstitution, no dependency on an AssetPurchaseRecord fixture.
+
+// ─── Choice: RecordDeliveryMilestone (AssetPurchaseRecord, business) ──────
+// Nonconsuming -- the purchase record stays live.
+
+interface RecordDeliveryMilestoneArgs {
+  milestoneDescription: string;
+  quantityDelivered: number;
+  milestoneDate: string;
+  evidenceRef?: string | null;
+}
+
+async function recordDeliveryMilestoneImpl(session: SessionContext, recordId: number, args: RecordDeliveryMilestoneArgs) {
+  if (!args.milestoneDescription) throw new DomainError("Milestone description must not be empty");
+  if (!(args.quantityDelivered > 0)) throw new DomainError("Quantity delivered must be positive");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.delivery_acknowledged) throw new DomainError("Cannot record milestone after delivery is fully acknowledged");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO delivery_milestone
+         (asset_purchase_record_id, cac_reg_number, business_name, milestone_description, quantity_delivered, milestone_date, evidence_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.milestoneDescription, args.quantityDelivered, args.milestoneDate, args.evidenceRef ?? null],
+    );
+    return { deliveryMilestoneId: created[0].id };
+  });
+}
+export const recordDeliveryMilestone = withAuthorization(["business"], recordDeliveryMilestoneImpl);
+
+export async function listDeliveryMilestones(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM delivery_milestone ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordSupplierFailure (AssetPurchaseRecord, financialInstitution) ──
+// Consuming -- archives the AssetPurchaseRecord; the Wakala sub-flow must restart.
+
+interface RecordSupplierFailureArgs {
+  failureType: "SupplierCancelled" | "SupplierBankrupt" | "RefundIssued";
+  failureDescription: string;
+  refundAmount?: number | null;
+}
+
+async function recordSupplierFailureImpl(session: SessionContext, recordId: number, args: RecordSupplierFailureArgs) {
+  if (!args.failureDescription) throw new DomainError("Failure description must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1 FOR UPDATE", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+    if (record.archived_at) throw new DomainError("AssetPurchaseRecord is no longer active");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_failure_record
+         (asset_purchase_record_id, cac_reg_number, business_name, failure_type, failure_description, refund_amount, failed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, args.failureType, args.failureDescription, args.refundAmount ?? null],
+    );
+    const supplierFailureRecordId = created[0].id;
+
+    await client.query(
+      `UPDATE asset_purchase_record
+         SET archived_at = now(), superseded_by_kind = 'supplier_failure_record', superseded_by_id = $2
+         WHERE id = $1`,
+      [recordId, supplierFailureRecordId],
+    );
+    return { supplierFailureRecordId };
+  });
+}
+export const recordSupplierFailure = withAuthorization(["financialInstitution"], recordSupplierFailureImpl);
+
+export async function listSupplierFailureRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_failure_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RecordSupplierPayment (AssetPurchaseRecord, financialInstitution) ──
+// Nonconsuming -- the purchase record stays active.
+
+interface RecordSupplierPaymentArgs {
+  supplierDetails?: Record<string, unknown> | null;
+  amountPaid: number;
+  paymentDate: string;
+  paymentRef: string;
+  bankConfirmationRef?: string | null;
+}
+
+async function recordSupplierPaymentImpl(session: SessionContext, recordId: number, args: RecordSupplierPaymentArgs) {
+  if (!(args.amountPaid > 0)) throw new DomainError("Payment amount must be positive");
+  if (!args.paymentRef) throw new DomainError("Payment reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO supplier_payment_record
+         (asset_purchase_record_id, cac_reg_number, business_name, supplier_details, amount_paid, payment_date,
+          payment_ref, bank_confirmation_ref, purchased_via_wakala)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        recordId, record.cac_reg_number, record.business_name, args.supplierDetails ? JSON.stringify(args.supplierDetails) : null,
+        args.amountPaid, args.paymentDate, args.paymentRef, args.bankConfirmationRef ?? null, record.purchased_via_wakala,
+      ],
+    );
+    return { supplierPaymentRecordId: created[0].id };
+  });
+}
+export const recordSupplierPayment = withAuthorization(["financialInstitution"], recordSupplierPaymentImpl);
+
+export async function listSupplierPaymentRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM supplier_payment_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── Choice: RegisterDocument (AssetPurchaseRecord, financialInstitution) ─
+// Nonconsuming, creates a managed-lifecycle DocumentEntry.
+
+interface DocumentRefArgs {
+  docType: string;
+  contentHash: string;
+  storageRef: string;
+}
+
+async function registerDocumentImpl(session: SessionContext, recordId: number, args: { documentRef: DocumentRefArgs; registeredBy: string }) {
+  if (!args.registeredBy) throw new DomainError("Registered-by name must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM asset_purchase_record WHERE id = $1", [recordId]);
+    const record = rows[0];
+    if (!record) throw new DomainError("AssetPurchaseRecord not found");
+
+    const { rows: created } = await client.query(
+      `INSERT INTO document_entry (asset_purchase_record_id, cac_reg_number, business_name, document_ref, registered_by, uploaded_at)
+       VALUES ($1, $2, $3, $4, $5, now())
+       RETURNING id`,
+      [recordId, record.cac_reg_number, record.business_name, JSON.stringify(args.documentRef), args.registeredBy],
+    );
+    return { documentEntryId: created[0].id };
+  });
+}
+export const registerDocument = withAuthorization(["financialInstitution"], registerDocumentImpl);
+
+// ─── Choice: VerifyDocument (DocumentEntry, vetify) ───────────────────────
+
+async function verifyDocumentImpl(session: SessionContext, documentEntryId: number, args: { verifyNote?: string | null }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT verified_at, superseded FROM document_entry WHERE id = $1 FOR UPDATE", [documentEntryId]);
+    const entry = rows[0];
+    if (!entry) throw new DomainError("DocumentEntry not found");
+    if (entry.verified_at !== null) throw new DomainError("Document already verified");
+    if (entry.superseded) throw new DomainError("Document is superseded");
+
+    await client.query(`UPDATE document_entry SET verified_at = now(), updated_at = now() WHERE id = $1`, [documentEntryId]);
+    return { documentEntryId };
+  });
+}
+export const verifyDocument = withAuthorization(["vetify"], verifyDocumentImpl);
+
+// ─── Choice: SupersedeDocument (DocumentEntry, financialInstitution) ──────
+
+async function supersedeDocumentImpl(
+  session: SessionContext,
+  documentEntryId: number,
+  args: { newDocumentRef: DocumentRefArgs; reason: string },
+) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT superseded FROM document_entry WHERE id = $1 FOR UPDATE", [documentEntryId]);
+    const entry = rows[0];
+    if (!entry) throw new DomainError("DocumentEntry not found");
+    if (entry.superseded) throw new DomainError("Document is already superseded");
+
+    await client.query(
+      `UPDATE document_entry SET document_ref = $2, verified_at = NULL, superseded = false, updated_at = now() WHERE id = $1`,
+      [documentEntryId, JSON.stringify(args.newDocumentRef)],
+    );
+    return { documentEntryId };
+  });
+}
+export const supersedeDocument = withAuthorization(["financialInstitution"], supersedeDocumentImpl);
+
+export async function listDocumentEntries(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM document_entry ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── PurchaseOrder (financialInstitution creates directly + lifecycle choices) ──
+
+interface CreatePurchaseOrderArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  supplierName: string;
+  supplierDetails: Record<string, unknown>;
+  orderedItems: Record<string, unknown>[];
+  totalOrderValue: number;
+  deliveryDeadline: string;
+  poRef: string;
+}
+
+async function createPurchaseOrderImpl(session: SessionContext, args: CreatePurchaseOrderArgs) {
+  if (!(args.totalOrderValue > 0)) throw new DomainError("totalOrderValue must be positive");
+  if (!args.poRef) throw new DomainError("poRef must not be empty");
+  if (!args.orderedItems || args.orderedItems.length === 0) throw new DomainError("orderedItems must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO purchase_order
+         (cac_reg_number, business_name, facility_ref, supplier_name, supplier_details, ordered_items,
+          total_order_value, delivery_deadline, po_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef, args.supplierName, JSON.stringify(args.supplierDetails),
+        JSON.stringify(args.orderedItems), args.totalOrderValue, args.deliveryDeadline, args.poRef,
+      ],
+    );
+    return { purchaseOrderId: rows[0].id };
+  });
+}
+export const createPurchaseOrder = withAuthorization(["financialInstitution"], createPurchaseOrderImpl);
+
+async function confirmPOImpl(session: SessionContext, poId: number, args: { confirmationRef: string }) {
+  if (!args.confirmationRef) throw new DomainError("Confirmation reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    if (!rows[0]) throw new DomainError("PurchaseOrder not found");
+    await client.query(`UPDATE purchase_order SET status = 'POConfirmed', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const confirmPO = withAuthorization(["financialInstitution"], confirmPOImpl);
+
+async function markPartiallyFulfilledImpl(session: SessionContext, poId: number, args: { deliveryRef: string }) {
+  if (!args.deliveryRef) throw new DomainError("Delivery reference must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POConfirmed" || po.status === "POIssued")) {
+      throw new DomainError("Can only mark Confirmed or Issued PO as partially fulfilled");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POPartiallyFulfilled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const markPartiallyFulfilled = withAuthorization(["financialInstitution"], markPartiallyFulfilledImpl);
+
+async function markFulfilledImpl(session: SessionContext, poId: number, args: { deliveryRef: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POConfirmed" || po.status === "POPartiallyFulfilled")) {
+      throw new DomainError("PO must be Confirmed or PartiallyFulfilled to mark as Fulfilled");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POFulfilled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const markFulfilled = withAuthorization(["financialInstitution"], markFulfilledImpl);
+
+async function cancelPOImpl(session: SessionContext, poId: number, args: { reason: string }) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM purchase_order WHERE id = $1 FOR UPDATE", [poId]);
+    const po = rows[0];
+    if (!po) throw new DomainError("PurchaseOrder not found");
+    if (!(po.status === "POIssued" || po.status === "POConfirmed")) {
+      throw new DomainError("Can only cancel an Issued or Confirmed PO");
+    }
+    await client.query(`UPDATE purchase_order SET status = 'POCancelled', updated_at = now() WHERE id = $1`, [poId]);
+    return { purchaseOrderId: poId };
+  });
+}
+export const cancelPO = withAuthorization(["financialInstitution"], cancelPOImpl);
+
+export async function listPurchaseOrders(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM purchase_order ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── CapitalCallRecord (financialInstitution creates directly; immutable) ──
+
+interface CreateCapitalCallRecordArgs {
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  trancheNumber: number;
+  trancheAmount: number;
+  disbursementDate: string;
+  purposeOfTranche: string;
+  disbursementRef: string;
+  cumulativeDisbursed: number;
+  remainingFacility: number;
+}
+
+async function createCapitalCallRecordImpl(session: SessionContext, args: CreateCapitalCallRecordArgs) {
+  if (!(args.trancheAmount > 0)) throw new DomainError("trancheAmount must be positive");
+  if (!args.disbursementRef) throw new DomainError("disbursementRef must not be empty");
+  if (!args.purposeOfTranche) throw new DomainError("purposeOfTranche must not be empty");
+  if (!(args.cumulativeDisbursed >= args.trancheAmount)) throw new DomainError("cumulativeDisbursed must be at least trancheAmount");
+  if (!(args.remainingFacility >= 0)) throw new DomainError("remainingFacility must be non-negative");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO capital_call_record
+         (cac_reg_number, business_name, facility_ref, tranche_number, tranche_amount, disbursement_date,
+          purpose_of_tranche, disbursement_ref, cumulative_disbursed, remaining_facility)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id`,
+      [
+        args.cacRegNumber, args.businessName, args.facilityRef, args.trancheNumber, args.trancheAmount, args.disbursementDate,
+        args.purposeOfTranche, args.disbursementRef, args.cumulativeDisbursed, args.remainingFacility,
+      ],
+    );
+    return { capitalCallRecordId: rows[0].id };
+  });
+}
+export const createCapitalCallRecord = withAuthorization(["financialInstitution"], createCapitalCallRecordImpl);
+
+export async function listCapitalCallRecords(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM capital_call_record ORDER BY created_at DESC`);
+    return rows;
+  });
+}

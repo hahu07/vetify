@@ -934,3 +934,93 @@ export function serializeCharityOrganizationRegistry(row: Record<string, unknown
     version: row.version,
   };
 }
+
+// ─── Phase 2, Thirty-First Slice: AssetPurchaseRecord supporting records (Batch B) ──
+
+export function serializeDeliveryMilestone(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    milestoneDescription: row.milestone_description,
+    quantityDelivered: num(row.quantity_delivered),
+    milestoneDate: row.milestone_date,
+    evidenceRef: row.evidence_ref ?? null,
+  };
+}
+
+export function serializeSupplierFailureRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    failureType: row.failure_type,
+    failureDescription: row.failure_description,
+    refundAmount: num(row.refund_amount) ?? null,
+    failedAt: row.failed_at,
+  };
+}
+
+export function serializeSupplierPaymentRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    supplierDetails: row.supplier_details ?? null,
+    amountPaid: num(row.amount_paid),
+    paymentDate: row.payment_date,
+    paymentRef: row.payment_ref,
+    bankConfirmationRef: row.bank_confirmation_ref ?? null,
+    purchasedViaWakala: row.purchased_via_wakala,
+  };
+}
+
+export function serializeDocumentEntry(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    assetPurchaseRecordId: String(row.asset_purchase_record_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    documentRef: row.document_ref,
+    registeredBy: row.registered_by,
+    uploadedAt: row.uploaded_at,
+    verifiedAt: row.verified_at ?? null,
+    superseded: row.superseded,
+  };
+}
+
+export function serializePurchaseOrder(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    supplierName: row.supplier_name,
+    supplierDetails: row.supplier_details,
+    orderedItems: row.ordered_items ?? [],
+    totalOrderValue: num(row.total_order_value),
+    deliveryDeadline: row.delivery_deadline,
+    poRef: row.po_ref,
+    issuedAt: row.issued_at,
+    status: row.status,
+  };
+}
+
+export function serializeCapitalCallRecord(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    facilityRef: row.facility_ref,
+    trancheNumber: row.tranche_number,
+    trancheAmount: num(row.tranche_amount),
+    disbursementDate: row.disbursement_date,
+    purposeOfTranche: row.purpose_of_tranche,
+    disbursementRef: row.disbursement_ref,
+    cumulativeDisbursed: num(row.cumulative_disbursed),
+    remainingFacility: num(row.remaining_facility),
+  };
+}
