@@ -2352,3 +2352,240 @@ export function useRejectProvider() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["providers"] }),
   });
 }
+
+// ─── Phase 2, Thirty-Eighth Slice: Collateral & Recovery, Pass 2 ──────────
+// Write-off, demand notice / legal escalation, guarantee agreements, credit
+// covenants -- all ported backend-side in the Thirty-First/Thirty-Third
+// slices (Batch B/D) with no frontend hook coverage until now.
+
+export interface WriteOffRecordItem {
+  id: string;
+  murabahahContractId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  totalFinanced: number;
+  totalRecovered: number;
+  amountWrittenOff: number;
+  writeOffDate: string;
+  writeOffRef: string;
+  writeOffApprovedBy: string;
+}
+
+export function useWriteOffRecords() {
+  return useQuery({ queryKey: ["write-off-records"], queryFn: async () => (await apiClient.get<WriteOffRecordItem[]>("/write-off-records")).data });
+}
+
+export function useWriteOffContract() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, writeOffDate, writeOffRef, totalRecovered, writeOffApprovedBy, proposedByOfficerId, confirmedByOfficerId,
+    }: {
+      id: string; writeOffDate: string; writeOffRef: string; totalRecovered: number;
+      writeOffApprovedBy: string; proposedByOfficerId: string; confirmedByOfficerId: string;
+    }) =>
+      apiClient
+        .post(`/murabahah-contracts/${id}/write-off`, { writeOffDate, writeOffRef, totalRecovered, writeOffApprovedBy, proposedByOfficerId, confirmedByOfficerId })
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["write-off-records"] });
+      qc.invalidateQueries({ queryKey: ["murabahah-contracts"] });
+    },
+  });
+}
+
+export interface DemandNoticeItem {
+  id: string;
+  murabahahContractId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  demandDate: string;
+  outstandingAmount: number;
+  demandRef: string;
+  responseDeadline: string;
+  gsmEligible: boolean;
+  archivedAt?: string | null;
+  supersededByKind?: string | null;
+}
+
+export interface LegalEscalationItem {
+  id: string;
+  demandNoticeId: string;
+  businessName: string;
+  cacRegNumber: string;
+  escalationDate: string;
+  solicitorRef: string;
+  legalAction: string;
+  outstandingAmount: number;
+  courtRef?: string | null;
+  resolvedAt?: string | null;
+}
+
+export function useDemandNotices() {
+  return useQuery({ queryKey: ["demand-notices"], queryFn: async () => (await apiClient.get<DemandNoticeItem[]>("/demand-notices")).data });
+}
+
+export function useIssueDemandNotice() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, demandDate, demandRef, responseDeadline, gsmEligible,
+    }: { id: string; demandDate: string; demandRef: string; responseDeadline: string; gsmEligible: boolean }) =>
+      apiClient.post(`/murabahah-contracts/${id}/issue-demand-notice`, { demandDate, demandRef, responseDeadline, gsmEligible }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["demand-notices"] }),
+  });
+}
+
+export function useWithdrawDemand() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) => apiClient.post(`/demand-notices/${id}/withdraw`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["demand-notices"] }),
+  });
+}
+
+export function useEscalateToLegal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, escalationDate, solicitorRef, legalAction,
+    }: { id: string; escalationDate: string; solicitorRef: string; legalAction: string }) =>
+      apiClient.post(`/demand-notices/${id}/escalate-to-legal`, { escalationDate, solicitorRef, legalAction }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["demand-notices"] });
+      qc.invalidateQueries({ queryKey: ["legal-escalations"] });
+    },
+  });
+}
+
+export function useLegalEscalations() {
+  return useQuery({ queryKey: ["legal-escalations"], queryFn: async () => (await apiClient.get<LegalEscalationItem[]>("/legal-escalations")).data });
+}
+
+export function useRecordCourtOrder() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, courtOrderRef }: { id: string; courtOrderRef: string }) =>
+      apiClient.post(`/legal-escalations/${id}/record-court-order`, { courtOrderRef }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["legal-escalations"] }),
+  });
+}
+
+export function useResolveLegal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) => apiClient.post(`/legal-escalations/${id}/resolve`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["legal-escalations"] }),
+  });
+}
+
+export interface GuaranteeAgreementItem {
+  id: string;
+  murabahahContractId: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef: string;
+  guaranteeType: string;
+  guaranteedAmount: number;
+  guarantorName: string;
+  guarantorId: string;
+  effectiveDate: string;
+  expiryDate?: string | null;
+  guaranteeStatus: "GuaranteeActive" | "GuaranteeReleased" | "GuaranteeEnforced";
+}
+
+export function useGuaranteeAgreements() {
+  return useQuery({ queryKey: ["guarantee-agreements"], queryFn: async () => (await apiClient.get<GuaranteeAgreementItem[]>("/guarantee-agreements")).data });
+}
+
+export function useCreateGuaranteeAgreement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, guaranteeType, guaranteedAmount, guarantorName, guarantorId, effectiveDate, expiryDate,
+    }: {
+      id: string; guaranteeType: string; guaranteedAmount: number; guarantorName: string;
+      guarantorId: string; effectiveDate: string; expiryDate?: string | null;
+    }) =>
+      apiClient
+        .post(`/murabahah-contracts/${id}/create-guarantee`, { guaranteeType, guaranteedAmount, guarantorName, guarantorId, effectiveDate, expiryDate })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["guarantee-agreements"] }),
+  });
+}
+
+export function useEnforceGuarantee() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/guarantee-agreements/${id}/enforce`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["guarantee-agreements"] }),
+  });
+}
+
+export function useReleaseGuarantee() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiClient.post(`/guarantee-agreements/${id}/release`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["guarantee-agreements"] }),
+  });
+}
+
+export interface CreditCovenantItem {
+  id: string;
+  murabahahContractId: string;
+  cacRegNumber: string;
+  businessName: string;
+  covenantType: string;
+  threshold: number;
+  measurementFrequency: string;
+}
+
+export interface CovenantMeasurementRecordItem {
+  id: string;
+  creditCovenantId: string;
+  cacRegNumber: string;
+  businessName: string;
+  covenantType: string;
+  threshold: number;
+  measuredValue: number;
+  measureDate: string;
+  measuredBy: string;
+  breached: boolean;
+}
+
+export function useCreditCovenants() {
+  return useQuery({ queryKey: ["credit-covenants"], queryFn: async () => (await apiClient.get<CreditCovenantItem[]>("/credit-covenants")).data });
+}
+
+export function useCovenantMeasurementRecords() {
+  return useQuery({
+    queryKey: ["covenant-measurement-records"],
+    queryFn: async () => (await apiClient.get<CovenantMeasurementRecordItem[]>("/covenant-measurement-records")).data,
+  });
+}
+
+export function useCreateCreditCovenant() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, covenantType, threshold, measurementFrequency,
+    }: { id: string; covenantType: string; threshold: number; measurementFrequency: string }) =>
+      apiClient.post(`/murabahah-contracts/${id}/create-credit-covenant`, { covenantType, threshold, measurementFrequency }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["credit-covenants"] }),
+  });
+}
+
+export function useRecordCovenantMeasurement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, measuredValue, measureDate, measuredBy,
+    }: { id: string; measuredValue: number; measureDate: string; measuredBy: string }) =>
+      apiClient.post(`/credit-covenants/${id}/record-measurement`, { measuredValue, measureDate, measuredBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["covenant-measurement-records"] }),
+  });
+}

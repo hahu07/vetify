@@ -12,7 +12,11 @@ import {
   useConfirmEnforce,
   useRejectEnforce,
   useOfficers,
+  useCreditCovenants,
+  useCovenantMeasurementRecords,
+  useRecordCovenantMeasurement,
   type PendingCollateralEnforcementItem,
+  type CreditCovenantItem,
 } from "@/lib/apiClient";
 
 // Phase 2, seventh slice: the vetify oversight view of RahnAgreement
@@ -95,10 +99,75 @@ function PendingEnforcementCard({ pending }: { pending: PendingCollateralEnforce
   );
 }
 
+// Phase 2, Thirty-Eighth Slice: RecordCovenantMeasurement is vetify's own
+// portfolio-monitoring job (controller vetify, not financialInstitution,
+// despite CreditCovenant itself being FI-created -- see Thirty-Third
+// Slice's own header note on why).
+
+function CovenantCard({ covenant }: { covenant: CreditCovenantItem }) {
+  const { data: records } = useCovenantMeasurementRecords();
+  const [measuredValue, setMeasuredValue] = useState<number | "">("");
+  const [measureDate, setMeasureDate] = useState(new Date().toISOString().slice(0, 10));
+  const [measuredBy, setMeasuredBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const recordMeasurement = useRecordCovenantMeasurement();
+
+  const covenantRecords = (records ?? []).filter((r) => r.creditCovenantId === covenant.id);
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (measuredValue === "" || !measuredBy.trim()) {
+      setError("Measured value and measured-by are both required");
+      return;
+    }
+    try {
+      await recordMeasurement.mutateAsync({ id: covenant.id, measuredValue: Number(measuredValue), measureDate, measuredBy });
+      setMeasuredValue("");
+      setMeasuredBy("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record measurement");
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-100 bg-surface p-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-gray-900">{covenant.businessName}</p>
+        <span className="text-xs text-gray-400 font-mono">Threshold: {covenant.threshold}</span>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">{covenant.covenantType} · {covenant.measurementFrequency}</p>
+
+      {covenantRecords.length > 0 && (
+        <div className="space-y-1.5 mb-3">
+          {covenantRecords.map((r) => (
+            <div key={r.id} className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-gray-600">{r.measuredBy} · {formatDate(r.measureDate)}</span>
+              <span className={`font-mono ${r.breached ? "text-red-600" : "text-emerald-600"}`}>
+                {r.measuredValue} {r.breached ? "(Breached)" : "(OK)"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2 items-center">
+        <input type="number" step="0.01" className="input text-xs flex-1" placeholder="Measured value" value={measuredValue} onChange={(e) => setMeasuredValue(e.target.value === "" ? "" : Number(e.target.value))} />
+        <input type="date" className="input text-xs" value={measureDate} onChange={(e) => setMeasureDate(e.target.value)} />
+        <input className="input text-xs flex-1" placeholder="Measured by" value={measuredBy} onChange={(e) => setMeasuredBy(e.target.value)} />
+        <button onClick={handleSubmit} disabled={recordMeasurement.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 flex-shrink-0">
+          {recordMeasurement.isPending ? "Recording…" : "Record"}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 export default function VetifyCollateralPage() {
   const { data: rahnAgreements, isLoading, isError } = useRahnAgreements();
   const { data: valuationDocuments } = useCollateralValuationDocuments();
   const { data: pendingEnforcements } = usePendingCollateralEnforcements();
+  const { data: creditCovenants } = useCreditCovenants();
 
   if (isLoading) return <Layout title="Collateral Oversight"><FullPageLoader /></Layout>;
   if (isError || !rahnAgreements) return <Layout title="Collateral Oversight"><ErrorState message="Failed to load collateral agreements" /></Layout>;
@@ -117,6 +186,17 @@ export default function VetifyCollateralPage() {
             <div className="space-y-2">
               {pendingList.map((p) => (
                 <PendingEnforcementCard key={p.id} pending={p} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(creditCovenants ?? []).length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold text-gray-700 mb-2">Credit Covenants</h3>
+            <div className="space-y-2">
+              {(creditCovenants ?? []).map((c) => (
+                <CovenantCard key={c.id} covenant={c} />
               ))}
             </div>
           </div>

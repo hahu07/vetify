@@ -53,9 +53,25 @@ import {
   useCreateHamishJiddiyyah,
   useReturnDeposit,
   useForfeitDeposit,
+  useWriteOffContract,
+  useDemandNotices,
+  useIssueDemandNotice,
+  useWithdrawDemand,
+  useEscalateToLegal,
+  useLegalEscalations,
+  useRecordCourtOrder,
+  useResolveLegal,
+  useGuaranteeAgreements,
+  useCreateGuaranteeAgreement,
+  useEnforceGuarantee,
+  useReleaseGuarantee,
+  useCreditCovenants,
+  useCreateCreditCovenant,
   type IbraRequestItem,
   type RahnAgreementItem,
   type PaymentScheduleEntry,
+  type DemandNoticeItem,
+  type GuaranteeAgreementItem,
 } from "@/lib/apiClient";
 
 // New page -- Stage 9-10 detail view: outstanding balance, installment
@@ -509,6 +525,260 @@ function ProposeEnforceModal({ rahn, onClose }: { rahn: RahnAgreementItem; onClo
   );
 }
 
+// Phase 2, Thirty-Eighth Slice: Collateral & Recovery, Pass 2 -- WriteOff
+// (four-eyes, same checkFourEyes pattern CollateralActionModal already
+// uses), EscalateToLegal, GuaranteeAgreement create, and its
+// enforce/release action (mirrors CollateralActionModal's release/enforce
+// shape, no four-eyes since EnforceGuarantee/ReleaseGuarantee are single-
+// controller financialInstitution choices).
+
+function WriteOffModal({ contractId, onClose }: { contractId: string; onClose: () => void }) {
+  const { data: officers } = useOfficers();
+  const [writeOffDate, setWriteOffDate] = useState(new Date().toISOString().slice(0, 10));
+  const [writeOffRef, setWriteOffRef] = useState("");
+  const [totalRecovered, setTotalRecovered] = useState<number | "">("");
+  const [proposedByOfficerId, setProposedByOfficerId] = useState("");
+  const [confirmedByOfficerId, setConfirmedByOfficerId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const writeOffContract = useWriteOffContract();
+
+  const proposers = (officers ?? []).filter((o) => o.active && o.roles.includes("RecoveryOfficer"));
+  const confirmers = (officers ?? []).filter((o) => o.active && o.roles.includes("RiskOfficer"));
+  const confirmerName = confirmers.find((o) => o.officer_id === confirmedByOfficerId)?.officer_name ?? "";
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!writeOffRef.trim() || totalRecovered === "" || !proposedByOfficerId || !confirmedByOfficerId) {
+      setError("Write-off reference, total recovered, and both officers are required");
+      return;
+    }
+    try {
+      await writeOffContract.mutateAsync({
+        id: contractId, writeOffDate, writeOffRef, totalRecovered: Number(totalRecovered),
+        writeOffApprovedBy: confirmerName, proposedByOfficerId, confirmedByOfficerId,
+      });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to write off the contract");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Write Off Contract</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Write-Off Date</label>
+          <input type="date" className="input text-sm" value={writeOffDate} onChange={(e) => setWriteOffDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Write-Off Reference</label>
+          <input className="input text-sm" value={writeOffRef} onChange={(e) => setWriteOffRef(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Total Recovered to Date (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={totalRecovered} onChange={(e) => setTotalRecovered(e.target.value === "" ? "" : Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Proposed By (RecoveryOfficer)</label>
+          <select className="input text-sm" value={proposedByOfficerId} onChange={(e) => setProposedByOfficerId(e.target.value)}>
+            <option value="">Select an officer…</option>
+            {proposers.map((o) => <option key={o.id} value={o.officer_id}>{o.officer_name} ({o.officer_id})</option>)}
+          </select>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Confirmed By (RiskOfficer, approves the write-off)</label>
+          <select className="input text-sm" value={confirmedByOfficerId} onChange={(e) => setConfirmedByOfficerId(e.target.value)}>
+            <option value="">Select an officer…</option>
+            {confirmers.map((o) => <option key={o.id} value={o.officer_id}>{o.officer_name} ({o.officer_id})</option>)}
+          </select>
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={writeOffContract.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {writeOffContract.isPending ? "Submitting…" : "Write Off"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EscalateToLegalModal({ notice, onClose }: { notice: DemandNoticeItem; onClose: () => void }) {
+  const [escalationDate, setEscalationDate] = useState(new Date().toISOString().slice(0, 10));
+  const [solicitorRef, setSolicitorRef] = useState("");
+  const [legalAction, setLegalAction] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const escalateToLegal = useEscalateToLegal();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!solicitorRef.trim() || !legalAction.trim()) {
+      setError("Solicitor reference and legal action are both required");
+      return;
+    }
+    try {
+      await escalateToLegal.mutateAsync({ id: notice.id, escalationDate, solicitorRef, legalAction });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to escalate to legal");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Escalate to Legal</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{notice.demandRef} · {formatNaira(notice.outstandingAmount)}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Escalation Date</label>
+          <input type="date" className="input text-sm" value={escalationDate} onChange={(e) => setEscalationDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Solicitor Reference</label>
+          <input className="input text-sm" value={solicitorRef} onChange={(e) => setSolicitorRef(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Legal Action</label>
+          <textarea rows={2} className="input text-sm resize-none" value={legalAction} onChange={(e) => setLegalAction(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={escalateToLegal.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {escalateToLegal.isPending ? "Submitting…" : "Escalate"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CreateGuaranteeModal({ contractId, onClose }: { contractId: string; onClose: () => void }) {
+  const [guaranteeType, setGuaranteeType] = useState("PERSONAL");
+  const [guaranteedAmount, setGuaranteedAmount] = useState<number | "">("");
+  const [guarantorName, setGuarantorName] = useState("");
+  const [guarantorId, setGuarantorId] = useState("");
+  const [effectiveDate, setEffectiveDate] = useState(new Date().toISOString().slice(0, 10));
+  const [error, setError] = useState<string | null>(null);
+  const create = useCreateGuaranteeAgreement();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!guaranteedAmount || !guarantorName.trim() || !guarantorId.trim()) {
+      setError("Guaranteed amount, guarantor name, and guarantor ID are all required");
+      return;
+    }
+    try {
+      await create.mutateAsync({ id: contractId, guaranteeType, guaranteedAmount: Number(guaranteedAmount), guarantorName, guarantorId, effectiveDate });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create guarantee agreement");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Add Guarantee</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Guarantee Type</label>
+          <select className="input text-sm" value={guaranteeType} onChange={(e) => setGuaranteeType(e.target.value)}>
+            <option value="PERSONAL">Personal</option>
+            <option value="CORPORATE">Corporate</option>
+            <option value="THIRD_PARTY">Third Party</option>
+          </select>
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Guaranteed Amount (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={guaranteedAmount} onChange={(e) => setGuaranteedAmount(e.target.value === "" ? "" : Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Guarantor Name</label>
+          <input className="input text-sm" value={guarantorName} onChange={(e) => setGuarantorName(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Guarantor ID (NIN / RC / passport)</label>
+          <input className="input text-sm" value={guarantorId} onChange={(e) => setGuarantorId(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Effective Date</label>
+          <input type="date" className="input text-sm" value={effectiveDate} onChange={(e) => setEffectiveDate(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={create.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {create.isPending ? "Submitting…" : "Add Guarantee"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EnforceReleaseGuaranteeModal({
+  guarantee, mode, onClose,
+}: { guarantee: GuaranteeAgreementItem; mode: "enforce" | "release"; onClose: () => void }) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const enforceGuarantee = useEnforceGuarantee();
+  const releaseGuarantee = useReleaseGuarantee();
+  const isPending = enforceGuarantee.isPending || releaseGuarantee.isPending;
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!text.trim()) {
+      setError(mode === "enforce" ? "Please provide a reason" : "Please provide a note");
+      return;
+    }
+    try {
+      if (mode === "enforce") await enforceGuarantee.mutateAsync({ id: guarantee.id, reason: text });
+      else await releaseGuarantee.mutateAsync({ id: guarantee.id, note: text });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : `Failed to ${mode} guarantee`);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">{mode === "enforce" ? "Enforce Guarantee" : "Release Guarantee"}</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{guarantee.guarantorName} · {formatNaira(guarantee.guaranteedAmount)}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">{mode === "enforce" ? "Reason" : "Note"}</label>
+          <textarea rows={2} className="input text-sm resize-none" value={text} onChange={(e) => setText(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={isPending} className={`flex-1 disabled:opacity-40 ${mode === "enforce" ? "btn-danger" : "btn-primary"}`}>
+            {isPending ? "Submitting…" : mode === "enforce" ? "Enforce" : "Release"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FiContractDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { data: contracts, isLoading } = useMurabahahContracts();
@@ -528,6 +798,10 @@ export default function FiContractDetailPage() {
   const { data: recoveryPayments } = useRecoveryPaymentRecords();
   const { data: gsmInvocations } = useGsmInvocations();
   const { data: hamishRecords } = useHamishJiddiyyah();
+  const { data: demandNotices } = useDemandNotices();
+  const { data: legalEscalations } = useLegalEscalations();
+  const { data: guaranteeAgreements } = useGuaranteeAgreements();
+  const { data: creditCovenants } = useCreditCovenants();
   const recordPayment = useRecordPayment();
   const closeContract = useCloseContract();
   const setCharityAmount = useSetCharityAmount();
@@ -550,6 +824,16 @@ export default function FiContractDetailPage() {
   const createHamishJiddiyyah = useCreateHamishJiddiyyah();
   const returnDeposit = useReturnDeposit();
   const forfeitDeposit = useForfeitDeposit();
+  const writeOffContract = useWriteOffContract();
+  const issueDemandNotice = useIssueDemandNotice();
+  const withdrawDemand = useWithdrawDemand();
+  const escalateToLegal = useEscalateToLegal();
+  const recordCourtOrder = useRecordCourtOrder();
+  const resolveLegal = useResolveLegal();
+  const createGuaranteeAgreement = useCreateGuaranteeAgreement();
+  const enforceGuarantee = useEnforceGuarantee();
+  const releaseGuarantee = useReleaseGuarantee();
+  const createCreditCovenant = useCreateCreditCovenant();
 
   const [amountPaid, setAmountPaid] = useState<number | "">("");
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().slice(0, 10));
@@ -581,6 +865,14 @@ export default function FiContractDetailPage() {
   const [hamishForm, setHamishForm] = useState({ depositAmount: "" as number | "", depositRef: "", returnDeadline: "" });
   const [hamishActionRef, setHamishActionRef] = useState("");
   const [forfeitForm, setForfeitForm] = useState({ actualLoss: "" as number | "", reason: "" });
+  const [writeOffModalOpen, setWriteOffModalOpen] = useState(false);
+  const [demandNoticeForm, setDemandNoticeForm] = useState({ demandDate: "", demandRef: "", responseDeadline: "", gsmEligible: false });
+  const [escalateModalNotice, setEscalateModalNotice] = useState<DemandNoticeItem | null>(null);
+  const [withdrawNoteByNotice, setWithdrawNoteByNotice] = useState<Record<string, string>>({});
+  const [courtOrderRefByEscalation, setCourtOrderRefByEscalation] = useState<Record<string, string>>({});
+  const [guaranteeModalOpen, setGuaranteeModalOpen] = useState(false);
+  const [enforceReleaseModal, setEnforceReleaseModal] = useState<{ guarantee: GuaranteeAgreementItem; mode: "enforce" | "release" } | null>(null);
+  const [covenantForm, setCovenantForm] = useState({ covenantType: "", threshold: "" as number | "", measurementFrequency: "MONTHLY" });
 
   if (isLoading) return <Layout breadcrumb={[{ label: "Contracts", path: "/fi/contracts" }, { label: "…" }]}><p className="text-sm text-gray-500">Loading…</p></Layout>;
 
@@ -608,6 +900,9 @@ export default function FiContractDetailPage() {
   const contractCollectionAttempts = (collectionAttempts ?? []).filter((a) => a.murabahahContractId === contract.id);
   const contractRecoveryPayments = (recoveryPayments ?? []).filter((r) => r.murabahahContractId === contract.id);
   const contractGsmInvocation = (gsmInvocations ?? []).find((g) => g.murabahahContractId === contract.id);
+  const contractDemandNotices = (demandNotices ?? []).filter((d) => d.murabahahContractId === contract.id);
+  const contractGuaranteeAgreements = (guaranteeAgreements ?? []).filter((g) => g.murabahahContractId === contract.id);
+  const contractCreditCovenants = (creditCovenants ?? []).filter((c) => c.murabahahContractId === contract.id);
   const contractHamish = (hamishRecords ?? []).find((h) => h.murabahahContractId === contract.id);
 
   const handleGrantMoratorium = async () => {
@@ -933,6 +1228,76 @@ export default function FiContractDetailPage() {
     }
   };
 
+  const handleIssueDemandNotice = async () => {
+    setActionError(null);
+    if (!demandNoticeForm.demandDate || !demandNoticeForm.demandRef.trim() || !demandNoticeForm.responseDeadline) {
+      setActionError("Demand date, reference, and response deadline are all required");
+      return;
+    }
+    try {
+      await issueDemandNotice.mutateAsync({ id: contract.id, ...demandNoticeForm });
+      setDemandNoticeForm({ demandDate: "", demandRef: "", responseDeadline: "", gsmEligible: false });
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to issue demand notice");
+    }
+  };
+
+  const handleWithdrawDemand = async (noticeId: string) => {
+    setActionError(null);
+    const note = withdrawNoteByNotice[noticeId];
+    if (!note?.trim()) {
+      setActionError("Please provide a withdrawal note");
+      return;
+    }
+    try {
+      await withdrawDemand.mutateAsync({ id: noticeId, note });
+      setWithdrawNoteByNotice((p) => ({ ...p, [noticeId]: "" }));
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to withdraw demand notice");
+    }
+  };
+
+  const handleRecordCourtOrder = async (escalationId: string) => {
+    setActionError(null);
+    const courtOrderRef = courtOrderRefByEscalation[escalationId];
+    if (!courtOrderRef?.trim()) {
+      setActionError("Please provide a court order reference");
+      return;
+    }
+    try {
+      await recordCourtOrder.mutateAsync({ id: escalationId, courtOrderRef });
+      setCourtOrderRefByEscalation((p) => ({ ...p, [escalationId]: "" }));
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to record court order");
+    }
+  };
+
+  const handleResolveLegal = async (escalationId: string) => {
+    setActionError(null);
+    try {
+      await resolveLegal.mutateAsync({ id: escalationId, note: "Resolved" });
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to resolve legal escalation");
+    }
+  };
+
+  const handleCreateCreditCovenant = async () => {
+    setActionError(null);
+    if (!covenantForm.covenantType.trim() || !covenantForm.threshold) {
+      setActionError("Covenant type and threshold are both required");
+      return;
+    }
+    try {
+      await createCreditCovenant.mutateAsync({
+        id: contract.id, covenantType: covenantForm.covenantType,
+        threshold: Number(covenantForm.threshold), measurementFrequency: covenantForm.measurementFrequency,
+      });
+      setCovenantForm({ covenantType: "", threshold: "", measurementFrequency: "MONTHLY" });
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to create credit covenant");
+    }
+  };
+
   return (
     <Layout breadcrumb={[{ label: "Contracts", path: "/fi/contracts" }, { label: contract.facilityRef }]}>
       <div className="max-w-4xl mx-auto space-y-6">
@@ -1245,7 +1610,7 @@ export default function FiContractDetailPage() {
           </div>
         )}
 
-        {(canDefault || canCloseDefaulted) && (
+        {(canDefault || contract.status === "Defaulted") && (
           <div className="card p-6 border-red-100 bg-red-50/30">
             <h3 className="text-sm font-semibold text-gray-800 mb-4">{canDefault ? "Default (Write-Off)" : "Recovery"}</h3>
             {canDefault && (
@@ -1260,9 +1625,16 @@ export default function FiContractDetailPage() {
                 {defaultContract.isPending ? "Recording…" : "Default Contract"}
               </button>
             ) : (
-              <button onClick={handleCloseDefaulted} disabled={closeDefaultedContract.isPending} className="btn-primary text-sm px-4 py-2 disabled:opacity-40">
-                {closeDefaultedContract.isPending ? "Closing…" : "Close Defaulted Contract (Fully Recovered)"}
-              </button>
+              <div className="flex flex-wrap gap-2">
+                {canCloseDefaulted && (
+                  <button onClick={handleCloseDefaulted} disabled={closeDefaultedContract.isPending} className="btn-primary text-sm px-4 py-2 disabled:opacity-40">
+                    {closeDefaultedContract.isPending ? "Closing…" : "Close Defaulted Contract (Fully Recovered)"}
+                  </button>
+                )}
+                <button onClick={() => setWriteOffModalOpen(true)} className="btn-danger text-sm px-4 py-2">
+                  Write Off Remaining Balance
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -1270,6 +1642,84 @@ export default function FiContractDetailPage() {
         {contract.status === "Defaulted" && (
           <div className="card p-6">
             <h3 className="text-sm font-semibold text-gray-800 mb-4">Recovery &amp; GSM (Global Standing Mandate)</h3>
+
+            <div className="mb-4 pb-4 border-b border-gray-100">
+              <h4 className="text-xs font-semibold text-gray-700 mb-2">Demand Notice &amp; Legal Escalation</h4>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <input type="date" className="input text-sm" value={demandNoticeForm.demandDate} onChange={(e) => setDemandNoticeForm((p) => ({ ...p, demandDate: e.target.value }))} />
+                <input className="input text-sm" placeholder="Demand ref" value={demandNoticeForm.demandRef} onChange={(e) => setDemandNoticeForm((p) => ({ ...p, demandRef: e.target.value }))} />
+                <input type="date" className="input text-sm" placeholder="Response deadline" value={demandNoticeForm.responseDeadline} onChange={(e) => setDemandNoticeForm((p) => ({ ...p, responseDeadline: e.target.value }))} />
+              </div>
+              <div className="flex items-center gap-2 mb-3">
+                <input id="gsmEligibleDemand" type="checkbox" checked={demandNoticeForm.gsmEligible} onChange={(e) => setDemandNoticeForm((p) => ({ ...p, gsmEligible: e.target.checked }))} />
+                <label htmlFor="gsmEligibleDemand" className="text-xs text-gray-700">Valid GSM consent exists</label>
+              </div>
+              <button onClick={handleIssueDemandNotice} disabled={issueDemandNotice.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40">
+                {issueDemandNotice.isPending ? "Issuing…" : "Issue Demand Notice"}
+              </button>
+
+              {contractDemandNotices.length > 0 && (
+                <div className="mt-3 space-y-2">
+                  {contractDemandNotices.map((notice) => {
+                    const escalation = (legalEscalations ?? []).find((e) => e.demandNoticeId === notice.id);
+                    return (
+                      <div key={notice.id} className="rounded-lg border border-gray-100 p-3">
+                        <div className="flex items-center justify-between gap-3 text-xs">
+                          <span className="text-gray-700">
+                            {notice.demandRef} · Due {formatDate(notice.responseDeadline)} · {formatNaira(notice.outstandingAmount)}
+                          </span>
+                          {notice.archivedAt ? (
+                            <span className="text-gray-400">{notice.supersededByKind === "legal_escalation" ? "Escalated" : "Withdrawn"}</span>
+                          ) : (
+                            <div className="flex gap-2">
+                              <button onClick={() => setEscalateModalNotice(notice)} className="btn-danger text-xs px-2 py-1">Escalate to Legal</button>
+                            </div>
+                          )}
+                        </div>
+                        {!notice.archivedAt && (
+                          <div className="flex gap-2 mt-2">
+                            <input
+                              className="input text-xs flex-1"
+                              placeholder="Withdrawal note"
+                              value={withdrawNoteByNotice[notice.id] ?? ""}
+                              onChange={(e) => setWithdrawNoteByNotice((p) => ({ ...p, [notice.id]: e.target.value }))}
+                            />
+                            <button onClick={() => handleWithdrawDemand(notice.id)} disabled={withdrawDemand.isPending} className="btn-secondary text-xs px-2 py-1 disabled:opacity-40">
+                              Withdraw
+                            </button>
+                          </div>
+                        )}
+                        {escalation && (
+                          <div className="mt-2 pt-2 border-t border-gray-100">
+                            <p className="text-xs text-gray-600 mb-1">
+                              Legal: {escalation.solicitorRef} · {escalation.legalAction}
+                              {escalation.courtRef && <span> · Court ref: {escalation.courtRef}</span>}
+                              {escalation.resolvedAt && <span className="text-emerald-600"> · Resolved</span>}
+                            </p>
+                            {!escalation.resolvedAt && (
+                              <div className="flex gap-2">
+                                <input
+                                  className="input text-xs flex-1"
+                                  placeholder="Court order ref"
+                                  value={courtOrderRefByEscalation[escalation.id] ?? ""}
+                                  onChange={(e) => setCourtOrderRefByEscalation((p) => ({ ...p, [escalation.id]: e.target.value }))}
+                                />
+                                <button onClick={() => handleRecordCourtOrder(escalation.id)} disabled={recordCourtOrder.isPending} className="btn-secondary text-xs px-2 py-1 disabled:opacity-40">
+                                  Record Order
+                                </button>
+                                <button onClick={() => handleResolveLegal(escalation.id)} disabled={resolveLegal.isPending} className="btn-primary text-xs px-2 py-1 disabled:opacity-40">
+                                  Resolve
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
 
             <div className="mb-4 pb-4 border-b border-gray-100">
               <h4 className="text-xs font-semibold text-gray-700 mb-2">Record Recovery Payment</h4>
@@ -1650,6 +2100,65 @@ export default function FiContractDetailPage() {
           )}
         </div>
 
+        <div className="card p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-gray-800">Guarantees</h3>
+            <button onClick={() => setGuaranteeModalOpen(true)} className="btn-secondary text-xs px-3 py-1.5">Add Guarantee</button>
+          </div>
+          {contractGuaranteeAgreements.length === 0 ? (
+            <p className="text-xs text-gray-400">No guarantees on this facility</p>
+          ) : (
+            <div className="space-y-2">
+              {contractGuaranteeAgreements.map((g) => (
+                <div key={g.id} className="rounded-lg border border-gray-100 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm text-gray-900">{g.guarantorName} <span className="text-xs text-gray-400">({g.guaranteeType})</span></p>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {formatNaira(g.guaranteedAmount)} ·{" "}
+                      {g.guaranteeStatus === "GuaranteeActive" && <span className="text-emerald-600">Active</span>}
+                      {g.guaranteeStatus === "GuaranteeReleased" && <span className="text-gray-500">Released</span>}
+                      {g.guaranteeStatus === "GuaranteeEnforced" && <span className="text-red-600">Enforced</span>}
+                    </p>
+                  </div>
+                  {g.guaranteeStatus === "GuaranteeActive" && (
+                    <div className="flex gap-2 flex-shrink-0">
+                      <button onClick={() => setEnforceReleaseModal({ guarantee: g, mode: "release" })} className="btn-secondary text-xs px-3 py-1.5">Release</button>
+                      <button onClick={() => setEnforceReleaseModal({ guarantee: g, mode: "enforce" })} className="btn-danger text-xs px-3 py-1.5">Enforce</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-5 pt-4 border-t border-gray-100">
+            <h4 className="text-xs font-semibold text-gray-700 mb-2">Credit Covenants</h4>
+            <div className="grid grid-cols-3 gap-2 mb-3">
+              <input className="input text-sm" placeholder="Covenant type (e.g. DSCR_MINIMUM)" value={covenantForm.covenantType} onChange={(e) => setCovenantForm((p) => ({ ...p, covenantType: e.target.value }))} />
+              <input type="number" step="0.01" className="input text-sm font-mono" placeholder="Threshold" value={covenantForm.threshold} onChange={(e) => setCovenantForm((p) => ({ ...p, threshold: e.target.value === "" ? "" : Number(e.target.value) }))} />
+              <select className="input text-sm" value={covenantForm.measurementFrequency} onChange={(e) => setCovenantForm((p) => ({ ...p, measurementFrequency: e.target.value }))}>
+                <option value="MONTHLY">Monthly</option>
+                <option value="QUARTERLY">Quarterly</option>
+                <option value="ANNUALLY">Annually</option>
+              </select>
+            </div>
+            <button onClick={handleCreateCreditCovenant} disabled={createCreditCovenant.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40">
+              {createCreditCovenant.isPending ? "Adding…" : "Add Covenant"}
+            </button>
+            {contractCreditCovenants.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {contractCreditCovenants.map((c) => (
+                  <div key={c.id} className="flex items-center justify-between gap-3 text-xs">
+                    <span className="text-gray-700">{c.covenantType} · {c.measurementFrequency}</span>
+                    <span className="font-mono text-gray-600">Threshold: {c.threshold}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-2">Measurements are recorded by vetify's portfolio-monitoring team, not the FI.</p>
+          </div>
+        </div>
+
         <div className="card overflow-hidden">
           <div className="p-4 border-b border-gray-100">
             <h3 className="text-sm font-semibold text-gray-800">Repayment History</h3>
@@ -1698,6 +2207,12 @@ export default function FiContractDetailPage() {
       {revalueModalRahn && <RevalueModal rahn={revalueModalRahn} onClose={() => setRevalueModalRahn(null)} />}
       {inspectionModalRahn && <RecordInspectionModal rahn={inspectionModalRahn} onClose={() => setInspectionModalRahn(null)} />}
       {proposeEnforceModalRahn && <ProposeEnforceModal rahn={proposeEnforceModalRahn} onClose={() => setProposeEnforceModalRahn(null)} />}
+      {writeOffModalOpen && <WriteOffModal contractId={contract.id} onClose={() => setWriteOffModalOpen(false)} />}
+      {escalateModalNotice && <EscalateToLegalModal notice={escalateModalNotice} onClose={() => setEscalateModalNotice(null)} />}
+      {guaranteeModalOpen && <CreateGuaranteeModal contractId={contract.id} onClose={() => setGuaranteeModalOpen(false)} />}
+      {enforceReleaseModal && (
+        <EnforceReleaseGuaranteeModal guarantee={enforceReleaseModal.guarantee} mode={enforceReleaseModal.mode} onClose={() => setEnforceReleaseModal(null)} />
+      )}
     </Layout>
   );
 }
