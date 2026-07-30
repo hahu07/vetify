@@ -1436,24 +1436,31 @@ async function releaseCollateralImpl(
 }
 export const releaseCollateral = withAuthorization(["financialInstitution"], releaseCollateralImpl);
 
+// Extracted so ConfirmEnforce (below) can invoke the same core logic inside
+// its own transaction/client, atomically with archiving the
+// PendingCollateralEnforcement it was exercised on -- mirrors the real
+// Daml's `exercise rahnCid EnforceCollateral with ...` nested-exercise
+// shape. Guards/checkFourEyes unchanged from the original single-entry form.
+async function applyEnforceCollateral(client: PoolClient, rahnAgreementId: number, args: CollateralOfficerArgs & { reason: string }) {
+  const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1 FOR UPDATE", [rahnAgreementId]);
+  const rahn = rows[0];
+  if (!rahn) throw new DomainError("RahnAgreement not found");
+  if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only enforce Active collateral");
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+
+  await checkFourEyes(client, args.proposedByOfficerId, "RecoveryOfficer", args.confirmedByOfficerId, "RiskOfficer");
+
+  await client.query(
+    `UPDATE rahn_agreement
+       SET collateral_status = 'CollateralEnforced', proposed_by_officer_id = $2, confirmed_by_officer_id = $3, updated_at = now()
+       WHERE id = $1`,
+    [rahnAgreementId, args.proposedByOfficerId, args.confirmedByOfficerId],
+  );
+  return { rahnAgreementId };
+}
+
 async function enforceCollateralImpl(session: SessionContext, rahnAgreementId: number, args: CollateralOfficerArgs & { reason: string }) {
-  return withTransaction(session, async (client) => {
-    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1 FOR UPDATE", [rahnAgreementId]);
-    const rahn = rows[0];
-    if (!rahn) throw new DomainError("RahnAgreement not found");
-    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only enforce Active collateral");
-    if (!args.reason) throw new DomainError("Reason must not be empty");
-
-    await checkFourEyes(client, args.proposedByOfficerId, "RecoveryOfficer", args.confirmedByOfficerId, "RiskOfficer");
-
-    await client.query(
-      `UPDATE rahn_agreement
-         SET collateral_status = 'CollateralEnforced', proposed_by_officer_id = $2, confirmed_by_officer_id = $3, updated_at = now()
-         WHERE id = $1`,
-      [rahnAgreementId, args.proposedByOfficerId, args.confirmedByOfficerId],
-    );
-    return { rahnAgreementId };
-  });
+  return withTransaction(session, (client) => applyEnforceCollateral(client, rahnAgreementId, args));
 }
 export const enforceCollateral = withAuthorization(["financialInstitution"], enforceCollateralImpl);
 
@@ -1552,6 +1559,99 @@ export async function listCollateralInspectionRecords(session: SessionContext) {
 export async function listRahnAgreements(session: SessionContext) {
   return withTransaction(session, async (client) => {
     const { rows } = await client.query(`SELECT * FROM rahn_agreement ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+// ─── ProposeEnforceCollateral / ConfirmEnforce / RejectEnforce ────────────
+// Phase 2, Twenty-Eighth Slice -- the maker-checker variant of
+// EnforceCollateral: the FI's RecoveryOfficer proposes (ProposeEnforceCollateral,
+// nonconsuming on RahnAgreement), and vetify -- not a second FI officer --
+// confirms or rejects. ConfirmEnforce's real Daml body is a nested
+// `exercise rahnCid EnforceCollateral with ...`, ported by calling
+// applyEnforceCollateral inside this choice's own transaction so the
+// PendingCollateralEnforcement resolution and the RahnAgreement update stay
+// atomic, same technique as ConfirmCancellation (Twenty-Seventh Slice).
+
+async function requireActiveRecoveryOfficer(client: PoolClient, officerId: string) {
+  const { rows } = await client.query("SELECT active, roles FROM authorized_officer WHERE officer_id = $1", [officerId]);
+  const officer = rows[0];
+  if (!officer || !officer.active) throw new DomainError(`Officer ${officerId} is not active`);
+  if (!(officer.roles ?? []).includes("RecoveryOfficer")) {
+    throw new DomainError(`Officer ${officerId} does not hold the required role`);
+  }
+}
+
+interface ProposeEnforceCollateralArgs {
+  reason: string;
+  gsmExhausted: boolean;
+  gsmRef?: string | null;
+  proposedByOfficerId: string;
+}
+
+async function proposeEnforceCollateralImpl(session: SessionContext, rahnAgreementId: number, args: ProposeEnforceCollateralArgs) {
+  if (!args.reason) throw new DomainError("Reason must not be empty");
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM rahn_agreement WHERE id = $1", [rahnAgreementId]);
+    const rahn = rows[0];
+    if (!rahn) throw new DomainError("RahnAgreement not found");
+    if (rahn.collateral_status !== "CollateralActive") throw new DomainError("Can only propose enforcement on Active collateral");
+
+    await requireActiveRecoveryOfficer(client, args.proposedByOfficerId);
+
+    const { rows: created } = await client.query(
+      `INSERT INTO pending_collateral_enforcement
+         (rahn_agreement_id, cac_reg_number, business_name, reason, gsm_exhausted, gsm_ref, proposed_by_officer_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id`,
+      [rahnAgreementId, rahn.cac_reg_number, rahn.business_name, args.reason, args.gsmExhausted, args.gsmRef ?? null, args.proposedByOfficerId],
+    );
+    return { pendingCollateralEnforcementId: created[0].id };
+  });
+}
+export const proposeEnforceCollateral = withAuthorization(["financialInstitution"], proposeEnforceCollateralImpl);
+
+async function confirmEnforceImpl(session: SessionContext, pendingId: number, args: { confirmedByOfficerId: string }) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT * FROM pending_collateral_enforcement WHERE id = $1 FOR UPDATE", [pendingId]);
+    const pending = rows[0];
+    if (!pending) throw new DomainError("PendingCollateralEnforcement not found");
+    if (pending.status !== "Pending") throw new DomainError("PendingCollateralEnforcement is not pending");
+
+    const enforcement = await applyEnforceCollateral(client, Number(pending.rahn_agreement_id), {
+      reason: pending.reason,
+      proposedByOfficerId: pending.proposed_by_officer_id,
+      confirmedByOfficerId: args.confirmedByOfficerId,
+    });
+
+    await client.query(
+      `UPDATE pending_collateral_enforcement SET status = 'Confirmed', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [pendingId],
+    );
+    return { rahnAgreementId: enforcement.rahnAgreementId };
+  });
+}
+export const confirmEnforce = withAuthorization(["vetify"], confirmEnforceImpl);
+
+async function rejectEnforceImpl(session: SessionContext, pendingId: number) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT status FROM pending_collateral_enforcement WHERE id = $1 FOR UPDATE", [pendingId]);
+    const pending = rows[0];
+    if (!pending) throw new DomainError("PendingCollateralEnforcement not found");
+    if (pending.status !== "Pending") throw new DomainError("PendingCollateralEnforcement is not pending");
+
+    await client.query(
+      `UPDATE pending_collateral_enforcement SET status = 'Rejected', resolved_at = now(), updated_at = now() WHERE id = $1`,
+      [pendingId],
+    );
+    return { pendingCollateralEnforcementId: pendingId };
+  });
+}
+export const rejectEnforce = withAuthorization(["vetify"], rejectEnforceImpl);
+
+export async function listPendingCollateralEnforcements(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM pending_collateral_enforcement ORDER BY created_at DESC`);
     return rows;
   });
 }

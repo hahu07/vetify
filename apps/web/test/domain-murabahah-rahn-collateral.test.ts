@@ -22,6 +22,9 @@ import {
   enforceCollateral,
   revalue,
   recordInspection,
+  proposeEnforceCollateral,
+  confirmEnforce,
+  rejectEnforce,
 } from "@/lib/domain/murabahah";
 import type { RiskAssessment } from "@/lib/types-financing";
 import type { MurabahahTerms, PaymentScheduleEntry } from "@/lib/types-murabahah";
@@ -38,6 +41,9 @@ function fiSession(): SessionContext {
 }
 function advisorSession(): SessionContext {
   return { userId: 6, username: "test-advisor", displayName: "Test Advisor", partyRole: "advisor", cacRegNumber: null };
+}
+function vetifySession(): SessionContext {
+  return { userId: 3, username: "test-vetify", displayName: "Test Vetify", partyRole: "vetify", cacRegNumber: null };
 }
 
 const fixtureClient = new Client({
@@ -82,6 +88,10 @@ function twoInstallmentSchedule(): PaymentScheduleEntry[] {
 }
 
 async function cleanup(cac: string) {
+  await fixtureClient.query(
+    `DELETE FROM pending_collateral_enforcement WHERE rahn_agreement_id IN (SELECT id FROM rahn_agreement WHERE cac_reg_number = $1)`,
+    [cac],
+  );
   await fixtureClient.query(
     `DELETE FROM collateral_valuation_record WHERE rahn_agreement_id IN (SELECT id FROM rahn_agreement WHERE cac_reg_number = $1)`,
     [cac],
@@ -476,5 +486,186 @@ test("recordInspection: can only inspect Active collateral", async () => {
   } finally {
     await cleanup(cac);
     await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [opsOfficerId, riskOfficerId]);
+  }
+});
+
+// ─── proposeEnforceCollateral / confirmEnforce / rejectEnforce ─────────────
+
+test("proposeEnforceCollateral: rejects an empty reason, creates a Pending PendingCollateralEnforcement, RahnAgreement stays Active", async () => {
+  const cac = "RC8000014";
+  const recoveryOfficerId = "OFF-RECOVERY-PROP-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+
+    await assert.rejects(
+      () =>
+        proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+          reason: "", gsmExhausted: true, proposedByOfficerId: recoveryOfficerId,
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Reason must not be empty",
+    );
+
+    const result = await proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      reason: "Three consecutive missed installments", gsmExhausted: true, gsmRef: "GSM-REF-1",
+      proposedByOfficerId: recoveryOfficerId,
+    });
+    assert.ok(result.pendingCollateralEnforcementId);
+
+    const { rows } = await fixtureClient.query(
+      "SELECT status, reason, gsm_exhausted FROM pending_collateral_enforcement WHERE id = $1",
+      [result.pendingCollateralEnforcementId],
+    );
+    assert.equal(rows[0].status, "Pending");
+    assert.equal(rows[0].gsm_exhausted, true);
+
+    const { rows: rahn } = await fixtureClient.query("SELECT collateral_status FROM rahn_agreement WHERE id = $1", [pledge.rahnAgreementId]);
+    assert.equal(rahn[0].collateral_status, "CollateralActive");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id = $1`, [recoveryOfficerId]);
+  }
+});
+
+test("proposeEnforceCollateral: can only propose on Active collateral", async () => {
+  const cac = "RC8000015";
+  const opsOfficerId = "OFF-OPS-PROP-1";
+  const riskOfficerId = "OFF-RISK-PROP-1";
+  const recoveryOfficerId = "OFF-RECOVERY-PROP-2";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(opsOfficerId, "OperationsOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    await releaseCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      note: "Facility closed", proposedByOfficerId: opsOfficerId, confirmedByOfficerId: riskOfficerId,
+    });
+
+    await assert.rejects(
+      () =>
+        proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+          reason: "Too late", gsmExhausted: false, proposedByOfficerId: recoveryOfficerId,
+        }),
+      (err: unknown) => err instanceof DomainError && err.message === "Can only propose enforcement on Active collateral",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2, $3)`, [opsOfficerId, riskOfficerId, recoveryOfficerId]);
+  }
+});
+
+test("confirmEnforce: happy path enforces the RahnAgreement and marks the pending request Confirmed", async () => {
+  const cac = "RC8000016";
+  const recoveryOfficerId = "OFF-RECOVERY-CONF-1";
+  const riskOfficerId = "OFF-RISK-CONF-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    await registerOfficer(riskOfficerId, "RiskOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    const proposed = await proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      reason: "Three consecutive missed installments", gsmExhausted: true, proposedByOfficerId: recoveryOfficerId,
+    });
+
+    const result = await confirmEnforce(vetifySession(), Number(proposed.pendingCollateralEnforcementId), {
+      confirmedByOfficerId: riskOfficerId,
+    });
+    assert.equal(Number(result.rahnAgreementId), Number(pledge.rahnAgreementId));
+
+    const { rows: rahn } = await fixtureClient.query(
+      "SELECT collateral_status, proposed_by_officer_id, confirmed_by_officer_id FROM rahn_agreement WHERE id = $1",
+      [pledge.rahnAgreementId],
+    );
+    assert.equal(rahn[0].collateral_status, "CollateralEnforced");
+    assert.equal(rahn[0].proposed_by_officer_id, recoveryOfficerId);
+    assert.equal(rahn[0].confirmed_by_officer_id, riskOfficerId);
+
+    const { rows: pending } = await fixtureClient.query(
+      "SELECT status FROM pending_collateral_enforcement WHERE id = $1",
+      [proposed.pendingCollateralEnforcementId],
+    );
+    assert.equal(pending[0].status, "Confirmed");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id IN ($1, $2)`, [recoveryOfficerId, riskOfficerId]);
+  }
+});
+
+test("confirmEnforce: rejects the same officer proposing and confirming (four-eyes), pending request stays Pending", async () => {
+  const cac = "RC8000017";
+  const recoveryOfficerId = "OFF-RECOVERY-CONF-2";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    const proposed = await proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      reason: "Missed installments", gsmExhausted: false, proposedByOfficerId: recoveryOfficerId,
+    });
+
+    await assert.rejects(
+      () => confirmEnforce(vetifySession(), Number(proposed.pendingCollateralEnforcementId), { confirmedByOfficerId: recoveryOfficerId }),
+      (err: unknown) => err instanceof DomainError && err.message === "Confirming officer must differ from proposing officer (four-eyes)",
+    );
+
+    const { rows: pending } = await fixtureClient.query(
+      "SELECT status FROM pending_collateral_enforcement WHERE id = $1",
+      [proposed.pendingCollateralEnforcementId],
+    );
+    assert.equal(pending[0].status, "Pending");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id = $1`, [recoveryOfficerId]);
+  }
+});
+
+test("rejectEnforce: happy path marks the pending request Rejected, RahnAgreement stays Active", async () => {
+  const cac = "RC8000018";
+  const recoveryOfficerId = "OFF-RECOVERY-REJ-1";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    const proposed = await proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      reason: "Suspected but unconfirmed default", gsmExhausted: false, proposedByOfficerId: recoveryOfficerId,
+    });
+
+    const result = await rejectEnforce(vetifySession(), Number(proposed.pendingCollateralEnforcementId));
+    assert.equal(Number(result.pendingCollateralEnforcementId), Number(proposed.pendingCollateralEnforcementId));
+
+    const { rows: pending } = await fixtureClient.query(
+      "SELECT status FROM pending_collateral_enforcement WHERE id = $1",
+      [proposed.pendingCollateralEnforcementId],
+    );
+    assert.equal(pending[0].status, "Rejected");
+
+    const { rows: rahn } = await fixtureClient.query("SELECT collateral_status FROM rahn_agreement WHERE id = $1", [pledge.rahnAgreementId]);
+    assert.equal(rahn[0].collateral_status, "CollateralActive");
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id = $1`, [recoveryOfficerId]);
+  }
+});
+
+test("rejectEnforce: rejects a pending request that is not pending", async () => {
+  const cac = "RC8000019";
+  const recoveryOfficerId = "OFF-RECOVERY-REJ-2";
+  try {
+    const contractId = await buildContractFixture(cac, `FAC-${cac}`);
+    await registerOfficer(recoveryOfficerId, "RecoveryOfficer");
+    const pledge = await pledgeCollateral(fiSession(), contractId, { collateralDescription: "Plot 14", collateralValue: 1_000_000 });
+    const proposed = await proposeEnforceCollateral(fiSession(), Number(pledge.rahnAgreementId), {
+      reason: "First attempt", gsmExhausted: false, proposedByOfficerId: recoveryOfficerId,
+    });
+    await rejectEnforce(vetifySession(), Number(proposed.pendingCollateralEnforcementId));
+
+    await assert.rejects(
+      () => rejectEnforce(vetifySession(), Number(proposed.pendingCollateralEnforcementId)),
+      (err: unknown) => err instanceof DomainError && err.message === "PendingCollateralEnforcement is not pending",
+    );
+  } finally {
+    await cleanup(cac);
+    await fixtureClient.query(`DELETE FROM authorized_officer WHERE officer_id = $1`, [recoveryOfficerId]);
   }
 });

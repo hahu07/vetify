@@ -493,6 +493,21 @@ export function serializeRahnAgreement(row: Record<string, unknown>) {
   };
 }
 
+export function serializePendingCollateralEnforcement(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    rahnAgreementId: String(row.rahn_agreement_id),
+    cacRegNumber: row.cac_reg_number,
+    businessName: row.business_name,
+    reason: row.reason,
+    gsmExhausted: row.gsm_exhausted,
+    gsmRef: row.gsm_ref ?? null,
+    proposedByOfficerId: row.proposed_by_officer_id,
+    status: row.status,
+    resolvedAt: row.resolved_at ?? null,
+  };
+}
+
 // ─── Phase 2, seventh slice: collateral valuation document upload ─────────
 
 export function serializeCollateralValuationDocument(row: Record<string, unknown>) {
