@@ -17,6 +17,154 @@ import type { AssetDetails } from "@/lib/types-murabahah";
 const PENDING_UNDERWRITING_STATUSES = ["Submitted", "UnderwritingManualReview"];
 const OPEN_FINANCING_STATUSES = ["Submitted", "Underwriting"];
 
+// ─── UnderwritingPolicy (vetify-wide singleton; create + UpdatePolicy) ────
+// Phase 2, Thirty-Fifth Slice -- the last item from the original template
+// survey. See migrations/036's header for why this has no maker-checker
+// layer (unlike VerificationPolicy/CompliancePolicy) and why it's a
+// singleton rather than per-institution.
+
+interface UnderwritingPolicyArgs {
+  policyVersion: string;
+  autoApproveMin: number;
+  autoRejectMax: number;
+  minDscrRatio?: number | null;
+  minLoanAmount?: number | null;
+  maxLoanAmount?: number | null;
+  indicativeProfitMarginPct?: number | null;
+  requestSlaHours: number;
+  offerValidityDays: number;
+  effectiveFrom: string;
+  writeOffThresholdAmount?: number | null;
+  maxRestructuringsPerFacility?: number | null;
+  permittedSectors?: string[] | null;
+  requiredCollateralTypes?: string[];
+  maxSectorConcentrationPct?: number | null;
+  scoringWeights: Record<string, number>;
+}
+
+function validateUnderwritingPolicyFields(args: UnderwritingPolicyArgs): void {
+  if (!args.policyVersion) throw new DomainError("policyVersion must not be empty");
+  if (!(args.autoApproveMin > args.autoRejectMax)) throw new DomainError("autoApproveMin must exceed autoRejectMax");
+  if (!(args.requestSlaHours > 0)) throw new DomainError("requestSlaHours must be positive");
+  if (!(args.offerValidityDays > 0)) throw new DomainError("offerValidityDays must be positive");
+  if (args.minLoanAmount != null && args.maxLoanAmount != null && args.minLoanAmount > args.maxLoanAmount) {
+    throw new DomainError("minLoanAmount must not exceed maxLoanAmount");
+  }
+}
+
+async function createUnderwritingPolicyImpl(session: SessionContext, args: UnderwritingPolicyArgs) {
+  validateUnderwritingPolicyFields(args);
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(
+      `INSERT INTO underwriting_policy
+         (policy_version, auto_approve_min, auto_reject_max, min_dscr_ratio, min_loan_amount, max_loan_amount,
+          indicative_profit_margin_pct, request_sla_hours, offer_validity_days, effective_from,
+          write_off_threshold_amount, max_restructurings_per_facility, permitted_sectors,
+          required_collateral_types, max_sector_concentration_pct, scoring_weights)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+       RETURNING id`,
+      [
+        args.policyVersion, args.autoApproveMin, args.autoRejectMax, args.minDscrRatio ?? null,
+        args.minLoanAmount ?? null, args.maxLoanAmount ?? null, args.indicativeProfitMarginPct ?? null,
+        args.requestSlaHours, args.offerValidityDays, args.effectiveFrom, args.writeOffThresholdAmount ?? null,
+        args.maxRestructuringsPerFacility ?? null, args.permittedSectors ? JSON.stringify(args.permittedSectors) : null,
+        JSON.stringify(args.requiredCollateralTypes ?? []), args.maxSectorConcentrationPct ?? null,
+        JSON.stringify(args.scoringWeights),
+      ],
+    );
+    return { underwritingPolicyId: rows[0].id };
+  });
+}
+export const createUnderwritingPolicy = withAuthorization(["vetify"], createUnderwritingPolicyImpl);
+
+async function updateUnderwritingPolicyImpl(session: SessionContext, policyId: number, args: UnderwritingPolicyArgs) {
+  validateUnderwritingPolicyFields(args);
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query("SELECT id FROM underwriting_policy WHERE id = $1 FOR UPDATE", [policyId]);
+    if (!rows[0]) throw new DomainError("UnderwritingPolicy not found");
+
+    const { rows: updated } = await client.query(
+      `UPDATE underwriting_policy
+         SET policy_version = $2, auto_approve_min = $3, auto_reject_max = $4, min_dscr_ratio = $5,
+             min_loan_amount = $6, max_loan_amount = $7, indicative_profit_margin_pct = $8,
+             request_sla_hours = $9, offer_validity_days = $10, effective_from = $11,
+             write_off_threshold_amount = $12, max_restructurings_per_facility = $13, permitted_sectors = $14,
+             required_collateral_types = $15, max_sector_concentration_pct = $16, scoring_weights = $17,
+             effective_to = NULL, updated_at = now()
+         WHERE id = $1
+         RETURNING id`,
+      [
+        policyId, args.policyVersion, args.autoApproveMin, args.autoRejectMax, args.minDscrRatio ?? null,
+        args.minLoanAmount ?? null, args.maxLoanAmount ?? null, args.indicativeProfitMarginPct ?? null,
+        args.requestSlaHours, args.offerValidityDays, args.effectiveFrom, args.writeOffThresholdAmount ?? null,
+        args.maxRestructuringsPerFacility ?? null, args.permittedSectors ? JSON.stringify(args.permittedSectors) : null,
+        JSON.stringify(args.requiredCollateralTypes ?? []), args.maxSectorConcentrationPct ?? null,
+        JSON.stringify(args.scoringWeights),
+      ],
+    );
+    return { underwritingPolicyId: updated[0].id };
+  });
+}
+export const updateUnderwritingPolicy = withAuthorization(["vetify"], updateUnderwritingPolicyImpl);
+
+export async function listUnderwritingPolicies(session: SessionContext) {
+  return withTransaction(session, async (client) => {
+    const { rows } = await client.query(`SELECT * FROM underwriting_policy ORDER BY created_at DESC`);
+    return rows;
+  });
+}
+
+/** Mirrors resolveUnderwritingPolicy: fetches the active policy (if any) and
+ * enforces its gates. Returns the snapshot + computed SLA expiry, or
+ * (null, null) when no policy is active -- exactly the real Daml's `None ->
+ * return (None, None)` backward-compatible fallback. */
+async function resolveUnderwritingPolicy(
+  client: { query: (sql: string, params?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  autoDecided: boolean,
+  assessment: RiskAssessment,
+  requestedAmount: number,
+  businessSector: string,
+): Promise<{ snapshot: Record<string, unknown> | null; expiresAt: string | null }> {
+  const { rows } = await client.query(
+    `SELECT * FROM underwriting_policy WHERE effective_to IS NULL ORDER BY created_at DESC LIMIT 1`,
+  );
+  const policy = rows[0];
+  if (!policy) return { snapshot: null, expiresAt: null };
+
+  if (!(new Date(policy.effective_from as string).getTime() <= Date.now())) {
+    throw new DomainError("UnderwritingPolicy is not yet effective");
+  }
+  if (autoDecided && !(assessment.score >= (policy.auto_approve_min as number))) {
+    throw new DomainError(`Agent auto-decision requires score >= ${policy.auto_approve_min}`);
+  }
+  if (policy.max_loan_amount != null && !(requestedAmount <= Number(policy.max_loan_amount))) {
+    throw new DomainError("Requested amount exceeds policy maximum loan amount");
+  }
+  if (policy.min_loan_amount != null && !(requestedAmount >= Number(policy.min_loan_amount))) {
+    throw new DomainError("Requested amount is below policy minimum loan amount");
+  }
+  if (policy.permitted_sectors != null && !(policy.permitted_sectors as string[]).includes(businessSector)) {
+    throw new DomainError("Business sector is not permitted under this institution's lending policy");
+  }
+
+  const snapshot = {
+    policyVersion: policy.policy_version,
+    autoApproveMin: policy.auto_approve_min,
+    autoRejectMax: policy.auto_reject_max,
+    minDscrRatio: policy.min_dscr_ratio,
+    minLoanAmount: policy.min_loan_amount,
+    maxLoanAmount: policy.max_loan_amount,
+    indicativeProfitMarginPct: policy.indicative_profit_margin_pct,
+    requestSlaHours: policy.request_sla_hours,
+    offerValidityDays: policy.offer_validity_days,
+    effectiveFrom: policy.effective_from,
+    capturedAt: new Date().toISOString(),
+    scoringWeights: policy.scoring_weights,
+  };
+  const expiresAt = new Date(Date.now() + Number(policy.request_sla_hours) * 60 * 60 * 1000).toISOString();
+  return { snapshot, expiresAt };
+}
+
 // ─── Choice: RequestFinancing (business, on ApprovedBusiness) ─────────────
 
 interface RequestFinancingArgs {
@@ -107,9 +255,17 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
       throw new DomainError("High-risk assessments cannot be auto-decided; human review required");
     }
 
-    await client.query(`UPDATE financing_request SET status = 'Underwriting', updated_at = now() WHERE id = $1`, [
-      financingRequestId,
-    ]);
+    // Look up the active policy to capture a snapshot and compute the SLA
+    // expiry -- mirrors resolveUnderwritingPolicy exactly; a no-policy
+    // system behaves identically to before this slice.
+    const { snapshot, expiresAt } = await resolveUnderwritingPolicy(
+      client, args.autoDecided, args.assessment, Number(row.terms_amount), row.business_sector,
+    );
+
+    await client.query(
+      `UPDATE financing_request SET status = 'Underwriting', expires_at = $2, updated_at = now() WHERE id = $1`,
+      [financingRequestId, expiresAt],
+    );
 
     const { rows: result } = await client.query(
       `INSERT INTO underwriting_result
@@ -117,8 +273,8 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
           assessment_risk_category, assessment_recommended_limit, assessment_recommendation,
           assessment_probability_of_default, assessment_loss_given_default, assessment_exposure_at_default,
           assessment_behavioural_score, assessment_cashflow_risk_score, assessment_creditworthiness_score,
-          assessment_fraud_score, auto_decided, underwriting_started_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now())
+          assessment_fraud_score, auto_decided, underwriting_started_at, valid_until, policy_snapshot)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now(), $17, $18)
        RETURNING id`,
       [
         financingRequestId,
@@ -137,6 +293,8 @@ async function beginUnderwritingImpl(session: SessionContext, financingRequestId
         args.assessment.creditworthinessScore ?? null,
         args.assessment.fraudScore ?? null,
         args.autoDecided,
+        expiresAt,
+        snapshot ? JSON.stringify(snapshot) : null,
       ],
     );
     return { underwritingResultId: result[0].id };
@@ -163,6 +321,16 @@ async function flagUnderwritingForManualReviewImpl(
     }
     if (args.riskScore < 0 || args.riskScore > 100) {
       throw new DomainError("Risk score must be 0-100");
+    }
+    // If a policy is active, this institution's own Medium band must be
+    // respected -- mirrors resolveUnderwritingPolicy's band check; a
+    // no-policy system skips this, unchanged from before this slice.
+    const { rows: policyRows } = await client.query(
+      `SELECT auto_approve_min, auto_reject_max FROM underwriting_policy WHERE effective_to IS NULL ORDER BY created_at DESC LIMIT 1`,
+    );
+    const policy = policyRows[0];
+    if (policy && !(args.riskScore > policy.auto_reject_max && args.riskScore < policy.auto_approve_min)) {
+      throw new DomainError("Risk score is outside the Medium band for this institution's policy");
     }
     const { rows: updated } = await client.query(
       `UPDATE financing_request

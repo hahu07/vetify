@@ -148,6 +148,30 @@ export function serializeUnderwritingResult(row: Record<string, unknown>) {
     autoDecided: row.auto_decided,
     underwritingStartedAt: row.underwriting_started_at ?? undefined,
     validUntil: row.valid_until ?? undefined,
+    policySnapshot: row.policy_snapshot ?? undefined,
+  };
+}
+
+export function serializeUnderwritingPolicy(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    policyVersion: row.policy_version,
+    autoApproveMin: row.auto_approve_min,
+    autoRejectMax: row.auto_reject_max,
+    minDscrRatio: num(row.min_dscr_ratio) ?? null,
+    minLoanAmount: num(row.min_loan_amount) ?? null,
+    maxLoanAmount: num(row.max_loan_amount) ?? null,
+    indicativeProfitMarginPct: num(row.indicative_profit_margin_pct) ?? null,
+    requestSlaHours: row.request_sla_hours,
+    offerValidityDays: row.offer_validity_days,
+    effectiveFrom: row.effective_from,
+    effectiveTo: row.effective_to ?? null,
+    writeOffThresholdAmount: num(row.write_off_threshold_amount) ?? null,
+    maxRestructuringsPerFacility: row.max_restructurings_per_facility ?? null,
+    permittedSectors: row.permitted_sectors ?? null,
+    requiredCollateralTypes: row.required_collateral_types ?? [],
+    maxSectorConcentrationPct: num(row.max_sector_concentration_pct) ?? null,
+    scoringWeights: row.scoring_weights,
   };
 }
 
