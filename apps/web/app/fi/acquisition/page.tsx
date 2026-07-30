@@ -10,9 +10,18 @@ import {
   useProceedDirectly,
   useAssetPurchaseRecords,
   useOfferMurabahah,
+  useAssetRejectionRecords,
+  useProceedWithReplacement,
+  useAcquisitionCancellationRequests,
+  useConfirmCancellation,
+  useRejectCancellation,
+  useMurabahahProposals,
+  useWithdrawProposal,
   type MurabahahWad,
   type AssetPurchaseRecord,
   type PaymentScheduleEntry,
+  type AcquisitionCancellationRequestItem,
+  type MurabahahProposal,
 } from "@/lib/apiClient";
 
 // New page -- Stage 8's acquisition chain (MurabahahWad -> AssetPurchaseRecord
@@ -187,18 +196,180 @@ function OfferMurabahahModal({ record, onClose }: { record: AssetPurchaseRecord;
   );
 }
 
+// Phase 2, Thirty-Ninth Slice: ProceedWithReplacement (the FI's response to
+// a business rejection) and WithdrawProposal (the FI pulls its own offer
+// before the business responds). ConfirmCancellation/RejectCancellation are
+// simple enough to render inline, no modal needed. ExpireProposal is
+// deliberately not here -- its Daml controller is `vetify` alone (a system
+// sweep once the acceptance window has elapsed, not an FI action), so it
+// lives on /vetify/shariah-certification instead, the one vetify-facing
+// page that already has full MurabahahProposal visibility.
+
+function ProceedWithReplacementModal({ record, onClose }: { record: AssetPurchaseRecord; onClose: () => void }) {
+  const [newActualCost, setNewActualCost] = useState<number | "">(record.totalAcquisitionCost);
+  const [newPurchaseDate, setNewPurchaseDate] = useState(new Date().toISOString().slice(0, 10));
+  const [newInvoiceRef, setNewInvoiceRef] = useState("");
+  const [replacementNote, setReplacementNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const proceedWithReplacement = useProceedWithReplacement();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!newActualCost || !newInvoiceRef.trim() || !replacementNote.trim()) {
+      setError("New cost, invoice reference, and a replacement note are all required");
+      return;
+    }
+    try {
+      await proceedWithReplacement.mutateAsync({ id: record.id, newActualCost: Number(newActualCost), newPurchaseDate, newInvoiceRef, replacementNote });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to replace the asset");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Replace Asset</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">{record.assetDescription}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">New Actual Cost (NGN)</label>
+          <input type="number" className="input text-sm font-mono" value={newActualCost} onChange={(e) => setNewActualCost(e.target.value === "" ? "" : Number(e.target.value))} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">New Purchase Date</label>
+          <input type="date" className="input text-sm" value={newPurchaseDate} onChange={(e) => setNewPurchaseDate(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">New Invoice Reference</label>
+          <input className="input text-sm" value={newInvoiceRef} onChange={(e) => setNewInvoiceRef(e.target.value)} />
+        </div>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Replacement Note</label>
+          <textarea rows={2} className="input text-sm resize-none" value={replacementNote} onChange={(e) => setReplacementNote(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={proceedWithReplacement.isPending} className="btn-primary flex-1 disabled:opacity-40">
+            {proceedWithReplacement.isPending ? "Submitting…" : "Replace Asset"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WithdrawProposalModal({ proposal, onClose }: { proposal: MurabahahProposal; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const withdraw = useWithdrawProposal();
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (!reason.trim()) {
+      setError("Please provide a reason");
+      return;
+    }
+    try {
+      await withdraw.mutateAsync({ id: proposal.id, reason });
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to withdraw the proposal");
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative card p-6 w-full max-w-md">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-gray-900">Withdraw Proposal</h2>
+          <button onClick={onClose} className="p-1 rounded text-gray-400 hover:text-gray-600"><X size={18} /></button>
+        </div>
+        <p className="text-xs text-gray-500 mb-4 font-mono">{proposal.facilityRef}</p>
+        <div className="mb-3">
+          <label className="block text-xs font-medium text-gray-700 mb-1">Reason</label>
+          <textarea rows={2} className="input text-sm resize-none" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </div>
+        {error && <p className="text-xs text-red-600 mb-3">{error}</p>}
+        <div className="flex gap-3">
+          <button onClick={onClose} className="btn-secondary flex-1">Cancel</button>
+          <button onClick={handleSubmit} disabled={withdraw.isPending} className="btn-danger flex-1 disabled:opacity-40">
+            {withdraw.isPending ? "Submitting…" : "Withdraw"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PendingCancellationRow({ cancellation, record }: { cancellation: AcquisitionCancellationRequestItem; record: AssetPurchaseRecord | undefined }) {
+  const [error, setError] = useState<string | null>(null);
+  const confirm = useConfirmCancellation();
+  const reject = useRejectCancellation();
+
+  const handleConfirm = async () => {
+    setError(null);
+    if (!record) return;
+    try {
+      await confirm.mutateAsync({ id: record.id, requestId: cancellation.id });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to confirm cancellation");
+    }
+  };
+
+  const handleReject = async () => {
+    setError(null);
+    try {
+      await reject.mutateAsync({ id: cancellation.id });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to reject cancellation");
+    }
+  };
+
+  return (
+    <div className="card p-4">
+      <p className="text-sm text-gray-900">{cancellation.businessName}</p>
+      <p className="text-xs text-gray-500 mt-0.5">{cancellation.reason}</p>
+      <div className="flex gap-2 mt-2">
+        <button onClick={handleReject} disabled={reject.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40">
+          {reject.isPending ? "Rejecting…" : "Reject"}
+        </button>
+        <button onClick={handleConfirm} disabled={confirm.isPending || !record} className="btn-danger text-xs px-3 py-1.5 disabled:opacity-40">
+          {confirm.isPending ? "Confirming…" : "Confirm Cancellation"}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 export default function FiAcquisitionPage() {
   const { data: wads, isLoading: loadingWads, isError: errorWads } = useMurabahahWads();
   const { data: records, isLoading: loadingRecords, isError: errorRecords } = useAssetPurchaseRecords();
+  const { data: rejectionRecords } = useAssetRejectionRecords();
+  const { data: cancellationRequests } = useAcquisitionCancellationRequests();
+  const { data: proposals } = useMurabahahProposals();
   const [purchaseModal, setPurchaseModal] = useState<MurabahahWad | null>(null);
   const [offerModal, setOfferModal] = useState<AssetPurchaseRecord | null>(null);
+  const [replacementModal, setReplacementModal] = useState<AssetPurchaseRecord | null>(null);
+  const [withdrawModal, setWithdrawModal] = useState<MurabahahProposal | null>(null);
 
   if (loadingWads || loadingRecords) return <Layout title="Asset Acquisition"><FullPageLoader /></Layout>;
   if (errorWads || errorRecords || !wads || !records) {
     return <Layout title="Asset Acquisition"><ErrorState message="Failed to load acquisition queue" /></Layout>;
   }
 
+  const rejectedRecordIds = new Set((rejectionRecords ?? []).map((r) => r.assetPurchaseRecordId));
   const readyToOffer = records.filter((r) => r.deliveryAcknowledged);
+  const rejectedRecords = records.filter((r) => !r.deliveryAcknowledged && rejectedRecordIds.has(r.id));
+  const pendingCancellations = (cancellationRequests ?? []).filter((c) => c.status === "Pending");
+  const recordById = new Map(records.map((r) => [r.id, r]));
 
   return (
     <Layout title="Asset Acquisition">
@@ -266,9 +437,62 @@ export default function FiAcquisitionPage() {
             )}
           </div>
         </div>
+
+        {rejectedRecords.length > 0 && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-800 mb-3">Rejected Deliveries</h2>
+            <div className="card overflow-hidden divide-y divide-gray-100">
+              {rejectedRecords.map((record) => (
+                <div key={record.id} className="flex items-center justify-between gap-4 p-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900">{record.businessName}</p>
+                    <p className="text-xs text-gray-600 mt-0.5">{record.assetDescription}</p>
+                  </div>
+                  <button onClick={() => setReplacementModal(record)} className="btn-primary text-xs px-3 py-1.5 flex-shrink-0">
+                    Replace Asset
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {pendingCancellations.length > 0 && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-800 mb-3">Pending Cancellation Requests</h2>
+            <div className="space-y-3">
+              {pendingCancellations.map((c) => (
+                <PendingCancellationRow key={c.id} cancellation={c} record={recordById.get(c.assetPurchaseRecordId)} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(proposals ?? []).length > 0 && (
+          <div>
+            <h2 className="text-sm font-semibold text-gray-800 mb-3">Sent Proposals</h2>
+            <div className="card overflow-hidden divide-y divide-gray-100">
+              {(proposals ?? []).map((proposal) => (
+                <div key={proposal.id} className="flex items-center justify-between gap-4 p-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-gray-900 font-mono">{proposal.facilityRef}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{formatNaira(proposal.murabahahTerms.salePrice)} · {proposal.murabahahTerms.tenureMonths} months</p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button onClick={() => setWithdrawModal(proposal)} className="btn-danger text-xs px-3 py-1.5">
+                      Withdraw
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {purchaseModal && <ProceedDirectlyModal wad={purchaseModal} onClose={() => setPurchaseModal(null)} />}
+      {replacementModal && <ProceedWithReplacementModal record={replacementModal} onClose={() => setReplacementModal(null)} />}
+      {withdrawModal && <WithdrawProposalModal proposal={withdrawModal} onClose={() => setWithdrawModal(null)} />}
       {offerModal && <OfferMurabahahModal record={offerModal} onClose={() => setOfferModal(null)} />}
     </Layout>
   );

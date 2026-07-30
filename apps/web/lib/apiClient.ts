@@ -588,6 +588,7 @@ export interface MurabahahProposal {
   murabahahTerms: MurabahahTerms;
   paymentSchedule: PaymentScheduleEntry[];
   startDate: string;
+  acceptanceExpiresAt?: string | null;
 }
 
 export interface ShariahContractCertification {
@@ -2587,5 +2588,141 @@ export function useRecordCovenantMeasurement() {
     }: { id: string; measuredValue: number; measureDate: string; measuredBy: string }) =>
       apiClient.post(`/credit-covenants/${id}/record-measurement`, { measuredValue, measureDate, measuredBy }).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["covenant-measurement-records"] }),
+  });
+}
+
+// ─── Phase 2, Thirty-Ninth Slice: Murabahah acquisition alternates, Pass 1 ──
+// Pre-Qabdh reject/replace/cancel on AssetPurchaseRecord (Twenty-Seventh
+// Slice) and DeclineProposal/ExpireProposal/WithdrawProposal on
+// MurabahahProposal (Second/Twenty-Fifth Slices) -- all ported backend-side
+// with no frontend hook coverage until now.
+
+export interface AssetRejectionRecordItem {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  reason: string;
+  defectDescription: string;
+  rejectedAt: string;
+}
+
+export interface AcquisitionCancellationRequestItem {
+  id: string;
+  assetPurchaseRecordId: string;
+  cacRegNumber: string;
+  businessName: string;
+  reason: string;
+  status: "Pending" | "Confirmed" | "Rejected";
+  resolvedAt?: string | null;
+}
+
+export interface ProposalDeclineRecordItem {
+  id: string;
+  murabahahProposalId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  reason: string;
+}
+
+export function useAssetRejectionRecords() {
+  return useQuery({
+    queryKey: ["asset-rejection-records"],
+    queryFn: async () => (await apiClient.get<AssetRejectionRecordItem[]>("/asset-rejection-records")).data,
+  });
+}
+
+export function useRejectDelivery() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason, defectDescription }: { id: string; reason: string; defectDescription: string }) =>
+      apiClient.post(`/asset-purchase-records/${id}/reject-delivery`, { reason, defectDescription }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["asset-purchase-records"] });
+      qc.invalidateQueries({ queryKey: ["asset-rejection-records"] });
+    },
+  });
+}
+
+export function useProceedWithReplacement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, newActualCost, newPurchaseDate, newInvoiceRef, replacementNote,
+    }: { id: string; newActualCost: number; newPurchaseDate: string; newInvoiceRef: string; replacementNote: string }) =>
+      apiClient
+        .post(`/asset-purchase-records/${id}/proceed-with-replacement`, { newActualCost, newPurchaseDate, newInvoiceRef, replacementNote })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["asset-purchase-records"] }),
+  });
+}
+
+export function useAcquisitionCancellationRequests() {
+  return useQuery({
+    queryKey: ["acquisition-cancellation-requests"],
+    queryFn: async () => (await apiClient.get<AcquisitionCancellationRequestItem[]>("/acquisition-cancellation-requests")).data,
+  });
+}
+
+export function useRequestCancellation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/asset-purchase-records/${id}/request-cancellation`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["acquisition-cancellation-requests"] }),
+  });
+}
+
+export function useConfirmCancellation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, requestId }: { id: string; requestId: string }) =>
+      apiClient.post(`/asset-purchase-records/${id}/confirm-cancellation`, { requestId }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["acquisition-cancellation-requests"] });
+      qc.invalidateQueries({ queryKey: ["asset-purchase-records"] });
+    },
+  });
+}
+
+export function useRejectCancellation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string }) => apiClient.post(`/acquisition-cancellation-requests/${id}/reject`, {}).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["acquisition-cancellation-requests"] }),
+  });
+}
+
+export function useDeclineProposal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/murabahah-proposals/${id}/decline`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["murabahah-proposals"] }),
+  });
+}
+
+export function useWithdrawProposal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+      apiClient.post(`/murabahah-proposals/${id}/withdraw`, { reason }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["murabahah-proposals"] }),
+  });
+}
+
+export function useExpireProposal() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => apiClient.post(`/murabahah-proposals/${id}/expire`, {}).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["murabahah-proposals"] }),
+  });
+}
+
+export function useProposalDeclineRecords() {
+  return useQuery({
+    queryKey: ["proposal-decline-records"],
+    queryFn: async () => (await apiClient.get<ProposalDeclineRecordItem[]>("/proposal-decline-records")).data,
   });
 }

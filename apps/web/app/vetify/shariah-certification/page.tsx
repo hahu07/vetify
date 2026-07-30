@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { ShieldCheck, X } from "lucide-react";
+import { ShieldCheck, X, Clock } from "lucide-react";
 import Layout from "@/components/Layout";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
 import { formatNaira } from "@/lib/formatters";
-import { useMurabahahProposals, useShariahContractCertifications, useCertifyShariahTerms, type MurabahahProposal } from "@/lib/apiClient";
+import { useMurabahahProposals, useShariahContractCertifications, useCertifyShariahTerms, useExpireProposal, type MurabahahProposal } from "@/lib/apiClient";
 
 // New page -- G11's per-contract Shari'a certification (CertifyShariahTerms),
 // the advisor's real decision authority over Stage 8's financial-structure
@@ -97,6 +97,37 @@ function CertifyModal({ proposal, onClose }: { proposal: MurabahahProposal; onCl
   );
 }
 
+function ExpireProposalRow({ proposal }: { proposal: MurabahahProposal }) {
+  const [error, setError] = useState<string | null>(null);
+  const expire = useExpireProposal();
+
+  const handleExpire = async () => {
+    setError(null);
+    try {
+      await expire.mutateAsync(proposal.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to expire the proposal");
+    }
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-4 p-4">
+      <div className="min-w-0">
+        <p className="text-sm font-semibold text-gray-900">{proposal.businessName}</p>
+        <p className="text-xs text-gray-500 font-mono">{proposal.facilityRef}</p>
+        <p className="text-xs text-gray-600 mt-0.5">
+          {formatNaira(proposal.murabahahTerms.salePrice)} · acceptance window closed{" "}
+          {proposal.acceptanceExpiresAt ? new Date(proposal.acceptanceExpiresAt).toLocaleString() : ""}
+        </p>
+        {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
+      </div>
+      <button onClick={handleExpire} disabled={expire.isPending} className="btn-secondary text-xs px-3 py-1.5 flex-shrink-0 disabled:opacity-40">
+        {expire.isPending ? "Expiring…" : "Expire"}
+      </button>
+    </div>
+  );
+}
+
 export default function ShariahCertificationPage() {
   const { data: proposals, isLoading, isError } = useMurabahahProposals();
   const { data: certifications } = useShariahContractCertifications();
@@ -107,6 +138,8 @@ export default function ShariahCertificationPage() {
 
   const certifiedFacilities = new Set((certifications ?? []).map((c) => c.facilityRef));
   const pending = proposals.filter((p) => !certifiedFacilities.has(p.facilityRef));
+  const now = Date.now();
+  const expired = pending.filter((p) => p.acceptanceExpiresAt && new Date(p.acceptanceExpiresAt).getTime() < now);
 
   return (
     <Layout title="Shariah Certification">
@@ -141,6 +174,20 @@ export default function ShariahCertificationPage() {
             </div>
           )}
         </div>
+
+        {expired.length > 0 && (
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <Clock size={16} className="text-amber-500" />
+              <h2 className="text-sm font-semibold text-gray-800">Expired Proposals (acceptance window closed)</h2>
+            </div>
+            <div className="card overflow-hidden divide-y divide-gray-100">
+              {expired.map((proposal) => (
+                <ExpireProposalRow key={proposal.id} proposal={proposal} />
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {modal && <CertifyModal proposal={modal} onClose={() => setModal(null)} />}
