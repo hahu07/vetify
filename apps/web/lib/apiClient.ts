@@ -97,6 +97,9 @@ export interface ComplianceReviewItem {
   checks?: ComplianceCheck;
   agentScore?: number;
   agentRisk?: RiskLevel;
+  shariahVerdict?: "COMPLIANT" | "REQUIRES_REVIEW" | "NON_COMPLIANT";
+  shariahRationale?: string;
+  shariahScreenedAt?: string;
 }
 
 export interface VerificationResultItem {
@@ -3184,5 +3187,260 @@ export function useRecordGovernanceAssessment() {
     }: { id: string; aiRecommendationFollowed: boolean; governanceNote?: string | null; assessedBy: string }) =>
       apiClient.post(`/financing-decisions/${id}/record-governance-assessment`, { aiRecommendationFollowed, governanceNote, assessedBy }).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["funding-governance-records"] }),
+  });
+}
+
+// ─── Phase 2, Forty-Second Slice: Ibra'/Takaful/Shariah extensions ─────────
+// GrantPartialIbra/ProposeRebate (IbraRequest extras), TakafulPolicy
+// (financialInstitution creates directly on a MurabahahContract),
+// ShariahAuditRecord/ShariahException (vetify oversight), RevokeCertification
+// (advisor, on ShariahContractCertification), and RecordShariahPreCheck/
+// SupersedeShariahVerdict (ComplianceReview's Shariah verdict) -- all ported
+// backend-side with no frontend hook coverage until now.
+
+export interface ShariahAssessment {
+  verdict: "COMPLIANT" | "REQUIRES_REVIEW" | "NON_COMPLIANT";
+  activitiesScreened: string[];
+  prohibitedRevenuePct?: number | null;
+  aaoifiStandards: string[];
+  scholarDecision?: string | null;
+  rationale: string;
+}
+
+export interface IbraRebateProposal {
+  id: string;
+  ibraRequestId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  outstandingBalance: number;
+  suggestedRebate: number;
+  rationale: string;
+  settlementType: "FullIbra" | "PartialIbra";
+}
+
+export interface PartialIbraGrant {
+  id: string;
+  ibraRequestId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  outstandingBalance: number;
+  rebateAmount: number;
+  approvedSettlementAmount: number;
+  effectiveDate: string;
+  grantedAt: string;
+}
+
+export interface TakafulPolicy {
+  id: string;
+  murabahahContractId: string;
+  cacRegNumber: string;
+  businessName: string;
+  policyNumber: string;
+  takafulOperator: string;
+  coverageType: string;
+  coverageAmount: number;
+  premiumAmount: number;
+  startDate: string;
+  expiryDate: string;
+  assetRef?: string | null;
+}
+
+export interface ShariahAuditRecordItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  auditDate: string;
+  auditPeriod: string;
+  auditorRef: string;
+  findings: string[];
+  overallCompliant: boolean;
+  recommendations: string[];
+  nextAuditDate?: string | null;
+}
+
+export interface ShariahExceptionItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  exceptionType: string;
+  description: string;
+  severity: "MinorException" | "MajorException" | "CriticalException";
+  detectedAt: string;
+  resolutionNote?: string | null;
+  resolvedAt?: string | null;
+}
+
+export interface ShariahCertificationRevocation {
+  id: string;
+  shariahContractCertificationId: string;
+  facilityRef: string;
+  cacRegNumber: string;
+  businessName: string;
+  originalCertificationRef: string;
+  revocationRef: string;
+  reason: string;
+  revokedBy: string;
+  revokedAt: string;
+}
+
+// ── IbraRequest extras ──
+
+export function useProposeRebate() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, suggestedRebate, rationale }: { id: string; suggestedRebate: number; rationale: string }) =>
+      apiClient.post(`/ibra-requests/${id}/propose-rebate`, { suggestedRebate, rationale }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ibra-rebate-proposals"] }),
+  });
+}
+
+export function useIbraRebateProposals() {
+  return useQuery({
+    queryKey: ["ibra-rebate-proposals"],
+    queryFn: async () => (await apiClient.get<IbraRebateProposal[]>("/ibra-rebate-proposals")).data,
+  });
+}
+
+export function useGrantPartialIbra() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, rebateAmount, approvedSettlementAmount, proposedByOfficerId, confirmedByOfficerId,
+    }: { id: string; rebateAmount: number; approvedSettlementAmount: number; proposedByOfficerId: string; confirmedByOfficerId: string }) =>
+      apiClient
+        .post(`/ibra-requests/${id}/grant-partial`, { rebateAmount, approvedSettlementAmount, proposedByOfficerId, confirmedByOfficerId })
+        .then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["ibra-requests"] });
+      qc.invalidateQueries({ queryKey: ["partial-ibra-grants"] });
+    },
+  });
+}
+
+export function usePartialIbraGrants() {
+  return useQuery({
+    queryKey: ["partial-ibra-grants"],
+    queryFn: async () => (await apiClient.get<PartialIbraGrant[]>("/partial-ibra-grants")).data,
+  });
+}
+
+// ── TakafulPolicy ──
+
+export function useTakafulPolicies() {
+  return useQuery({
+    queryKey: ["takaful-policies"],
+    queryFn: async () => (await apiClient.get<TakafulPolicy[]>("/takaful-policies")).data,
+  });
+}
+
+export function useCreateTakafulPolicy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, policyNumber, takafulOperator, coverageType, coverageAmount, premiumAmount, startDate, expiryDate, assetRef,
+    }: {
+      id: string; policyNumber: string; takafulOperator: string; coverageType: string; coverageAmount: number;
+      premiumAmount: number; startDate: string; expiryDate: string; assetRef?: string | null;
+    }) =>
+      apiClient
+        .post(`/murabahah-contracts/${id}/create-takaful-policy`, { policyNumber, takafulOperator, coverageType, coverageAmount, premiumAmount, startDate, expiryDate, assetRef })
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["takaful-policies"] }),
+  });
+}
+
+// ── ShariahAuditRecord / ShariahException (vetify oversight) ──
+
+export function useShariahAuditRecords() {
+  return useQuery({
+    queryKey: ["shariah-audit-records"],
+    queryFn: async () => (await apiClient.get<ShariahAuditRecordItem[]>("/shariah-audit-records")).data,
+  });
+}
+
+export function useCreateShariahAuditRecord() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; facilityRef?: string | null; auditDate: string; auditPeriod: string;
+      auditorRef: string; findings: string[]; overallCompliant: boolean; recommendations: string[]; nextAuditDate?: string | null;
+    }) => apiClient.post("/shariah-audit-records", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["shariah-audit-records"] }),
+  });
+}
+
+export function useShariahExceptions() {
+  return useQuery({
+    queryKey: ["shariah-exceptions"],
+    queryFn: async () => (await apiClient.get<ShariahExceptionItem[]>("/shariah-exceptions")).data,
+  });
+}
+
+export function useCreateShariahException() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; facilityRef?: string | null;
+      exceptionType: string; description: string; severity: ShariahExceptionItem["severity"];
+    }) => apiClient.post("/shariah-exceptions", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["shariah-exceptions"] }),
+  });
+}
+
+export function useResolveException() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiClient.post(`/shariah-exceptions/${id}/resolve`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["shariah-exceptions"] }),
+  });
+}
+
+// ── RevokeCertification (advisor) ──
+
+export function useRevokeCertification() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, revocationRef, reason, revokedBy,
+    }: { id: string; revocationRef: string; reason: string; revokedBy: string }) =>
+      apiClient.post(`/shariah-contract-certifications/${id}/revoke`, { revocationRef, reason, revokedBy }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["shariah-contract-certifications"] });
+      qc.invalidateQueries({ queryKey: ["shariah-certification-revocations"] });
+    },
+  });
+}
+
+export function useShariahCertificationRevocations() {
+  return useQuery({
+    queryKey: ["shariah-certification-revocations"],
+    queryFn: async () => (await apiClient.get<ShariahCertificationRevocation[]>("/shariah-certification-revocations")).data,
+  });
+}
+
+// ── ComplianceReview's Shariah verdict (RecordShariahPreCheck / SupersedeShariahVerdict) ──
+
+export function useRecordShariahPreCheck() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, verdict, advisorId }: { id: string; verdict: ShariahAssessment; advisorId: number }) =>
+      apiClient.post(`/compliance/${id}/shariah-precheck`, { ...verdict, advisorId }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["compliance-queue"] }),
+  });
+}
+
+export function useSupersedeShariahVerdict() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, correctionRef, newVerdict, reason, correctedBy,
+    }: { id: string; correctionRef: string; newVerdict: ShariahAssessment; reason: string; correctedBy: string }) =>
+      apiClient.post(`/compliance/${id}/supersede-shariah-verdict`, { correctionRef, newVerdict, reason, correctedBy }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["compliance-queue"] }),
   });
 }
