@@ -1,10 +1,23 @@
 "use client";
 
-import { FileText, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import { FileText, ShieldCheck, AlertTriangle } from "lucide-react";
 import Layout from "@/components/Layout";
 import { FullPageLoader, ErrorState } from "@/components/LoadingState";
 import { formatNaira, formatDate } from "@/lib/formatters";
-import { useRahnAgreements, useCollateralValuationDocuments } from "@/lib/apiClient";
+import {
+  useRahnAgreements,
+  useCollateralValuationDocuments,
+  usePendingCollateralEnforcements,
+  useConfirmEnforce,
+  useRejectEnforce,
+  useOfficers,
+  useCreditCovenants,
+  useCovenantMeasurementRecords,
+  useRecordCovenantMeasurement,
+  type PendingCollateralEnforcementItem,
+  type CreditCovenantItem,
+} from "@/lib/apiClient";
 
 // Phase 2, seventh slice: the vetify oversight view of RahnAgreement
 // collateral, giving vetify visibility into every business-submitted
@@ -13,6 +26,11 @@ import { useRahnAgreements, useCollateralValuationDocuments } from "@/lib/apiCli
 // rationale (this is independent evidence the business submits, not the
 // FI's own Revalue decision, which stays out of scope). No page anywhere
 // in apps/vetify showed RahnAgreement data at all before this slice.
+//
+// Phase 2, Thirty-Seventh Slice adds the vetify side of the
+// ProposeEnforceCollateral maker-checker: the FI's RecoveryOfficer proposes
+// (on /fi/contracts/[id]), vetify confirms (nested-exercises the real
+// EnforceCollateral) or rejects here.
 
 function statusLabel(status: string) {
   if (status === "CollateralActive") return <span className="text-emerald-600">Active</span>;
@@ -20,16 +38,170 @@ function statusLabel(status: string) {
   return <span className="text-red-600">Enforced</span>;
 }
 
+function PendingEnforcementCard({ pending }: { pending: PendingCollateralEnforcementItem }) {
+  const { data: officers } = useOfficers();
+  const [confirmedByOfficerId, setConfirmedByOfficerId] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const confirm = useConfirmEnforce();
+  const reject = useRejectEnforce();
+
+  const confirmers = (officers ?? []).filter((o) => o.active && o.roles.includes("RiskOfficer"));
+
+  const handleConfirm = async () => {
+    setError(null);
+    if (!confirmedByOfficerId) {
+      setError("Select a confirming RiskOfficer (must differ from the proposing RecoveryOfficer)");
+      return;
+    }
+    try {
+      await confirm.mutateAsync({ id: pending.id, confirmedByOfficerId });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to confirm enforcement");
+    }
+  };
+
+  const handleReject = async () => {
+    setError(null);
+    try {
+      await reject.mutateAsync({ id: pending.id });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to reject enforcement");
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+      <div className="flex items-center justify-between gap-4 mb-1">
+        <p className="text-sm font-semibold text-gray-900">{pending.businessName}</p>
+        <span className="text-xs text-amber-700 font-medium">Pending Confirmation</span>
+      </div>
+      <p className="text-xs text-gray-600 mb-1">{pending.reason}</p>
+      <p className="text-xs text-gray-500 mb-3">
+        Proposed by <span className="font-mono">{pending.proposedByOfficerId}</span>
+        {pending.gsmExhausted && <span> · GSM sweeps attempted{pending.gsmRef ? ` (${pending.gsmRef})` : ""}</span>}
+      </p>
+      <div className="flex gap-2 items-center">
+        <select className="input text-sm flex-1" value={confirmedByOfficerId} onChange={(e) => setConfirmedByOfficerId(e.target.value)}>
+          <option value="">Select a confirming RiskOfficer…</option>
+          {confirmers.map((o) => (
+            <option key={o.id} value={o.officer_id}>{o.officer_name} ({o.officer_id})</option>
+          ))}
+        </select>
+        <button onClick={handleConfirm} disabled={confirm.isPending} className="btn-danger text-xs px-3 py-1.5 disabled:opacity-40 flex-shrink-0">
+          {confirm.isPending ? "Confirming…" : "Confirm Enforcement"}
+        </button>
+        <button onClick={handleReject} disabled={reject.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 flex-shrink-0">
+          {reject.isPending ? "Rejecting…" : "Reject"}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
+// Phase 2, Thirty-Eighth Slice: RecordCovenantMeasurement is vetify's own
+// portfolio-monitoring job (controller vetify, not financialInstitution,
+// despite CreditCovenant itself being FI-created -- see Thirty-Third
+// Slice's own header note on why).
+
+function CovenantCard({ covenant }: { covenant: CreditCovenantItem }) {
+  const { data: records } = useCovenantMeasurementRecords();
+  const [measuredValue, setMeasuredValue] = useState<number | "">("");
+  const [measureDate, setMeasureDate] = useState(new Date().toISOString().slice(0, 10));
+  const [measuredBy, setMeasuredBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const recordMeasurement = useRecordCovenantMeasurement();
+
+  const covenantRecords = (records ?? []).filter((r) => r.creditCovenantId === covenant.id);
+
+  const handleSubmit = async () => {
+    setError(null);
+    if (measuredValue === "" || !measuredBy.trim()) {
+      setError("Measured value and measured-by are both required");
+      return;
+    }
+    try {
+      await recordMeasurement.mutateAsync({ id: covenant.id, measuredValue: Number(measuredValue), measureDate, measuredBy });
+      setMeasuredValue("");
+      setMeasuredBy("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record measurement");
+    }
+  };
+
+  return (
+    <div className="rounded-xl border border-gray-100 bg-surface p-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-gray-900">{covenant.businessName}</p>
+        <span className="text-xs text-gray-400 font-mono">Threshold: {covenant.threshold}</span>
+      </div>
+      <p className="text-xs text-gray-500 mb-3">{covenant.covenantType} · {covenant.measurementFrequency}</p>
+
+      {covenantRecords.length > 0 && (
+        <div className="space-y-1.5 mb-3">
+          {covenantRecords.map((r) => (
+            <div key={r.id} className="flex items-center justify-between gap-3 text-xs">
+              <span className="text-gray-600">{r.measuredBy} · {formatDate(r.measureDate)}</span>
+              <span className={`font-mono ${r.breached ? "text-red-600" : "text-emerald-600"}`}>
+                {r.measuredValue} {r.breached ? "(Breached)" : "(OK)"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex gap-2 items-center">
+        <input type="number" step="0.01" className="input text-xs flex-1" placeholder="Measured value" value={measuredValue} onChange={(e) => setMeasuredValue(e.target.value === "" ? "" : Number(e.target.value))} />
+        <input type="date" className="input text-xs" value={measureDate} onChange={(e) => setMeasureDate(e.target.value)} />
+        <input className="input text-xs flex-1" placeholder="Measured by" value={measuredBy} onChange={(e) => setMeasuredBy(e.target.value)} />
+        <button onClick={handleSubmit} disabled={recordMeasurement.isPending} className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 flex-shrink-0">
+          {recordMeasurement.isPending ? "Recording…" : "Record"}
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
 export default function VetifyCollateralPage() {
   const { data: rahnAgreements, isLoading, isError } = useRahnAgreements();
   const { data: valuationDocuments } = useCollateralValuationDocuments();
+  const { data: pendingEnforcements } = usePendingCollateralEnforcements();
+  const { data: creditCovenants } = useCreditCovenants();
 
   if (isLoading) return <Layout title="Collateral Oversight"><FullPageLoader /></Layout>;
   if (isError || !rahnAgreements) return <Layout title="Collateral Oversight"><ErrorState message="Failed to load collateral agreements" /></Layout>;
 
+  const pendingList = (pendingEnforcements ?? []).filter((p) => p.status === "Pending");
+
   return (
     <Layout title="Collateral Oversight">
       <div className="space-y-6">
+        {pendingList.length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+              <AlertTriangle size={13} className="text-amber-600" />
+              Pending Collateral Enforcements ({pendingList.length})
+            </h3>
+            <div className="space-y-2">
+              {pendingList.map((p) => (
+                <PendingEnforcementCard key={p.id} pending={p} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(creditCovenants ?? []).length > 0 && (
+          <div>
+            <h3 className="text-xs font-semibold text-gray-700 mb-2">Credit Covenants</h3>
+            <div className="space-y-2">
+              {(creditCovenants ?? []).map((c) => (
+                <CovenantCard key={c.id} covenant={c} />
+              ))}
+            </div>
+          </div>
+        )}
+
         {rahnAgreements.length === 0 ? (
           <div className="card p-8 text-center">
             <ShieldCheck size={24} className="text-gray-300 mx-auto mb-3" />

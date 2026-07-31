@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ChevronLeft, Building, User, FileSearch, ShieldAlert } from "lucide-react";
+import { ChevronLeft, Building, User, FileSearch, ShieldAlert, ShieldCheck } from "lucide-react";
 import Layout from "@/components/Layout";
 import StatusBadge from "@/components/StatusBadge";
 import { useAuth } from "@/lib/auth/AuthContext";
@@ -18,7 +18,11 @@ import {
   useOpenEddCase,
   useUpdateEddChecklist,
   useCloseEddCase,
+  useAdvisors,
+  useRecordShariahPreCheck,
+  useSupersedeShariahVerdict,
   type EddCaseEntry,
+  type ComplianceReviewItem,
 } from "@/lib/apiClient";
 import type { ComplianceCheck, RiskLevel } from "@/lib/apiClient";
 
@@ -222,6 +226,168 @@ function EddCaseSection({ reviewId, realRole }: { reviewId: string; realRole?: s
         <button onClick={handleClose} disabled={!allComplete || closeCase.isPending} className="btn-primary text-xs px-3 py-1.5 mt-3 w-full disabled:opacity-40">
           {closeCase.isPending ? "Closing…" : allComplete ? "Close EDD Case" : "Complete all fields to close"}
         </button>
+      )}
+      {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+    </div>
+  );
+}
+
+const VERDICT_LABEL: Record<string, string> = { COMPLIANT: "Compliant", REQUIRES_REVIEW: "Requires Review", NON_COMPLIANT: "Non-Compliant" };
+const VERDICT_COLOR: Record<string, string> = {
+  COMPLIANT: "text-emerald-600 bg-emerald-50",
+  REQUIRES_REVIEW: "text-amber-600 bg-amber-50",
+  NON_COMPLIANT: "text-red-600 bg-red-50",
+};
+
+// Phase 2, Forty-Second Slice: RecordShariahPreCheck (dual-controller
+// advisor/vetify -- either role may record the standalone Shariah Agent's,
+// or a human advisor's, verdict) and SupersedeShariahVerdict (vetify alone --
+// Option A, mirrors ApproveCompliance/RejectCompliance's own Supersede
+// precedent: advisor cannot unilaterally correct its own past call). Not
+// present until now -- the page's own header comment named this as
+// deliberately dropped "no backend support" for the original Phase 1 slice.
+function ShariahVerdictSection({ review, realRole }: { review: ComplianceReviewItem; realRole?: string }) {
+  const { data: advisors } = useAdvisors();
+  const recordPreCheck = useRecordShariahPreCheck();
+  const supersede = useSupersedeShariahVerdict();
+  const [showForm, setShowForm] = useState(false);
+  const [verdict, setVerdict] = useState<"COMPLIANT" | "REQUIRES_REVIEW" | "NON_COMPLIANT">("COMPLIANT");
+  const [activitiesScreened, setActivitiesScreened] = useState("");
+  const [aaoifiStandards, setAaoifiStandards] = useState("Std No. 28");
+  const [rationale, setRationale] = useState("");
+  const [advisorId, setAdvisorId] = useState<number | "">("");
+  const [correctionRef, setCorrectionRef] = useState(`SHR-CORR-${Date.now()}`);
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [correctedBy, setCorrectedBy] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const activeAdvisors = (advisors ?? []).filter((a) => a.active);
+  const canRecord = realRole === "advisor" || realRole === "vetify";
+
+  const buildVerdict = () => ({
+    verdict,
+    activitiesScreened: activitiesScreened.split(",").map((s) => s.trim()).filter(Boolean),
+    aaoifiStandards: aaoifiStandards.split(",").map((s) => s.trim()).filter(Boolean),
+    rationale,
+  });
+
+  const handleRecord = async () => {
+    setError(null);
+    if (!rationale.trim()) {
+      setError("Please provide a rationale");
+      return;
+    }
+    if (!advisorId) {
+      setError("Please select the advisor recording this verdict");
+      return;
+    }
+    try {
+      await recordPreCheck.mutateAsync({ id: review.id, verdict: buildVerdict(), advisorId: Number(advisorId) });
+      setShowForm(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to record the Shariah pre-check");
+    }
+  };
+
+  const handleSupersede = async () => {
+    setError(null);
+    if (!correctionRef.trim() || !correctionReason.trim() || !correctedBy.trim()) {
+      setError("Correction reference, reason, and corrected-by are all required");
+      return;
+    }
+    if (!rationale.trim()) {
+      setError("Please provide a rationale for the new verdict");
+      return;
+    }
+    try {
+      await supersede.mutateAsync({ id: review.id, correctionRef, newVerdict: buildVerdict(), reason: correctionReason, correctedBy });
+      setShowForm(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to supersede the Shariah verdict");
+    }
+  };
+
+  if (!review.shariahVerdict) {
+    if (!canRecord) return null;
+    return (
+      <div className="card p-5">
+        <div className="flex items-center gap-2 mb-2">
+          <ShieldCheck size={15} className="text-primary" />
+          <h2 className="text-sm font-semibold text-gray-700">Shariah Pre-Check</h2>
+        </div>
+        <p className="text-xs text-gray-500 mb-3">
+          The standalone Shariah pre-check verdict — gates <code className="font-mono">RejectCompliance</code> on a hard
+          <code className="font-mono"> NON_COMPLIANT</code> hit before any AML/KYB work runs.
+        </p>
+        {!showForm ? (
+          <button onClick={() => setShowForm(true)} className="btn-secondary text-xs px-3 py-1.5">Record Verdict</button>
+        ) : (
+          <div className="space-y-2">
+            <select className="input text-xs" value={verdict} onChange={(e) => setVerdict(e.target.value as typeof verdict)}>
+              <option value="COMPLIANT">Compliant</option>
+              <option value="REQUIRES_REVIEW">Requires Review</option>
+              <option value="NON_COMPLIANT">Non-Compliant</option>
+            </select>
+            <input className="input text-xs" placeholder="Activities screened (comma-separated)" value={activitiesScreened} onChange={(e) => setActivitiesScreened(e.target.value)} />
+            <input className="input text-xs" placeholder="AAOIFI standards (comma-separated)" value={aaoifiStandards} onChange={(e) => setAaoifiStandards(e.target.value)} />
+            <textarea rows={2} className="input resize-none text-xs" placeholder="Rationale" value={rationale} onChange={(e) => setRationale(e.target.value)} />
+            <select className="input text-xs" value={advisorId} onChange={(e) => setAdvisorId(e.target.value ? Number(e.target.value) : "")}>
+              <option value="">Select advisor…</option>
+              {activeAdvisors.map((a) => (
+                <option key={a.id} value={a.id}>{a.advisor}</option>
+              ))}
+            </select>
+            <div className="flex gap-2">
+              <button onClick={() => setShowForm(false)} className="btn-secondary text-xs px-3 py-1.5 flex-1">Cancel</button>
+              <button onClick={handleRecord} disabled={recordPreCheck.isPending} className="btn-primary text-xs px-3 py-1.5 flex-1 disabled:opacity-50">
+                {recordPreCheck.isPending ? "Recording…" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        )}
+        {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <ShieldCheck size={15} className="text-primary" />
+          <h2 className="text-sm font-semibold text-gray-700">Shariah Pre-Check</h2>
+        </div>
+        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${VERDICT_COLOR[review.shariahVerdict]}`}>
+          {VERDICT_LABEL[review.shariahVerdict]}
+        </span>
+      </div>
+      {review.shariahRationale && <p className="text-xs text-gray-500 mb-3">{review.shariahRationale}</p>}
+
+      {realRole === "vetify" && (
+        !showForm ? (
+          <button onClick={() => setShowForm(true)} className="btn-secondary text-xs px-3 py-1.5">Supersede Verdict</button>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-amber-600">Post-hoc audit correction — advisor cannot correct its own past call.</p>
+            <select className="input text-xs" value={verdict} onChange={(e) => setVerdict(e.target.value as typeof verdict)}>
+              <option value="COMPLIANT">Compliant</option>
+              <option value="REQUIRES_REVIEW">Requires Review</option>
+              <option value="NON_COMPLIANT">Non-Compliant</option>
+            </select>
+            <input className="input text-xs" placeholder="Activities screened (comma-separated)" value={activitiesScreened} onChange={(e) => setActivitiesScreened(e.target.value)} />
+            <input className="input text-xs" placeholder="AAOIFI standards (comma-separated)" value={aaoifiStandards} onChange={(e) => setAaoifiStandards(e.target.value)} />
+            <textarea rows={2} className="input resize-none text-xs" placeholder="Rationale for new verdict" value={rationale} onChange={(e) => setRationale(e.target.value)} />
+            <input className="input text-xs font-mono" placeholder="Correction reference" value={correctionRef} onChange={(e) => setCorrectionRef(e.target.value)} />
+            <textarea rows={2} className="input resize-none text-xs" placeholder="Reason for correction" value={correctionReason} onChange={(e) => setCorrectionReason(e.target.value)} />
+            <input className="input text-xs" placeholder="Corrected by" value={correctedBy} onChange={(e) => setCorrectedBy(e.target.value)} />
+            <div className="flex gap-2">
+              <button onClick={() => setShowForm(false)} className="btn-secondary text-xs px-3 py-1.5 flex-1">Cancel</button>
+              <button onClick={handleSupersede} disabled={supersede.isPending} className="btn-danger text-xs px-3 py-1.5 flex-1 disabled:opacity-50">
+                {supersede.isPending ? "Submitting…" : "Confirm Correction"}
+              </button>
+            </div>
+          </div>
+        )
       )}
       {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
     </div>
@@ -447,6 +613,8 @@ export default function ComplianceReviewDetail() {
                 </div>
               </div>
             </div>
+
+            <ShariahVerdictSection review={review} realRole={user?.realRole} />
 
             <EddCaseSection reviewId={review.id} realRole={user?.realRole} />
           </div>

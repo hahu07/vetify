@@ -53,6 +53,9 @@ export function serializeComplianceReview(row: Record<string, unknown>) {
     checks: row.checks ?? undefined,
     agentScore: row.agent_score ?? undefined,
     agentRisk: row.agent_risk ?? undefined,
+    shariahVerdict: row.shariah_verdict ?? undefined,
+    shariahRationale: row.shariah_rationale ?? undefined,
+    shariahScreenedAt: row.shariah_screened_at ?? undefined,
   };
 }
 

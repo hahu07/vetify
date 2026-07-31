@@ -298,7 +298,9 @@ export const declineAgency = withAuthorization(["business"], declineAgencyImpl);
 
 export async function listMurabahahWakalas(session: SessionContext) {
   return withTransaction(session, async (client) => {
-    const { rows } = await client.query(`SELECT * FROM murabahah_wakala ORDER BY created_at DESC`);
+    const { rows } = await client.query(
+      `SELECT * FROM murabahah_wakala WHERE archived_at IS NULL ORDER BY created_at DESC`,
+    );
     return rows;
   });
 }
