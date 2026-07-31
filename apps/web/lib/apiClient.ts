@@ -3444,3 +3444,323 @@ export function useSupersedeShariahVerdict() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["compliance-queue"] }),
   });
 }
+
+// ─── Phase 2, Forty-Third Slice: Governance/Compliance/Reporting audit records ──
+// AuditEvent (read-only), ForceMajeureDeclaration+LiftDeclaration,
+// MurabahahStatement, PortfolioRiskReport, SarReport, MonitoringAlert+
+// DismissAlert, and the RegulatoryInspectionRequest/InspectionResponse/
+// InspectionRecord workflow -- all vetify-only to create except
+// RespondToInspection (financialInstitution). Closes the final frontend UI
+// gap batch.
+
+export interface AuditEventItem {
+  id: string;
+  murabahahContractId: string;
+  cacRegNumber: string;
+  businessName: string;
+  eventType: string;
+  description: string;
+  actedBy: string;
+  occurredAt: string;
+}
+
+export interface ForceMajeureDeclarationItem {
+  id: string;
+  declarationRef: string;
+  eventDescription: string;
+  affectedRegion: string;
+  suspensionStart: string;
+  suspensionEnd: string;
+  regulatoryBasis: string;
+  isActive: boolean;
+}
+
+export interface MurabahahStatementItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  statementDate: string;
+  statementPeriod: string;
+  totalFinanced: number;
+  totalRepaid: number;
+  outstandingBalance: number;
+  installmentsPaid: number;
+  totalInstallments: number;
+  contractStatus: string;
+  shariahAuditRef?: string | null;
+}
+
+export interface PortfolioRiskMetrics {
+  probabilityOfDefault: number;
+  lossGivenDefault: number;
+  expectedLoss: number;
+  exposureAtDefault: number;
+  concentrationRisk: number;
+  sectorConcentration: string;
+  delinquencyRate: number;
+  activeContractCount: number;
+}
+
+export interface PortfolioRiskReportItem {
+  id: string;
+  reportDate: string;
+  reportPeriod: string;
+  metrics: PortfolioRiskMetrics;
+  generatedByAgent: string;
+  modelVersion: string;
+}
+
+export interface SarReportItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  sarRef: string;
+  suspiciousActivity: string;
+  reportDate: string;
+  reportedByParty: string;
+  confidential: boolean;
+}
+
+export interface MonitoringAlertItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  facilityRef?: string | null;
+  alertType: string;
+  alertSeverity: string;
+  alertDescription: string;
+  detectedAt: string;
+  dismissed: boolean;
+  dismissalNote?: string | null;
+}
+
+export interface RegulatoryInspectionRequestItem {
+  id: string;
+  cacRegNumber: string;
+  businessName: string;
+  inspectionRef: string;
+  inspectionScope: string;
+  responseDeadline: string;
+  requestedAt: string;
+  archivedAt?: string | null;
+  supersededByKind?: string | null;
+}
+
+export interface InspectionResponseItem {
+  id: string;
+  regulatoryInspectionRequestId: string;
+  cacRegNumber: string;
+  businessName: string;
+  inspectionRef: string;
+  responseRef: string;
+  documents: unknown[];
+  respondedByName: string;
+  responseDate: string;
+  archivedAt?: string | null;
+  supersededByKind?: string | null;
+}
+
+export interface InspectionRecordItem {
+  id: string;
+  inspectionResponseId: string;
+  cacRegNumber: string;
+  businessName: string;
+  inspectionRef: string;
+  findings: string[];
+  passed: boolean;
+  followUpNeeded: boolean;
+  closingNote: string;
+}
+
+// ── AuditEvent (read-only) ──
+
+export function useAuditEvents() {
+  return useQuery({
+    queryKey: ["audit-events"],
+    queryFn: async () => (await apiClient.get<AuditEventItem[]>("/audit-events")).data,
+  });
+}
+
+// ── ForceMajeureDeclaration ──
+
+export function useForceMajeureDeclarations() {
+  return useQuery({
+    queryKey: ["force-majeure-declarations"],
+    queryFn: async () => (await apiClient.get<ForceMajeureDeclarationItem[]>("/force-majeure-declarations")).data,
+  });
+}
+
+export function useCreateForceMajeureDeclaration() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      declarationRef: string; eventDescription: string; affectedRegion: string;
+      suspensionStart: string; suspensionEnd: string; regulatoryBasis: string;
+    }) => apiClient.post("/force-majeure-declarations", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["force-majeure-declarations"] }),
+  });
+}
+
+export function useLiftDeclaration() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, note }: { id: string; note: string }) =>
+      apiClient.post(`/force-majeure-declarations/${id}/lift`, { note }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["force-majeure-declarations"] }),
+  });
+}
+
+// ── MurabahahStatement ──
+
+export function useMurabahahStatements() {
+  return useQuery({
+    queryKey: ["murabahah-statements"],
+    queryFn: async () => (await apiClient.get<MurabahahStatementItem[]>("/murabahah-statements")).data,
+  });
+}
+
+export function useCreateMurabahahStatement() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; statementDate: string; statementPeriod: string;
+      totalFinanced: number; totalRepaid: number; outstandingBalance: number;
+      installmentsPaid: number; totalInstallments: number; contractStatus: string; shariahAuditRef?: string | null;
+    }) => apiClient.post("/murabahah-statements", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["murabahah-statements"] }),
+  });
+}
+
+// ── PortfolioRiskReport ──
+
+export function usePortfolioRiskReports() {
+  return useQuery({
+    queryKey: ["portfolio-risk-reports"],
+    queryFn: async () => (await apiClient.get<PortfolioRiskReportItem[]>("/portfolio-risk-reports")).data,
+  });
+}
+
+export function useCreatePortfolioRiskReport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { reportDate: string; reportPeriod: string; metrics: PortfolioRiskMetrics; generatedByAgent: string; modelVersion: string }) =>
+      apiClient.post("/portfolio-risk-reports", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio-risk-reports"] }),
+  });
+}
+
+// ── SarReport ──
+
+export function useSarReports() {
+  return useQuery({
+    queryKey: ["sar-reports"],
+    queryFn: async () => (await apiClient.get<SarReportItem[]>("/sar-reports")).data,
+  });
+}
+
+export function useCreateSarReport() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: {
+      cacRegNumber: string; businessName: string; sarRef: string; suspiciousActivity: string;
+      reportDate: string; reportedByParty: string; confidential?: boolean;
+    }) => apiClient.post("/sar-reports", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sar-reports"] }),
+  });
+}
+
+// ── MonitoringAlert ──
+
+export function useMonitoringAlerts() {
+  return useQuery({
+    queryKey: ["monitoring-alerts"],
+    queryFn: async () => (await apiClient.get<MonitoringAlertItem[]>("/monitoring-alerts")).data,
+  });
+}
+
+export function useCreateMonitoringAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { cacRegNumber: string; businessName: string; facilityRef?: string | null; alertType: string; alertSeverity: string; alertDescription: string }) =>
+      apiClient.post("/monitoring-alerts", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["monitoring-alerts"] }),
+  });
+}
+
+export function useDismissAlert() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, dismissNote }: { id: string; dismissNote: string }) =>
+      apiClient.post(`/monitoring-alerts/${id}/dismiss`, { dismissNote }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["monitoring-alerts"] }),
+  });
+}
+
+// ── RegulatoryInspectionRequest / InspectionResponse / InspectionRecord ──
+
+export function useRegulatoryInspectionRequests() {
+  return useQuery({
+    queryKey: ["regulatory-inspection-requests"],
+    queryFn: async () => (await apiClient.get<RegulatoryInspectionRequestItem[]>("/regulatory-inspection-requests")).data,
+  });
+}
+
+export function useCreateRegulatoryInspectionRequest() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { cacRegNumber: string; businessName: string; inspectionRef: string; inspectionScope: string; responseDeadline: string }) =>
+      apiClient.post("/regulatory-inspection-requests", args).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["regulatory-inspection-requests"] }),
+  });
+}
+
+export function useExtendDeadline() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, newDeadline }: { id: string; newDeadline: string }) =>
+      apiClient.post(`/regulatory-inspection-requests/${id}/extend-deadline`, { newDeadline }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["regulatory-inspection-requests"] }),
+  });
+}
+
+export function useRespondToInspection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, responseRef, documents, respondedByName, responseDate,
+    }: { id: string; responseRef: string; documents?: unknown[]; respondedByName: string; responseDate: string }) =>
+      apiClient.post(`/regulatory-inspection-requests/${id}/respond`, { responseRef, documents, respondedByName, responseDate }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["regulatory-inspection-requests"] });
+      qc.invalidateQueries({ queryKey: ["inspection-responses"] });
+    },
+  });
+}
+
+export function useInspectionResponses() {
+  return useQuery({
+    queryKey: ["inspection-responses"],
+    queryFn: async () => (await apiClient.get<InspectionResponseItem[]>("/inspection-responses")).data,
+  });
+}
+
+export function useCloseInspection() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id, findings, passed, followUpNeeded, closingNote,
+    }: { id: string; findings: string[]; passed: boolean; followUpNeeded: boolean; closingNote: string }) =>
+      apiClient.post(`/inspection-responses/${id}/close`, { findings, passed, followUpNeeded, closingNote }).then((r) => r.data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["inspection-responses"] });
+      qc.invalidateQueries({ queryKey: ["inspection-records"] });
+    },
+  });
+}
+
+export function useInspectionRecords() {
+  return useQuery({
+    queryKey: ["inspection-records"],
+    queryFn: async () => (await apiClient.get<InspectionRecordItem[]>("/inspection-records")).data,
+  });
+}
